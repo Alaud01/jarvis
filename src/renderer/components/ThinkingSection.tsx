@@ -1,12 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
 
 interface ThinkingSectionProps {
   content: string;
+  isStreaming?: boolean;
 }
 
-const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content }) => {
+const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content, isStreaming = false }) => {
   const [isExpanded, setIsExpanded] = useState(true);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isStreaming && content) {
+      setIsExpanded(false);
+    }
+  }, [isStreaming, content]);
+
+  useEffect(() => {
+    if (isStreaming && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, [content, isStreaming]);
 
   return (
     <div className="my-4 border border-border-secondary rounded bg-bg-secondary">
@@ -27,7 +41,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content }) => {
             <polyline points="9 18 15 12 9 6" />
           </svg>
           <span className="font-mono text-[0.7rem] uppercase tracking-widest text-text-tertiary">
-            Thinking...
+            {isStreaming ? 'Thinking...' : 'Thought process'}
           </span>
         </div>
         <span className="font-mono text-[0.65rem] text-text-muted">
@@ -37,7 +51,10 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content }) => {
       
       {isExpanded && (
         <div className="px-4 pb-4 pt-2 border-t border-border-secondary">
-          <div className="italic text-text-tertiary">
+          <div 
+            ref={contentRef}
+            className={`italic text-text-tertiary overflow-y-auto ${isStreaming ? 'max-h-[300px]' : ''}`}
+          >
             <MarkdownRenderer content={content} />
           </div>
         </div>

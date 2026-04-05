@@ -70,18 +70,14 @@ const App: React.FC = () => {
     const handleChunk = (chunk: string) => {
       if (streamingMessageIdRef.current) {
         setConversations(prev =>
-          prev.map(c =>
-            c.id === currentConversationId
-              ? {
-                  ...c,
-                  messages: c.messages.map(m =>
-                    m.id === streamingMessageIdRef.current
-                      ? { ...m, text: m.text + chunk }
-                      : m
-                  ),
-                }
-              : c
-          )
+          prev.map(c => ({
+            ...c,
+            messages: c.messages.map(m =>
+              m.id === streamingMessageIdRef.current
+                ? { ...m, text: m.text + chunk }
+                : m
+            ),
+          }))
         );
       }
     };
@@ -89,18 +85,14 @@ const App: React.FC = () => {
     const handleDone = () => {
       if (streamingMessageIdRef.current) {
         setConversations(prev =>
-          prev.map(c =>
-            c.id === currentConversationId
-              ? {
-                  ...c,
-                  messages: c.messages.map(m =>
-                    m.id === streamingMessageIdRef.current
-                      ? { ...m, isStreaming: false }
-                      : m
-                  ),
-                }
-              : c
-          )
+          prev.map(c => ({
+            ...c,
+            messages: c.messages.map(m =>
+              m.id === streamingMessageIdRef.current
+                ? { ...m, isStreaming: false }
+                : m
+            ),
+          }))
         );
         streamingMessageIdRef.current = null;
         setIsLoading(false);
@@ -111,22 +103,18 @@ const App: React.FC = () => {
       console.error('Streaming error:', error);
       if (streamingMessageIdRef.current) {
         setConversations(prev =>
-          prev.map(c =>
-            c.id === currentConversationId
-              ? {
-                  ...c,
-                  messages: c.messages.map(m =>
-                    m.id === streamingMessageIdRef.current
-                      ? {
-                          ...m,
-                          text: `Error: ${error}. Make sure Ollama is running.`,
-                          isStreaming: false,
-                        }
-                      : m
-                  ),
-                }
-              : c
-          )
+          prev.map(c => ({
+            ...c,
+            messages: c.messages.map(m =>
+              m.id === streamingMessageIdRef.current
+                ? {
+                    ...m,
+                    text: `Error: ${error}. Make sure Ollama is running.`,
+                    isStreaming: false,
+                  }
+                : m
+            ),
+          }))
         );
         streamingMessageIdRef.current = null;
         setIsLoading(false);
@@ -142,7 +130,7 @@ const App: React.FC = () => {
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
     };
-  }, [currentConversationId]);
+  }, []);
 
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages || [];

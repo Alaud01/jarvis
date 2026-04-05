@@ -24,7 +24,8 @@ interface OllamaChatResponse {
 
 interface OllamaStreamResponse {
   message?: {
-    content: string;
+    content?: string;
+    thinking?: string;
   };
   done?: boolean;
 }
@@ -69,10 +70,15 @@ async function sendToOllama(model: string, messages: { role: string; content: st
   }
 }
 
+interface StreamChunk {
+  type: 'thinking' | 'content';
+  content: string;
+}
+
 async function* streamFromOllama(
   model: string,
   messages: { role: string; content: string }[]
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamChunk> {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
       method: 'POST',
@@ -83,6 +89,7 @@ async function* streamFromOllama(
         model,
         messages,
         stream: true,
+        think: true,
       }),
     });
 
@@ -111,8 +118,11 @@ async function* streamFromOllama(
         if (line.trim()) {
           try {
             const data = JSON.parse(line) as OllamaStreamResponse;
+            if (data.message?.thinking) {
+              yield { type: 'thinking', content: data.message.thinking };
+            }
             if (data.message?.content) {
-              yield data.message.content;
+              yield { type: 'content', content: data.message.content };
             }
           } catch (e) {
             console.error('Error parsing stream line:', e);
@@ -124,8 +134,11 @@ async function* streamFromOllama(
     if (buffer.trim()) {
       try {
         const data = JSON.parse(buffer) as OllamaStreamResponse;
+        if (data.message?.thinking) {
+          yield { type: 'thinking', content: data.message.thinking };
+        }
         if (data.message?.content) {
-          yield data.message.content;
+          yield { type: 'content', content: data.message.content };
         }
       } catch (e) {
         console.error('Error parsing final stream line:', e);
@@ -200,8 +213,21 @@ ipcMain.handle('send-message', async (_event, model: string, messages: { role: s
 
 ipcMain.handle('send-message-stream', async (event, model: string, messages: { role: string; content: string }[]) => {
   try {
+    let inThinking = false;
     for await (const chunk of streamFromOllama(model, messages)) {
-      event.sender.send('ollama-chunk', chunk);
+      if (chunk.type === 'thinking') {
+        if (!inThinking) {
+          event.sender.send('ollama-chunk', 'Thinking...\n');
+          inThinking = true;
+        }
+        event.sender.send('ollama-chunk', chunk.content);
+      } else if (chunk.type === 'content') {
+        if (inThinking) {
+          event.sender.send('ollama-chunk', '\n...done thinking.\n');
+          inThinking = false;
+        }
+        event.sender.send('ollama-chunk', chunk.content);
+      }
     }
     event.sender.send('ollama-done');
     return { success: true };

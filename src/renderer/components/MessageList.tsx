@@ -16,16 +16,36 @@ interface MessageListProps {
   isLoading?: boolean;
 }
 
-const parseThinkingTokens = (text: string): { thinking: string | null; content: string } => {
-  const thinkingMatch = text.match(/(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/);
-  
-  if (thinkingMatch) {
-    const thinking = thinkingMatch[1].trim();
-    const content = text.replace(thinkingMatch[0], '').trim();
-    return { thinking, content };
+const parseThinkingTokens = (text: string, isStreaming?: boolean): { thinking: string | null; content: string; isThinkingInProgress: boolean } => {
+  const xmlThinkingMatch = text.match(/(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/);
+
+  if (xmlThinkingMatch) {
+    const thinking = xmlThinkingMatch[1].trim();
+    const content = text.replace(xmlThinkingMatch[0], '').trim();
+    return { thinking, content, isThinkingInProgress: false };
   }
-  
-  return { thinking: null, content: text };
+
+  const ollamaStartPattern = /^Thinking\.\.\.\n/;
+  const ollamaEndPattern = /\n\.\.\.done thinking\./;
+
+  if (ollamaStartPattern.test(text)) {
+    const endMatch = text.match(ollamaEndPattern);
+
+    if (endMatch) {
+      const afterStart = text.replace(ollamaStartPattern, '');
+      const endIndex = afterStart.indexOf(endMatch[0]);
+      const thinking = afterStart.slice(0, endIndex).trim();
+      const content = afterStart.slice(endIndex + endMatch[0].length).trim();
+      return { thinking, content, isThinkingInProgress: false };
+    }
+
+    if (isStreaming) {
+      const thinking = text.replace(ollamaStartPattern, '').trim();
+      return { thinking, content: '', isThinkingInProgress: true };
+    }
+  }
+
+  return { thinking: null, content: text, isThinkingInProgress: false };
 };
 
 const MessageList: React.FC<MessageListProps> = ({ messages, isLoading = false }) => {
@@ -110,7 +130,7 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isLoading = false }
     <div ref={scrollContainerRef} className="flex-1 overflow-y-auto py-8">
       <div className="max-w-[800px] mx-auto px-6">
         {messages.map((message) => {
-          const { thinking, content } = parseThinkingTokens(message.text);
+          const { thinking, content, isThinkingInProgress } = parseThinkingTokens(message.text, message.isStreaming);
           
           return (
             <div key={message.id} className="py-8 border-b border-border-primary flex flex-col gap-2 last:border-b-0">
@@ -128,7 +148,12 @@ const MessageList: React.FC<MessageListProps> = ({ messages, isLoading = false }
                 )}
               </div>
               
-              {thinking && <ThinkingSection content={thinking} />}
+              {thinking && (
+                <ThinkingSection 
+                  content={thinking} 
+                  isStreaming={isThinkingInProgress} 
+                />
+              )}
               
               <div className="text-base text-text-primary leading-[1.8]">
                 <MarkdownRenderer content={content} />
