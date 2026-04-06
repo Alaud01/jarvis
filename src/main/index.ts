@@ -3,6 +3,7 @@ import * as path from 'path';
 
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
+let currentAbortController: AbortController | null = null;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
@@ -77,7 +78,8 @@ interface StreamChunk {
 
 async function* streamFromOllama(
   model: string,
-  messages: { role: string; content: string }[]
+  messages: { role: string; content: string }[],
+  abortController: AbortController
 ): AsyncGenerator<StreamChunk> {
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
@@ -91,6 +93,7 @@ async function* streamFromOllama(
         stream: true,
         think: true,
       }),
+      signal: abortController.signal,
     });
 
     if (!response.ok) {
@@ -106,7 +109,26 @@ async function* streamFromOllama(
     let buffer = '';
 
     while (true) {
-      const { done, value } = await reader.read();
+      if (abortController.signal.aborted) {
+        reader.cancel();
+        throw new DOMException('Aborted', 'AbortError');
+      }
+
+      const readPromise = reader.read();
+      const abortPromise = new Promise<never>((_, reject) => {
+        const checkAbort = () => {
+          if (abortController.signal.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'));
+          }
+        };
+        abortController.signal.addEventListener('abort', checkAbort);
+        setTimeout(() => {
+          abortController.signal.removeEventListener('abort', checkAbort);
+          checkAbort();
+        }, 50);
+      });
+
+      const { done, value } = await Promise.race([readPromise, abortPromise]);
       
       if (done) break;
 
@@ -124,6 +146,9 @@ async function* streamFromOllama(
             if (data.message?.content) {
               yield { type: 'content', content: data.message.content };
             }
+            if (data.done === true) {
+              return;
+            }
           } catch (e) {
             console.error('Error parsing stream line:', e);
           }
@@ -140,10 +165,15 @@ async function* streamFromOllama(
         if (data.message?.content) {
           yield { type: 'content', content: data.message.content };
         }
+        if (data.done === true) {
+          return;
+        }
       } catch (e) {
         console.error('Error parsing final stream line:', e);
       }
     }
+
+    return;
   } catch (error) {
     console.error('Error streaming from Ollama:', error);
     throw error;
@@ -213,8 +243,9 @@ ipcMain.handle('send-message', async (_event, model: string, messages: { role: s
 
 ipcMain.handle('send-message-stream', async (event, model: string, messages: { role: string; content: string }[]) => {
   try {
+    currentAbortController = new AbortController();
     let inThinking = false;
-    for await (const chunk of streamFromOllama(model, messages)) {
+    for await (const chunk of streamFromOllama(model, messages, currentAbortController)) {
       if (chunk.type === 'thinking') {
         if (!inThinking) {
           event.sender.send('ollama-chunk', 'Thinking...\n');
@@ -232,10 +263,23 @@ ipcMain.handle('send-message-stream', async (event, model: string, messages: { r
     event.sender.send('ollama-done');
     return { success: true };
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      event.sender.send('ollama-done');
+      return { success: true, aborted: true };
+    }
     const errorMessage = error instanceof Error ? error.message : 'Unknown error during streaming';
     event.sender.send('ollama-error', errorMessage);
     throw error;
+  } finally {
+    currentAbortController = null;
   }
+});
+
+ipcMain.handle('stop-stream', async () => {
+  if (currentAbortController) {
+    currentAbortController.abort();
+  }
+  return { success: true };
 });
 
 app.whenReady().then(() => {

@@ -1,9 +1,12 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatHeader from './components/ChatHeader';
-import MessageList from './components/MessageList';
+import MessageList, { MessageListHandle } from './components/MessageList';
 import InputArea from './components/InputArea';
 import TopNavbar from './components/TopNavbar';
+import CopyNotification from './components/CopyNotification';
+import MessageTrail from './components/MessageTrail';
+import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
 
 declare global {
@@ -12,6 +15,7 @@ declare global {
       getModels: () => Promise<string[]>;
       sendMessage: (model: string, messages: { role: string; content: string }[]) => Promise<string>;
       sendMessageStream: (model: string, messages: { role: string; content: string }[]) => Promise<{ success: boolean }>;
+      stopStream: () => Promise<{ success: boolean }>;
       onChunk: (callback: (chunk: string) => void) => () => void;
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
@@ -34,6 +38,10 @@ interface Conversation {
   messages: Message[];
 }
 
+const generateId = (): string => {
+  return crypto.randomUUID();
+};
+
 const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -46,6 +54,8 @@ const App: React.FC = () => {
   
   const streamingMessageIdRef = useRef<string | null>(null);
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
+  const messageListRef = useRef<MessageListHandle>(null);
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
   useEffect(() => {
     const loadModels = async () => {
@@ -83,20 +93,18 @@ const App: React.FC = () => {
     };
 
     const handleDone = () => {
-      if (streamingMessageIdRef.current) {
-        setConversations(prev =>
-          prev.map(c => ({
-            ...c,
-            messages: c.messages.map(m =>
-              m.id === streamingMessageIdRef.current
-                ? { ...m, isStreaming: false }
-                : m
-            ),
-          }))
-        );
-        streamingMessageIdRef.current = null;
-        setIsLoading(false);
-      }
+      setConversations(prev =>
+        prev.map(c => ({
+          ...c,
+          messages: c.messages.map(m =>
+            m.isStreaming
+              ? { ...m, isStreaming: false }
+              : m
+          ),
+        }))
+      );
+      streamingMessageIdRef.current = null;
+      setIsLoading(false);
     };
 
     const handleError = (error: string) => {
@@ -135,6 +143,17 @@ const App: React.FC = () => {
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages || [];
 
+  useEffect(() => {
+    const checkScrollButton = () => {
+      const isStreaming = messages.some(m => m.isStreaming);
+      const autoScrollEnabled = messageListRef.current?.isAutoScrollEnabled() ?? true;
+      setShowScrollButton(isStreaming && !autoScrollEnabled);
+    };
+
+    const intervalId = setInterval(checkScrollButton, 100);
+    return () => clearInterval(intervalId);
+  }, [messages]);
+
   const generateTitle = (text: string): string => {
     const words = text.split(' ').slice(0, 5);
     return words.join(' ') + (words.length < text.split(' ').length ? '...' : '');
@@ -154,6 +173,28 @@ const App: React.FC = () => {
     });
   }, []);
 
+  const handleDeleteConversation = useCallback((id: string) => {
+    if (!window.confirm('Delete this conversation?')) return;
+    
+    setConversations(prev => prev.filter(c => c.id !== id));
+    setOpenTabIds(prev => prev.filter(tabId => tabId !== id));
+    
+    if (currentConversationId === id) {
+      const remainingConversations = conversations.filter(c => c.id !== id);
+      if (remainingConversations.length > 0) {
+        setCurrentConversationId(remainingConversations[0].id);
+        setOpenTabIds(prev => {
+          if (!prev.includes(remainingConversations[0].id)) {
+            return [remainingConversations[0].id];
+          }
+          return prev.filter(tabId => tabId !== id);
+        });
+      } else {
+        setCurrentConversationId(null);
+      }
+    }
+  }, [currentConversationId, conversations]);
+
   const handleTabClose = useCallback((id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     setOpenTabIds(prev => {
@@ -171,6 +212,36 @@ const App: React.FC = () => {
 
   const handleModelSelect = useCallback((model: string) => {
     setSelectedModel(model);
+  }, []);
+
+  const handleStopStreaming = useCallback(async () => {
+    await window.assistant.stopStream();
+    
+    if (streamingMessageIdRef.current) {
+      setConversations(prev =>
+        prev.map(c => ({
+          ...c,
+          messages: c.messages.map(m =>
+            m.id === streamingMessageIdRef.current
+              ? { ...m, isStreaming: false }
+              : m
+          ),
+        }))
+      );
+      streamingMessageIdRef.current = null;
+    }
+    
+    setIsLoading(false);
+  }, []);
+
+  const handleScrollToMessage = useCallback((messageId: string) => {
+    messageListRef.current?.scrollToMessage(messageId);
+  }, []);
+
+  const handleScrollToBottom = useCallback(() => {
+    messageListRef.current?.enableAutoScroll();
+    messageListRef.current?.scrollToBottom();
+    setShowScrollButton(false);
   }, []);
 
   const handleSendMessage = useCallback(async (text: string) => {
@@ -198,7 +269,7 @@ const App: React.FC = () => {
     }
 
     const userMessage: Message = {
-      id: `${conversationId}-${Date.now()}`,
+      id: crypto.randomUUID(),
       text,
       sender: 'user',
       timestamp: new Date(),
@@ -214,7 +285,7 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     
-    const assistantMessageId = `${conversationId}-${Date.now() + 1}`;
+    const assistantMessageId = crypto.randomUUID();
     const assistantMessage: Message = {
       id: assistantMessageId,
       text: '',
@@ -278,6 +349,7 @@ const App: React.FC = () => {
 
   return (
     <ThemeProvider>
+      <CopyNotification />
       <div className="flex flex-col h-[100vh] w-[100vw] bg-bg-primary">
         <TopNavbar 
           tabs={openTabs}
@@ -297,6 +369,7 @@ const App: React.FC = () => {
             }))}
             currentConversationId={currentConversationId}
             onConversationSelect={handleConversationSelect}
+            onConversationDelete={handleDeleteConversation}
             onNewChat={handleNewChat}
           />
           
@@ -310,10 +383,19 @@ const App: React.FC = () => {
               isLoadingModels={isLoadingModels}
             />
             
-            <MessageList messages={messages} isLoading={isLoading} />
+            <div className="flex flex-1 min-h-0 relative">
+              <MessageList 
+                ref={messageListRef} 
+                messages={messages} 
+                isLoading={isLoading}
+              />
+              <MessageTrail messages={messages} onScrollToMessage={handleScrollToMessage} />
+              {showScrollButton && <ScrollToBottomButton onClick={handleScrollToBottom} />}
+            </div>
             
             <InputArea
               onSendMessage={handleSendMessage}
+              onStopStreaming={handleStopStreaming}
               isLoading={isLoading}
               disabled={!selectedModel}
             />

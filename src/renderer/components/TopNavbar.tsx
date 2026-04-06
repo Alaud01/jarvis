@@ -19,11 +19,12 @@ const TopNavbar: React.FC<TopNavbarProps> = ({
   onTabClose,
 }) => {
   return (
-    <div className="h-10 bg-bg-navbar border-b border-border-primary flex items-end px-2 shrink-0 gap-1 [-webkit-app-region:drag]">
+    <div className="h-10 bg-bg-navbar border-b border-border-primary flex items-end shrink-0 gap-1 [-webkit-app-region:drag]">
+      <div className="w-[72px] h-8 shrink-0" />
       {tabs.map((tab) => (
         <div
           key={tab.id}
-          className={`h-8 px-4 flex items-center gap-2 text-[0.7rem] font-mono cursor-pointer transition-all duration-[150ms] max-w-[200px] ${
+          className={`h-8 px-4 flex items-center gap-2 text-[0.7rem] font-mono cursor-pointer transition-all duration-[150ms] max-w-[200px] [-webkit-app-region:no-drag] ${
             activeTabId === tab.id
               ? 'bg-bg-primary text-text-primary border border-border-primary border-b-bg-primary -mb-px'
               : 'text-text-secondary border border-transparent border-b-transparent hover:bg-bg-hover hover:text-text-primary'

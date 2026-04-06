@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.invoke('send-message', model, messages),
   sendMessageStream: (model: string, messages: { role: string; content: string }[]) =>
     ipcRenderer.invoke('send-message-stream', model, messages),
+  stopStream: () => ipcRenderer.invoke('stop-stream'),
   onChunk: (callback: (chunk: string) => void) => {
     const listener = (_event: any, chunk: string) => callback(chunk);
     ipcRenderer.on('ollama-chunk', listener);

@@ -124,7 +124,7 @@ body {
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Lora', Georgia, serif;
+  font-family: 'Helvetica', Georgia, serif;
   font-weight: 400;
 }
 
@@ -177,4 +177,12 @@ h1, h2, h3, h4, h5, h6 {
   40% {
     transform: translateY(-6px);
   }
+}
+
+.message-scroll-container {
+  overflow-anchor: auto;
+}
+
+.thinking-scroll-container {
+  overflow-anchor: auto;
 }

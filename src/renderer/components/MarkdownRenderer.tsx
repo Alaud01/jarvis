@@ -83,7 +83,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
           p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
           ul: ({ children }) => <ul className="list-disc list-inside mb-3 space-y-1">{children}</ul>,
           ol: ({ children }) => <ol className="list-decimal list-inside mb-3 space-y-1">{children}</ol>,
-          li: ({ children }) => <li className="ml-4">{children}</li>,
+          li: ({ children }) => <li>{children}</li>,
           blockquote: ({ children }) => (
             <blockquote className="border-l-4 border-text-muted pl-4 italic my-4 text-text-secondary">
               {children}
@@ -94,7 +94,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
               {children}
             </a>
           ),
-          strong: ({ children }) => <strong className="font-bold">{children}</strong>,
+          strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
           em: ({ children }) => <em className="italic">{children}</em>,
           hr: () => <hr className="my-6 border-t border-border-secondary" />,
           table: ({ children }) => (

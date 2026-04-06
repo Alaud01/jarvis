@@ -1,4 +1,5 @@
 import React from 'react';
+import ThemeSwitcher from './ThemeSwitcher';
 
 interface Conversation {
   id: string;
@@ -12,6 +13,7 @@ interface SidebarProps {
   conversations: Conversation[];
   currentConversationId: string | null;
   onConversationSelect: (id: string) => void;
+  onConversationDelete: (id: string) => void;
   onNewChat: () => void;
 }
 
@@ -20,6 +22,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   conversations,
   currentConversationId,
   onConversationSelect,
+  onConversationDelete,
   onNewChat,
 }) => {
   return (
@@ -45,21 +48,37 @@ const Sidebar: React.FC<SidebarProps> = ({
             conversations.map((conversation) => (
               <div
                 key={conversation.id}
-                className={`py-2 cursor-pointer text-text-secondary text-[0.85rem] flex items-center gap-2 transition-colors duration-[150ms] border-b border-transparent hover:text-text-primary hover:border-b-border-secondary ${
+                className={`group py-2 cursor-pointer text-text-secondary text-[0.85rem] flex items-center gap-2 transition-colors duration-[150ms] border-b border-transparent hover:text-text-primary hover:border-b-border-secondary ${
                   currentConversationId === conversation.id ? 'text-text-primary font-medium' : ''
                 }`}
-                onClick={() => onConversationSelect(conversation.id)}
               >
-                <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">{conversation.title}</span>
+                <span 
+                  className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis"
+                  onClick={() => onConversationSelect(conversation.id)}
+                >
+                  {conversation.title}
+                </span>
+                <button
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-bg-secondary rounded transition-opacity"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onConversationDelete(conversation.id);
+                  }}
+                  title="Delete conversation"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
               </div>
             ))
           )}
         </div>
       </div>
 
-      <div className="px-4 py-4 border-t border-border-primary shrink-0 flex items-center gap-3 font-mono text-[0.7rem]">
-        <span>AUTHOR</span>
-        <span className="ml-auto text-text-tertiary">v1.0</span>
+      <div className="px-4 py-3 border-t border-border-primary shrink-0 flex items-center gap-3">
+        <ThemeSwitcher />
+        <span className="ml-auto text-text-tertiary font-mono text-[0.65rem]">v1.0</span>
       </div>
     </aside>
   );
