@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 
 interface InputAreaProps {
   onSendMessage: (text: string) => void;
@@ -11,22 +11,11 @@ const InputArea: React.FC<InputAreaProps> = ({ onSendMessage, onStopStreaming, i
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
-    }
-  }, [input]);
-
   const handleSend = () => {
     const text = input.trim();
     if (!text || isLoading) return;
     onSendMessage(text);
     setInput('');
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -42,7 +31,7 @@ const InputArea: React.FC<InputAreaProps> = ({ onSendMessage, onStopStreaming, i
         <div className="bg-transparent border border-border-primary p-3 transition-all duration-[150ms] focus-within:border-text-primary">
           <textarea
             ref={textareaRef}
-            className="w-full min-h-6 max-h-[200px] border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif"
+            className="w-full h-6 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-hidden"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}

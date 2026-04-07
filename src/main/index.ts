@@ -29,6 +29,13 @@ interface OllamaStreamResponse {
     thinking?: string;
   };
   done?: boolean;
+  done_reason?: string;
+  total_duration?: number;
+  load_duration?: number;
+  prompt_eval_count?: number;
+  prompt_eval_duration?: number;
+  eval_count?: number;
+  eval_duration?: number;
 }
 
 async function fetchOllamaModels(): Promise<string[]> {
@@ -81,6 +88,8 @@ async function* streamFromOllama(
   messages: { role: string; content: string }[],
   abortController: AbortController
 ): AsyncGenerator<StreamChunk> {
+  let accumulatedContent = '';
+  let accumulatedThinking = '';
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
       method: 'POST',
@@ -92,6 +101,9 @@ async function* streamFromOllama(
         messages,
         stream: true,
         think: true,
+        options: {
+          num_predict: 64000,
+        },
       }),
       signal: abortController.signal,
     });
@@ -141,12 +153,22 @@ async function* streamFromOllama(
           try {
             const data = JSON.parse(line) as OllamaStreamResponse;
             if (data.message?.thinking) {
+              accumulatedThinking += data.message.thinking;
               yield { type: 'thinking', content: data.message.thinking };
             }
             if (data.message?.content) {
+              accumulatedContent += data.message.content;
               yield { type: 'content', content: data.message.content };
             }
             if (data.done === true) {
+              console.log('[LLM] Stream terminated:', {
+                reason: data.done_reason || 'unknown',
+                prompt_tokens: data.prompt_eval_count,
+                response_tokens: data.eval_count,
+                total_duration_ms: data.total_duration ? Math.round(data.total_duration / 1e6) : undefined,
+                content_length: accumulatedContent.length,
+                thinking_length: accumulatedThinking.length,
+              });
               return;
             }
           } catch (e) {
@@ -166,6 +188,14 @@ async function* streamFromOllama(
           yield { type: 'content', content: data.message.content };
         }
         if (data.done === true) {
+          console.log('[LLM] Stream terminated:', {
+            reason: data.done_reason || 'unknown',
+            prompt_tokens: data.prompt_eval_count,
+            response_tokens: data.eval_count,
+            total_duration_ms: data.total_duration ? Math.round(data.total_duration / 1e6) : undefined,
+            content_length: accumulatedContent.length,
+            thinking_length: accumulatedThinking.length,
+          });
           return;
         }
       } catch (e) {
@@ -291,6 +321,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('before-quit', async () => {
 });
 
 app.dock?.hide();

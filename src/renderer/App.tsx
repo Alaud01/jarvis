@@ -9,20 +9,6 @@ import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
 
-declare global {
-  interface Window {
-    assistant: {
-      getModels: () => Promise<string[]>;
-      sendMessage: (model: string, messages: { role: string; content: string }[]) => Promise<string>;
-      sendMessageStream: (model: string, messages: { role: string; content: string }[]) => Promise<{ success: boolean }>;
-      stopStream: () => Promise<{ success: boolean }>;
-      onChunk: (callback: (chunk: string) => void) => () => void;
-      onDone: (callback: () => void) => () => void;
-      onError: (callback: (error: string) => void) => () => void;
-    };
-  }
-}
-
 interface Message {
   id: string;
   text: string;
@@ -38,9 +24,19 @@ interface Conversation {
   messages: Message[];
 }
 
-const generateId = (): string => {
-  return crypto.randomUUID();
-};
+declare global {
+  interface Window {
+    assistant: {
+      getModels: () => Promise<string[]>;
+      sendMessage: (model: string, messages: { role: string; content: string }[]) => Promise<string>;
+      sendMessageStream: (model: string, messages: { role: string; content: string }[]) => Promise<{ success: boolean }>;
+      stopStream: () => Promise<{ success: boolean }>;
+      onChunk: (callback: (chunk: string) => void) => () => void;
+      onDone: (callback: () => void) => () => void;
+      onError: (callback: (error: string) => void) => () => void;
+    };
+  }
+}
 
 const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -51,6 +47,7 @@ const App: React.FC = () => {
   const [models, setModels] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   
   const streamingMessageIdRef = useRef<string | null>(null);
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
@@ -92,19 +89,21 @@ const App: React.FC = () => {
       }
     };
 
-    const handleDone = () => {
+    const finishStreaming = () => {
       setConversations(prev =>
         prev.map(c => ({
           ...c,
           messages: c.messages.map(m =>
-            m.isStreaming
-              ? { ...m, isStreaming: false }
-              : m
-          ),
+            m.isStreaming ? { ...m, isStreaming: false } : m
+          )
         }))
       );
       streamingMessageIdRef.current = null;
       setIsLoading(false);
+    };
+
+    const handleDone = () => {
+      finishStreaming();
     };
 
     const handleError = (error: string) => {
@@ -121,7 +120,7 @@ const App: React.FC = () => {
                     isStreaming: false,
                   }
                 : m
-            ),
+            )
           }))
         );
         streamingMessageIdRef.current = null;
@@ -138,7 +137,7 @@ const App: React.FC = () => {
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
     };
-  }, []);
+  }, [currentConversationId]);
 
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages || [];
@@ -243,6 +242,185 @@ const App: React.FC = () => {
     messageListRef.current?.scrollToBottom();
     setShowScrollButton(false);
   }, []);
+
+  const handleEditMessage = useCallback((messageId: string) => {
+    setEditingMessageId(messageId);
+  }, []);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingMessageId(null);
+  }, []);
+
+  const handleResubmitMessage = useCallback(async (messageId: string, newText: string) => {
+    if (!selectedModel) {
+      alert('Please select a model first');
+      return;
+    }
+
+    setEditingMessageId(null);
+
+    const conversation = conversations.find(c => c.id === currentConversationId);
+    if (!conversation) return;
+
+    const messageIndex = conversation.messages.findIndex(m => m.id === messageId);
+    if (messageIndex === -1) return;
+
+    const updatedMessages = conversation.messages.slice(0, messageIndex).map(m => ({
+      ...m,
+      text: m.id === messageId ? newText : m.text
+    }));
+
+    const editedMessage: Message = {
+      id: messageId,
+      text: newText,
+      sender: 'user',
+      timestamp: new Date(),
+    };
+
+    setConversations(prev =>
+      prev.map(c =>
+        c.id === currentConversationId
+          ? { ...c, messages: [...conversation.messages.slice(0, messageIndex), editedMessage] }
+          : c
+      )
+    );
+
+    setIsLoading(true);
+
+    const assistantMessageId = crypto.randomUUID();
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      text: '',
+      sender: 'assistant',
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+
+    setConversations(prev =>
+      prev.map(c =>
+        c.id === currentConversationId
+          ? { ...c, messages: [...conversation.messages.slice(0, messageIndex), editedMessage, assistantMessage] }
+          : c
+      )
+    );
+
+    streamingMessageIdRef.current = assistantMessageId;
+
+    try {
+      const conversationMessages = [
+        ...conversation.messages.slice(0, messageIndex).map(m => ({
+          role: m.sender === 'user' ? 'user' : 'assistant' as const,
+          content: m.text,
+        })),
+        { role: 'user' as const, content: newText },
+      ];
+
+      await window.assistant.sendMessageStream(selectedModel, conversationMessages);
+    } catch (error) {
+      console.error('Error sending message:', error);
+      setConversations(prev =>
+        prev.map(c =>
+          c.id === currentConversationId
+            ? {
+                ...c,
+                messages: c.messages.map(m =>
+                  m.id === assistantMessageId
+                    ? {
+                        ...m,
+                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure Ollama is running.`,
+                        isStreaming: false,
+                      }
+                    : m
+                ),
+              }
+            : c
+        )
+      );
+      setIsLoading(false);
+      streamingMessageIdRef.current = null;
+    }
+  }, [currentConversationId, selectedModel, conversations]);
+
+  const handleRegenerateResponse = useCallback(async (messageId: string) => {
+    if (!selectedModel) {
+      alert('Please select a model first');
+      return;
+    }
+
+    const conversation = conversations.find(c => c.id === currentConversationId);
+    if (!conversation) return;
+
+    const messageIndex = conversation.messages.findIndex(m => m.id === messageId);
+    if (messageIndex === -1) return;
+
+    const userMessageIndex = messageIndex - 1;
+    if (userMessageIndex < 0 || conversation.messages[userMessageIndex].sender !== 'user') return;
+
+    const userMessage = conversation.messages[userMessageIndex];
+
+    setConversations(prev =>
+      prev.map(c =>
+        c.id === currentConversationId
+          ? { ...c, messages: conversation.messages.slice(0, messageIndex) }
+          : c
+      )
+    );
+
+    setIsLoading(true);
+
+    const assistantMessageId = crypto.randomUUID();
+    const assistantMessage: Message = {
+      id: assistantMessageId,
+      text: '',
+      sender: 'assistant',
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+
+    setConversations(prev =>
+      prev.map(c =>
+        c.id === currentConversationId
+          ? { ...c, messages: [...conversation.messages.slice(0, messageIndex), assistantMessage] }
+          : c
+      )
+    );
+
+    streamingMessageIdRef.current = assistantMessageId;
+
+    try {
+      const conversationMessages = [
+        ...conversation.messages.slice(0, userMessageIndex).map(m => ({
+          role: m.sender === 'user' ? 'user' : 'assistant' as const,
+          content: m.text,
+        })),
+        { role: 'user' as const, content: userMessage.text },
+      ];
+
+      await window.assistant.sendMessageStream(selectedModel, conversationMessages);
+    } catch (error) {
+      console.error('Error regenerating response:', error);
+      setConversations(prev =>
+        prev.map(c =>
+          c.id === currentConversationId
+            ? {
+                ...c,
+                messages: c.messages.map(m =>
+                  m.id === assistantMessageId
+                    ? {
+                        ...m,
+                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure Ollama is running.`,
+                        isStreaming: false,
+                      }
+                    : m
+                ),
+              }
+            : c
+        )
+      );
+      setIsLoading(false);
+      streamingMessageIdRef.current = null;
+    }
+  }, [currentConversationId, selectedModel, conversations]);
 
   const handleSendMessage = useCallback(async (text: string) => {
     if (!selectedModel) {
@@ -388,6 +566,11 @@ const App: React.FC = () => {
                 ref={messageListRef} 
                 messages={messages} 
                 isLoading={isLoading}
+                editingMessageId={editingMessageId}
+                onEditMessage={handleEditMessage}
+                onCancelEdit={handleCancelEdit}
+                onResubmitMessage={handleResubmitMessage}
+                onRegenerateResponse={handleRegenerateResponse}
               />
               <MessageTrail messages={messages} onScrollToMessage={handleScrollToMessage} />
               {showScrollButton && <ScrollToBottomButton onClick={handleScrollToBottom} />}

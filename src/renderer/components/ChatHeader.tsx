@@ -18,7 +18,7 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({
   isLoadingModels = false,
 }) => {
   return (
-    <header className="h-[50px] px-6 flex items-center justify-between border-b border-border-primary shrink-0">
+    <header className="h-[50px] px-6 flex items-center justify-between border-border-primary shrink-0">
       <div className="flex items-center gap-4">
         <button 
           className="w-8 h-8 border border-transparent bg-transparent text-text-primary flex items-center justify-center cursor-pointer transition-all duration-[150ms] hover:border-border-primary" 

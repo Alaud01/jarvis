@@ -15,7 +15,12 @@ interface MessageTrailProps {
 
 const MessageTrail: React.FC<MessageTrailProps> = ({ messages, onScrollToMessage }) => {
   const getPreview = (text: string, maxLength: number = 50): string => {
-    const cleanText = text.replace(/<[^>]*>/g, '').replace(/\n/g, ' ').trim();
+    let cleanText = text;
+    cleanText = cleanText.replace(/(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/g, '');
+    cleanText = cleanText.replace(/Thinking\.\.\.\n[\s\S]*?\n\.\.\.done thinking\./g, '');
+    cleanText = cleanText.replace(/Thinking\.\.\.\n[\s\S]*/g, '');
+    cleanText = cleanText.replace(/\{\{screenshot:[a-f0-9-]+\}\}/g, '');
+    cleanText = cleanText.replace(/<[^>]*>/g, '').replace(/\n/g, ' ').trim();
     if (cleanText.length <= maxLength) return cleanText;
     return cleanText.substring(0, maxLength) + '...';
   };
