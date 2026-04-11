@@ -1,5 +1,8 @@
 import { app, BrowserWindow, Tray, nativeImage, Menu, ipcMain } from 'electron';
 import * as path from 'path';
+import { startPythonService, stopPythonService } from './pythonService';
+import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
+import { setMainWindow } from './audioRecorder';
 
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -224,6 +227,8 @@ function createWindow(): void {
       nodeIntegration: false
     }
   });
+  
+  setMainWindow(mainWindow);
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
@@ -312,9 +317,31 @@ ipcMain.handle('stop-stream', async () => {
   return { success: true };
 });
 
-app.whenReady().then(() => {
+registerVoiceFlowIPC();
+
+app.whenReady().then(async () => {
   createTray();
   createWindow();
+  
+  console.log('[Main] Starting Python voice service...');
+  
+  try {
+    const pythonStarted = await startPythonService();
+    if (!pythonStarted) {
+      console.error('[Main] Failed to start Python voice service - voice features will not work');
+    } else {
+      console.log('[Main] Python voice service started successfully');
+    }
+  } catch (error) {
+    console.error('[Main] Error starting Python service:', error);
+  }
+  
+  try {
+    await initializeVoiceFlow();
+    console.log('[Main] Voice flow initialized');
+  } catch (error) {
+    console.error('[Main] Error initializing voice flow:', error);
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -324,6 +351,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', async () => {
+  await cleanupVoiceFlow();
+  await stopPythonService();
 });
 
 app.dock?.hide();

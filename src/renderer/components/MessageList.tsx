@@ -387,7 +387,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
           </div>
         </div>
       ) : (
-      <div className="py-8 pr-8 pl-6">
+      <div className="py-8 pl-9">
         <div ref={messagesColumnRef} className="max-w-[800px] mx-auto">
           {messages.map((message) => {
             const segments = parseMessageSegments(message.text, message.isStreaming);

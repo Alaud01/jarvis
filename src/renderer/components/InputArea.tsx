@@ -1,15 +1,82 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+
+type VoiceState = 'idle' | 'recording' | 'processing';
+
+interface VoiceTranscriptPayload {
+  id: string;
+  text: string;
+  autoSubmit: boolean;
+}
 
 interface InputAreaProps {
   onSendMessage: (text: string) => void;
   onStopStreaming: () => void;
   isLoading?: boolean;
   disabled?: boolean;
+  voiceTranscript?: VoiceTranscriptPayload | null;
+  onVoiceTextUsed?: () => void;
+  voiceShortcut?: string;
 }
 
-const InputArea: React.FC<InputAreaProps> = ({ onSendMessage, onStopStreaming, isLoading = false, disabled = false }) => {
+const InputArea: React.FC<InputAreaProps> = ({ 
+  onSendMessage, 
+  onStopStreaming, 
+  isLoading = false, 
+  disabled = false,
+  voiceTranscript,
+  onVoiceTextUsed,
+  voiceShortcut
+}) => {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastHandledVoiceIdRef = useRef<string | null>(null);
+  const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+
+  useEffect(() => {
+    if (!voiceTranscript || !onVoiceTextUsed) {
+      return;
+    }
+
+    if (lastHandledVoiceIdRef.current === voiceTranscript.id) {
+      return;
+    }
+
+    lastHandledVoiceIdRef.current = voiceTranscript.id;
+
+    const text = voiceTranscript.text.trim();
+    if (!text) {
+      onVoiceTextUsed();
+      return;
+    }
+
+    const nextInput = input ? `${input} ${text}` : text;
+
+    if (voiceTranscript.autoSubmit && !isLoading && !disabled) {
+      setInput('');
+      onSendMessage(nextInput);
+    } else {
+      setInput(nextInput);
+    }
+
+    onVoiceTextUsed();
+  }, [voiceTranscript, onVoiceTextUsed, input, isLoading, disabled, onSendMessage]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [input]);
+
+  useEffect(() => {
+    if (!window.assistant?.onVoiceFlowState) return;
+    
+    const cleanup = window.assistant.onVoiceFlowState((state) => {
+      setVoiceState(state);
+    });
+    
+    return cleanup;
+  }, []);
 
   const handleSend = () => {
     const text = input.trim();
@@ -25,31 +92,82 @@ const InputArea: React.FC<InputAreaProps> = ({ onSendMessage, onStopStreaming, i
     }
   };
 
+  const handleMicClick = async () => {
+    if (!window.assistant?.startVoiceRecording || !window.assistant?.stopVoiceRecording) {
+      console.error('Voice recording not available');
+      return;
+    }
+
+    if (voiceState === 'idle') {
+      const result = await window.assistant.startVoiceRecording();
+      if (!result.success) {
+        console.error('Failed to start recording:', result.error);
+      }
+    } else if (voiceState === 'recording') {
+      await window.assistant.stopVoiceRecording();
+    }
+  };
+
+  const isDisabled = isLoading || disabled || voiceState === 'processing';
+
   return (
     <div className="p-6 border-t border-border-primary bg-bg-primary shrink-0">
       <div className="max-w-[800px] mx-auto">
         <div className="bg-transparent border border-border-primary p-3 transition-all duration-[150ms] focus-within:border-text-primary">
           <textarea
             ref={textareaRef}
-            className="w-full h-6 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-hidden"
+            className="w-full min-h-[24px] max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-y-auto"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Compose your thought..."
             rows={1}
-            disabled={isLoading || disabled}
+            disabled={isDisabled}
           />
-          <div className="flex items-center justify-between mt-3">
-            <span className="font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest">
-              Return to send · Shift+Return for line
-            </span>
-            <button
-              className="py-1 px-4 border border-text-primary bg-text-primary text-bg-primary font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:not-disabled:bg-transparent hover:not-disabled:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
-              onClick={isLoading ? onStopStreaming : handleSend}
-              disabled={!isLoading && (!input.trim() || disabled)}
-            >
-              {isLoading ? 'Stop' : 'Send'}
-            </button>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3 flex-wrap">
+              <span className="font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest">
+                Return to send · Shift+Return for line
+              </span>
+              {voiceShortcut && (
+                <span className="font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest">
+                  {voiceShortcut} toggles voice
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className={`py-1 px-3 border font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] ${
+                  voiceState === 'recording'
+                    ? 'border-red-500 bg-red-500 text-white animate-pulse'
+                    : voiceState === 'processing'
+                    ? 'border-yellow-500 bg-yellow-500 text-white cursor-wait'
+                    : 'border-text-primary bg-transparent text-text-primary hover:bg-text-primary hover:text-bg-primary'
+                }`}
+                onClick={handleMicClick}
+                disabled={disabled || voiceState === 'processing'}
+                title={
+                  voiceState === 'recording'
+                    ? voiceShortcut
+                      ? `Stop recording (${voiceShortcut})`
+                      : 'Stop recording'
+                    : voiceState === 'processing'
+                    ? 'Processing...'
+                    : voiceShortcut
+                    ? `Record voice (${voiceShortcut})`
+                    : 'Record voice'
+                }
+              >
+                {voiceState === 'recording' ? 'Stop' : voiceState === 'processing' ? 'Wait' : 'Mic'}
+              </button>
+              <button
+                className="py-1 px-4 border border-text-primary bg-text-primary text-bg-primary font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:not-disabled:bg-transparent hover:not-disabled:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                onClick={isLoading ? onStopStreaming : handleSend}
+                disabled={!isLoading && (!input.trim() || disabled)}
+              >
+                {isLoading ? 'Stop' : 'Send'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

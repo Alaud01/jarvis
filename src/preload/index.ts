@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+type VoiceTranscriptPayload = {
+  text: string;
+  autoSubmit: boolean;
+};
+
 contextBridge.exposeInMainWorld('assistant', {
   getModels: () => ipcRenderer.invoke('get-models'),
   sendMessage: (model: string, messages: { role: string; content: string }[]) => 
@@ -7,6 +12,7 @@ contextBridge.exposeInMainWorld('assistant', {
   sendMessageStream: (model: string, messages: { role: string; content: string }[]) =>
     ipcRenderer.invoke('send-message-stream', model, messages),
   stopStream: () => ipcRenderer.invoke('stop-stream'),
+  getVoiceShortcut: () => ipcRenderer.invoke('voice-shortcut-label'),
   onChunk: (callback: (chunk: string) => void) => {
     const listener = (_event: any, chunk: string) => callback(chunk);
     ipcRenderer.on('ollama-chunk', listener);
@@ -22,4 +28,23 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
   },
+  startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
+  stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),
+  getVoiceRecordingState: () => ipcRenderer.invoke('voice-recording-state'),
+  onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => {
+    const listener = (_event: any, state: 'idle' | 'recording' | 'processing') => callback(state);
+    ipcRenderer.on('voice-flow-state', listener);
+    return () => ipcRenderer.removeListener('voice-flow-state', listener);
+  },
+  onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => {
+    const listener = (_event: any, payload: VoiceTranscriptPayload) => callback(payload);
+    ipcRenderer.on('voice-transcript', listener);
+    return () => ipcRenderer.removeListener('voice-transcript', listener);
+  },
+  onVoiceError: (callback: (error: string) => void) => {
+    const listener = (_event: any, error: string) => callback(error);
+    ipcRenderer.on('voice-error', listener);
+    return () => ipcRenderer.removeListener('voice-error', listener);
+  },
+  sendAudioData: (samples: number[]) => ipcRenderer.send('audio-data', samples),
 });

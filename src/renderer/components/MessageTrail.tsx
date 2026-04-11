@@ -28,11 +28,11 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, onScrollToMessage
   if (messages.length === 0) return null;
 
   return (
-    <div className="w-8 shrink-0 px-1 py-2 flex flex-col gap-0.5 sticky top-0 h-fit max-h-[calc(100vh-140px)] overflow-y-auto">
+    <div className="w-8 shrink-0 px-1 py-2 flex flex-col justify-center gap-0.5 sticky top-0 h-full max-h-[calc(100vh-140px)] overflow-y-auto">
       {messages.map((message) => (
         <div
           key={message.id}
-          className="flex-1 flex items-center justify-end min-h-4 cursor-pointer group"
+          className="flex items-center justify-end min-h-4 cursor-pointer group"
           onClick={() => onScrollToMessage(message.id)}
         >
           <div className={`w-3 h-[3px] bg-border-secondary transition-all duration-200 ease-in-out relative

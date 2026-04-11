@@ -24,6 +24,15 @@ interface Conversation {
   messages: Message[];
 }
 
+interface VoiceTranscriptPayload {
+  text: string;
+  autoSubmit: boolean;
+}
+
+interface PendingVoiceTranscript extends VoiceTranscriptPayload {
+  id: string;
+}
+
 declare global {
   interface Window {
     assistant: {
@@ -31,9 +40,17 @@ declare global {
       sendMessage: (model: string, messages: { role: string; content: string }[]) => Promise<string>;
       sendMessageStream: (model: string, messages: { role: string; content: string }[]) => Promise<{ success: boolean }>;
       stopStream: () => Promise<{ success: boolean }>;
+      getVoiceShortcut: () => Promise<string>;
       onChunk: (callback: (chunk: string) => void) => () => void;
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
+      startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
+      stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
+      getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
+      onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => () => void;
+      onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => () => void;
+      onVoiceError: (callback: (error: string) => void) => () => void;
+      sendAudioData: (samples: number[]) => void;
     };
   }
 }
@@ -48,6 +65,8 @@ const App: React.FC = () => {
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [voiceTranscript, setVoiceTranscript] = useState<PendingVoiceTranscript | null>(null);
+  const [voiceShortcut, setVoiceShortcut] = useState<string>('');
   
   const streamingMessageIdRef = useRef<string | null>(null);
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
@@ -71,6 +90,53 @@ const App: React.FC = () => {
       }
     };
     loadModels();
+  }, []);
+
+  useEffect(() => {
+    const loadVoiceShortcut = async () => {
+      try {
+        if (!window.assistant?.getVoiceShortcut) {
+          return;
+        }
+
+        const shortcut = await window.assistant.getVoiceShortcut();
+        setVoiceShortcut(shortcut);
+      } catch (error) {
+        console.error('Failed to load voice shortcut:', error);
+      }
+    };
+
+    loadVoiceShortcut();
+  }, []);
+
+  useEffect(() => {
+    if (!window.assistant?.onVoiceTranscript) return;
+    
+    const cleanup = window.assistant.onVoiceTranscript((payload) => {
+      if (payload?.text) {
+        setVoiceTranscript({
+          id: crypto.randomUUID(),
+          text: payload.text,
+          autoSubmit: payload.autoSubmit,
+        });
+      }
+    });
+    
+    return cleanup;
+  }, []);
+
+  const handleVoiceTextUsed = useCallback(() => {
+    setVoiceTranscript(null);
+  }, []);
+
+  useEffect(() => {
+    if (!window.assistant?.onVoiceError) return;
+    
+    const cleanup = window.assistant.onVoiceError((error) => {
+      console.error('Voice error:', error);
+    });
+    
+    return cleanup;
   }, []);
 
   useEffect(() => {
@@ -581,6 +647,9 @@ const App: React.FC = () => {
               onStopStreaming={handleStopStreaming}
               isLoading={isLoading}
               disabled={!selectedModel}
+              voiceTranscript={voiceTranscript}
+              onVoiceTextUsed={handleVoiceTextUsed}
+              voiceShortcut={voiceShortcut}
             />
           </main>
         </div>

@@ -4,14 +4,16 @@
   "description": "Mac menu bar assistant powered by Ollama",
   "main": "dist/main/index.js",
   "scripts": {
-    "compile": "tsc -p tsconfig.node.json",
+    "build:native": "bash scripts/build-native.sh",
+    "compile": "npm run build:native && tsc -p tsconfig.node.json",
     "build:renderer": "vite build",
     "dev": "vite",
     "build": "npm run compile && npm run build:renderer && electron-builder",
     "start": "npm run compile && npm run build:renderer && electron .",
     "dev:all": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
     "dev:vite": "vite",
-    "dev:electron": "npm run compile && wait-on http://localhost:5173 && electron ."
+    "dev:electron": "npm run build:native && tsc -p tsconfig.node.json && wait-on http://localhost:5173 && electron .",
+    "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
   },
   "dependencies": {
     "highlight.js": "^11.11.1",
@@ -43,7 +45,15 @@
   "build": {
     "appId": "com.assistant.app",
     "mac": {
-      "category": "public.app-category.productivity"
-    }
+      "category": "public.app-category.productivity",
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist"
+    },
+    "extraResources": [
+      {
+        "from": "build/FnKeyMonitor",
+        "to": "native/FnKeyMonitor"
+      }
+    ]
   }
 }
