@@ -126,9 +126,6 @@ const InputArea: React.FC<InputAreaProps> = ({
           />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3 flex-wrap">
-              <span className="font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest">
-                Return to send · Shift+Return for line
-              </span>
               {voiceShortcut && (
                 <span className="font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest">
                   {voiceShortcut} toggles voice

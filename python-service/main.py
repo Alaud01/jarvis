@@ -3,6 +3,7 @@ import os
 import shutil
 import tempfile
 import time
+from math import gcd
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -13,6 +14,7 @@ import soundfile as sf
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 import onnx_asr
+import onnxruntime as rt
 
 app = FastAPI(title="Voice Flow Service")
 
@@ -21,6 +23,17 @@ VAD_MIN_SILENCE_MS = 700
 VAD_MIN_SPEECH_MS = 250
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
 OLLAMA_TIMEOUT_SECONDS = 20
+TARGET_SAMPLE_RATE = 16000
+TRANSCRIBE_CHUNK_SECONDS = 5
+TRANSCRIBE_CHUNK_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_CHUNK_SECONDS
+TRANSCRIBE_CHUNK_PADDING_MS = 250
+TRANSCRIBE_CHUNK_PADDING_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_CHUNK_PADDING_MS // 1000
+COREML_PROVIDER_OPTIONS = {
+    "ModelFormat": "MLProgram",
+    "MLComputeUnits": "ALL",
+    "RequireStaticInputShapes": "1",
+    "EnableOnSubgraphs": "0",
+}
 
 asr_model = None
 vad_model = None
@@ -29,55 +42,167 @@ vad_model = None
 def load_models():
     global asr_model, vad_model
     
-    print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX...")
-    asr_model = onnx_asr.load_model("nemo-parakeet-tdt-0.6b-v3", quantization="int8")
+    print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX (CoreML/GPU)...")
+    sess_opts = rt.SessionOptions()
+    sess_opts.enable_mem_pattern = False
+    sess_opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
+    sess_opts.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    available_providers = set(rt.get_available_providers())
+    asr_providers = ["CPUExecutionProvider"]
+    if "CoreMLExecutionProvider" in available_providers:
+        asr_providers = [
+            ("CoreMLExecutionProvider", COREML_PROVIDER_OPTIONS),
+            "CPUExecutionProvider",
+        ]
+        print("[VoiceService] CoreMLExecutionProvider enabled with static chunk shapes")
+    else:
+        print("[VoiceService] CoreMLExecutionProvider unavailable, using CPUExecutionProvider")
+    
+    asr_model = onnx_asr.load_model(
+        "nemo-parakeet-tdt-0.6b-v3",
+        quantization="int8",
+        sess_options=sess_opts,
+        providers=asr_providers,
+        preprocessor_config={"use_numpy_preprocessors": True},
+        resampler_config={"providers": ["CPUExecutionProvider"]},
+    )
     print("[VoiceService] Parakeet ONNX model loaded successfully")
     
     print("[VoiceService] Loading Silero VAD ONNX...")
     from silero_vad import load_silero_vad
-    vad_model = load_silero_vad()
+    vad_model = load_silero_vad(onnx=True)
     print("[VoiceService] Silero VAD ONNX loaded successfully")
 
 
-def has_speech(audio_path: str) -> tuple[bool, float]:
-    """Check if audio contains speech using Silero VAD.
-    
-    Returns:
-        tuple: (has_speech: bool, speech_duration_ms: float)
-    """
-    from silero_vad import get_speech_timestamps
+def load_audio(audio_path: str) -> np.ndarray:
+    """Load audio and keep all preprocessing on CPU."""
     wav, sr = sf.read(audio_path, dtype="float32")
-    if len(wav.shape) > 1:
-        wav = wav.mean(axis=1)
-    if sr != 16000:
-        from scipy.signal import resample
-        wav = resample(wav, int(len(wav) * 16000 / sr))
-    wav = (wav * 32767).astype(np.int16)
-    
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1, dtype=np.float32)
+    else:
+        wav = wav.astype(np.float32, copy=False)
+
+    if sr != TARGET_SAMPLE_RATE and wav.size > 0:
+        from scipy.signal import resample_poly
+
+        rate_gcd = gcd(sr, TARGET_SAMPLE_RATE)
+        wav = resample_poly(wav, TARGET_SAMPLE_RATE // rate_gcd, sr // rate_gcd)
+        wav = wav.astype(np.float32, copy=False)
+
+    wav = np.clip(wav, -1.0, 1.0)
+    return np.ascontiguousarray(wav)
+
+
+def detect_speech_segments(wav: np.ndarray) -> tuple[list[tuple[int, int]], float]:
+    """Return speech segments and total detected speech duration in milliseconds."""
+    from silero_vad import get_speech_timestamps
+
+    if wav.size == 0:
+        return [], 0.0
+
+    vad_input = (np.clip(wav, -1.0, 1.0) * 32767.0).astype(np.int16)
     speech_timestamps = get_speech_timestamps(
-        wav,
+        vad_input,
         vad_model,
         threshold=VAD_THRESHOLD,
         min_silence_duration_ms=VAD_MIN_SILENCE_MS,
-        min_speech_duration_ms=VAD_MIN_SPEECH_MS
+        min_speech_duration_ms=VAD_MIN_SPEECH_MS,
     )
-    
+
     if not speech_timestamps:
-        return False, 0.0
-    
-    total_duration_samples = sum(t['end'] - t['start'] for t in speech_timestamps)
-    sample_rate = 16000
-    speech_duration_ms = (total_duration_samples / sample_rate) * 1000
-    
-    has_valid_speech = speech_duration_ms >= VAD_MIN_SPEECH_MS
-    
-    return has_valid_speech, speech_duration_ms
+        return [], 0.0
+
+    speech_segments: list[tuple[int, int]] = []
+    total_duration_samples = 0
+    for timestamp in speech_timestamps:
+        start = max(0, int(timestamp["start"]))
+        end = min(wav.shape[0], int(timestamp["end"]))
+        if end <= start:
+            continue
+        speech_segments.append((start, end))
+        total_duration_samples += end - start
+
+    speech_duration_ms = (total_duration_samples / TARGET_SAMPLE_RATE) * 1000
+    return speech_segments, speech_duration_ms
 
 
-def transcribe_audio(audio_path: str) -> str:
-    """Transcribe audio using Parakeet ONNX model."""
+def split_range_to_chunks(start: int, end: int) -> list[tuple[int, int]]:
+    """Split a contiguous speech range into fixed-size chunk windows."""
+    chunk_ranges: list[tuple[int, int]] = []
+    cursor = start
+    while cursor < end:
+        next_cursor = min(cursor + TRANSCRIBE_CHUNK_SAMPLES, end)
+        chunk_ranges.append((cursor, next_cursor))
+        cursor = next_cursor
+    return chunk_ranges
+
+
+def build_transcription_ranges(
+    speech_segments: list[tuple[int, int]],
+    total_samples: int,
+) -> list[tuple[int, int]]:
+    """Merge nearby speech spans, then cap each transcription window at 5 seconds."""
+    if not speech_segments:
+        return []
+
+    padded_segments: list[tuple[int, int]] = []
+    for start, end in speech_segments:
+        padded_start = max(0, start - TRANSCRIBE_CHUNK_PADDING_SAMPLES)
+        padded_end = min(total_samples, end + TRANSCRIBE_CHUNK_PADDING_SAMPLES)
+        if padded_end > padded_start:
+            padded_segments.append((padded_start, padded_end))
+
+    if not padded_segments:
+        return []
+
+    merged_segments: list[list[int]] = [[*padded_segments[0]]]
+    for start, end in padded_segments[1:]:
+        previous = merged_segments[-1]
+        if start <= previous[1]:
+            previous[1] = max(previous[1], end)
+        else:
+            merged_segments.append([start, end])
+
+    chunk_ranges: list[tuple[int, int]] = []
+    current_start, current_end = merged_segments[0]
+    for start, end in merged_segments[1:]:
+        if end - current_start <= TRANSCRIBE_CHUNK_SAMPLES:
+            current_end = end
+            continue
+        chunk_ranges.extend(split_range_to_chunks(current_start, current_end))
+        current_start, current_end = start, end
+
+    chunk_ranges.extend(split_range_to_chunks(current_start, current_end))
+    return chunk_ranges
+
+
+def transcribe_audio(wav: np.ndarray, speech_segments: list[tuple[int, int]]) -> str:
+    """Transcribe speech sequentially using fixed-size chunk buffers."""
     global asr_model
-    return asr_model.recognize(audio_path)
+
+    chunk_ranges = build_transcription_ranges(speech_segments, wav.shape[0])
+    if not chunk_ranges:
+        return ""
+
+    chunk_buffer = np.zeros(TRANSCRIBE_CHUNK_SAMPLES, dtype=np.float32)
+    transcripts: list[str] = []
+
+    for index, (start, end) in enumerate(chunk_ranges, start=1):
+        chunk_buffer.fill(0.0)
+        chunk_view = wav[start:end]
+        copy_samples = min(chunk_view.shape[0], TRANSCRIBE_CHUNK_SAMPLES)
+        # Pad shorter chunks with trailing silence so CoreML sees stable input shapes.
+        chunk_buffer[:copy_samples] = chunk_view[:copy_samples]
+        chunk_text = asr_model.recognize(chunk_buffer, sample_rate=TARGET_SAMPLE_RATE).strip()
+        if chunk_text:
+            transcripts.append(chunk_text)
+        print(
+            f"[VoiceService] Transcribed chunk {index}/{len(chunk_ranges)} "
+            f"({copy_samples / TARGET_SAMPLE_RATE:.2f}s of audio)"
+        )
+
+    return " ".join(transcripts).strip()
 
 
 def refine_with_gemma(raw_text: str) -> str:
@@ -175,10 +300,10 @@ async def process_flow(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, tmp)
         
         print(f"[VoiceService] Processing audio file: {temp_path}")
+        wav = load_audio(temp_path)
+        speech_segments, speech_duration = detect_speech_segments(wav)
         
-        has_speech_flag, speech_duration = has_speech(temp_path)
-        
-        if not has_speech_flag:
+        if speech_duration < VAD_MIN_SPEECH_MS:
             return JSONResponse(
                 content={
                     "text": "",
@@ -189,7 +314,7 @@ async def process_flow(file: UploadFile = File(...)):
         
         print(f"[VoiceService] Speech detected: {speech_duration:.0f}ms, transcribing...")
         
-        raw_text = transcribe_audio(temp_path)
+        raw_text = transcribe_audio(wav, speech_segments)
         
         if not raw_text or raw_text.strip() == "":
             return JSONResponse(
@@ -241,7 +366,18 @@ async def transcribe_only(file: UploadFile = File(...)):
             temp_path = tmp.name
             shutil.copyfileobj(file.file, tmp)
         
-        raw_text = transcribe_audio(temp_path)
+        wav = load_audio(temp_path)
+        speech_segments, speech_duration = detect_speech_segments(wav)
+        if speech_duration < VAD_MIN_SPEECH_MS:
+            return JSONResponse(
+                content={
+                    "text": "",
+                    "error": f"No speech detected (duration: {speech_duration:.0f}ms, min: {VAD_MIN_SPEECH_MS}ms)",
+                    "success": False,
+                }
+            )
+
+        raw_text = transcribe_audio(wav, speech_segments)
         
         return JSONResponse(
             content={
