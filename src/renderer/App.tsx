@@ -24,6 +24,42 @@ interface Conversation {
   messages: Message[];
 }
 
+interface SerializedMessage {
+  id: string;
+  text: string;
+  sender: 'user' | 'assistant';
+  timestamp: string;
+}
+
+interface SerializedConversation {
+  id: string;
+  title: string;
+  timestamp: string;
+  messages: SerializedMessage[];
+}
+
+function serializeConversation(c: Conversation): SerializedConversation {
+  return {
+    ...c,
+    timestamp: c.timestamp.toISOString(),
+    messages: c.messages.map(m => ({
+      ...m,
+      timestamp: m.timestamp.toISOString(),
+    })),
+  };
+}
+
+function deserializeConversation(c: SerializedConversation): Conversation {
+  return {
+    ...c,
+    timestamp: new Date(c.timestamp),
+    messages: c.messages.map(m => ({
+      ...m,
+      timestamp: new Date(m.timestamp),
+    })),
+  };
+}
+
 interface VoiceTranscriptPayload {
   text: string;
   autoSubmit: boolean;
@@ -51,6 +87,11 @@ declare global {
       onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => () => void;
       onVoiceError: (callback: (error: string) => void) => () => void;
       sendAudioData: (samples: number[]) => void;
+      storeLoadConversations: () => Promise<SerializedConversation[]>;
+      storeSaveConversations: (conversations: SerializedConversation[]) => Promise<{ success: boolean }>;
+      storeDeleteConversation: (id: string) => Promise<{ success: boolean }>;
+      storeLoadModel: () => Promise<string>;
+      storeSaveModel: (model: string) => Promise<{ success: boolean }>;
     };
   }
 }
@@ -72,6 +113,7 @@ const App: React.FC = () => {
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const isInitialLoadRef = useRef(true);
 
   useEffect(() => {
     const loadModels = async () => {
@@ -91,6 +133,56 @@ const App: React.FC = () => {
     };
     loadModels();
   }, []);
+
+  useEffect(() => {
+    const loadStoredData = async () => {
+      try {
+        const stored = await window.assistant.storeLoadConversations();
+        if (stored && stored.length > 0) {
+          setConversations(stored.map(deserializeConversation));
+          const lastId = stored[stored.length - 1].id;
+          setCurrentConversationId(lastId);
+          setOpenTabIds([lastId]);
+        }
+      } catch (error) {
+        console.error('Failed to load stored conversations:', error);
+      }
+
+      try {
+        const storedModel = await window.assistant.storeLoadModel();
+        if (storedModel) {
+          setSelectedModel(storedModel);
+        }
+      } catch (error) {
+        console.error('Failed to load stored model:', error);
+      }
+    };
+    loadStoredData();
+  }, []);
+
+  useEffect(() => {
+    if (isInitialLoadRef.current) {
+      isInitialLoadRef.current = false;
+      return;
+    }
+    const hasStreaming = conversations.some(c => c.messages.some(m => m.isStreaming));
+    if (hasStreaming) return;
+
+    const serialized = conversations.map(serializeConversation);
+    window.assistant.storeSaveConversations(serialized).catch(err => {
+      console.error('Failed to save conversations:', err);
+    });
+  }, [conversations]);
+
+  useEffect(() => {
+    if (isInitialLoadRef.current) return;
+
+    if (selectedModel) {
+      window.assistant.storeSaveModel(selectedModel).catch(err => {
+        console.error('Failed to save selected model:', err);
+      });
+    }
+  }, [selectedModel]);
 
   useEffect(() => {
     const loadVoiceShortcut = async () => {
@@ -240,6 +332,10 @@ const App: React.FC = () => {
 
   const handleDeleteConversation = useCallback((id: string) => {
     if (!window.confirm('Delete this conversation?')) return;
+    
+    window.assistant.storeDeleteConversation(id).catch(err => {
+      console.error('Failed to delete conversation from store:', err);
+    });
     
     setConversations(prev => prev.filter(c => c.id !== id));
     setOpenTabIds(prev => prev.filter(tabId => tabId !== id));

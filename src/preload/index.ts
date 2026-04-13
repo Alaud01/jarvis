@@ -47,4 +47,9 @@ contextBridge.exposeInMainWorld('assistant', {
     return () => ipcRenderer.removeListener('voice-error', listener);
   },
   sendAudioData: (samples: number[]) => ipcRenderer.send('audio-data', samples),
+  storeLoadConversations: () => ipcRenderer.invoke('store:load-conversations'),
+  storeSaveConversations: (conversations: unknown) => ipcRenderer.invoke('store:save-conversations', conversations),
+  storeDeleteConversation: (id: string) => ipcRenderer.invoke('store:delete-conversation', id),
+  storeLoadModel: () => ipcRenderer.invoke('store:load-model'),
+  storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
 });

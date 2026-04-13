@@ -64,6 +64,10 @@ const InputArea: React.FC<InputAreaProps> = ({
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
+    if (!input) {
+      textarea.style.height = '24px';
+      return;
+    }
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [input]);

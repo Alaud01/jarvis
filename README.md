@@ -1,4 +1,4 @@
-# Assistant App
+# Rhandy
 
 Electron menu bar assistant powered by Ollama.
 
@@ -11,7 +11,7 @@ Electron menu bar assistant powered by Ollama.
 ## Structure
 
 ```
-assistant-app/
+rhandy/
 ├── assets/              # Icons, images
 ├── src/
 │   ├── main/           # Electron main process
@@ -32,7 +32,7 @@ assistant-app/
 ## Setup
 
 ```bash
-cd assistant-app
+cd rhandy
 npm install
 ```
 

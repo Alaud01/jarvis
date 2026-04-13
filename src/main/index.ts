@@ -3,6 +3,7 @@ import * as path from 'path';
 import { startPythonService, stopPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
 import { setMainWindow } from './audioRecorder';
+import { loadConversations, saveConversations, deleteConversation, loadSelectedModel, saveSelectedModel } from './store';
 
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -256,7 +257,7 @@ function createTray(): void {
     { label: 'Quit', click: () => app.quit() }
   ]);
   
-  tray.setToolTip('Assistant');
+  tray.setToolTip('Rhandy');
   tray.setContextMenu(contextMenu);
   
   tray.on('click', () => {
@@ -318,6 +319,29 @@ ipcMain.handle('stop-stream', async () => {
 });
 
 registerVoiceFlowIPC();
+
+ipcMain.handle('store:load-conversations', async () => {
+  return loadConversations();
+});
+
+ipcMain.handle('store:save-conversations', async (_event, conversations: unknown) => {
+  saveConversations(conversations as import('./store').SerializedConversation[]);
+  return { success: true };
+});
+
+ipcMain.handle('store:delete-conversation', async (_event, id: string) => {
+  deleteConversation(id);
+  return { success: true };
+});
+
+ipcMain.handle('store:load-model', async () => {
+  return loadSelectedModel();
+});
+
+ipcMain.handle('store:save-model', async (_event, model: string) => {
+  saveSelectedModel(model);
+  return { success: true };
+});
 
 app.whenReady().then(async () => {
   createTray();

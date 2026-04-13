@@ -1,5 +1,5 @@
 {
-  "name": "assistant-app",
+  "name": "rhandy",
   "version": "1.0.0",
   "description": "Mac menu bar assistant powered by Ollama",
   "main": "dist/main/index.js",
@@ -16,6 +16,7 @@
     "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
   },
   "dependencies": {
+    "electron-store": "^11.0.2",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.44",
     "react": "^19.0.0",
@@ -43,7 +44,7 @@
     "wait-on": "^8.0.0"
   },
   "build": {
-    "appId": "com.assistant.app",
+    "appId": "com.rhandy.app",
     "mac": {
       "category": "public.app-category.productivity",
       "entitlements": "entitlements.mac.plist",
