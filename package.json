@@ -16,6 +16,7 @@
     "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "^3.2.1",
     "electron-store": "^11.0.2",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.44",
@@ -24,7 +25,8 @@
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.0",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",

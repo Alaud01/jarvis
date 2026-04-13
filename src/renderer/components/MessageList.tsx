@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHa
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
 import TypingIndicator from './TypingIndicator';
+import BrowserToolRunCard, { type BrowserToolRun } from './BrowserToolRunCard';
 
 interface Message {
   id: string;
@@ -9,6 +10,7 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
+  toolRuns?: BrowserToolRun[];
 }
 
 interface MessageListProps {
@@ -29,20 +31,23 @@ export interface MessageListHandle {
 }
 
 export interface MessageSegment {
-  type: 'thinking' | 'content';
+  type: 'thinking' | 'content' | 'toolRun';
   text?: string;
   isThinkingInProgress?: boolean;
+  toolRun?: BrowserToolRun;
+  startOffset: number;
 }
 
-const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegment[] => {
-  const segments: MessageSegment[] = [];
+const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: BrowserToolRun[]): MessageSegment[] => {
+  const rawSegments: MessageSegment[] = [];
   
   const xmlThinkingRegex = /(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/g;
   const ollamaCompleteThinkingRegex = /Thinking\.\.\.\n([\s\S]*?)\n\.\.\.done thinking\./g;
   const ollamaStreamingStartRegex = /Thinking\.\.\.\n([\s\S]*)$/;
   
-  const processText = (inputText: string) => {
+  const processText = (inputText: string, baseOffset: number) => {
     let remaining = inputText;
+    let currentOffset = baseOffset;
     
     while (remaining.length > 0) {
       const xmlMatches = [...remaining.matchAll(xmlThinkingRegex)];
@@ -58,16 +63,16 @@ const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegme
         if (streamingMatch) {
           const beforeStreaming = remaining.slice(0, remaining.indexOf(streamingMatch[0]));
           if (beforeStreaming.trim()) {
-            segments.push({ type: 'content', text: beforeStreaming.trim() });
+            rawSegments.push({ type: 'content', text: beforeStreaming.trim(), startOffset: currentOffset });
           }
-          segments.push({ type: 'thinking', text: streamingMatch[1].trim(), isThinkingInProgress: true });
+          rawSegments.push({ type: 'thinking', text: streamingMatch[1].trim(), isThinkingInProgress: true, startOffset: currentOffset + remaining.indexOf(streamingMatch[0]) });
           return;
         }
       }
       
       if (nextIndex === Infinity) {
         if (remaining.trim()) {
-          segments.push({ type: 'content', text: remaining.trim() });
+          rawSegments.push({ type: 'content', text: remaining.trim(), startOffset: currentOffset });
         }
         return;
       }
@@ -75,29 +80,48 @@ const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegme
       if (nextIndex > 0) {
         const beforeContent = remaining.slice(0, nextIndex);
         if (beforeContent.trim()) {
-          segments.push({ type: 'content', text: beforeContent.trim() });
+          rawSegments.push({ type: 'content', text: beforeContent.trim(), startOffset: currentOffset });
         }
       }
       
       if (nextIndex === nextXmlIndex) {
         const match = xmlMatches.find(m => m.index === nextIndex)!;
-        segments.push({ type: 'thinking', text: match[1].trim(), isThinkingInProgress: false });
+        rawSegments.push({ type: 'thinking', text: match[1].trim(), isThinkingInProgress: false, startOffset: currentOffset + nextIndex });
         remaining = remaining.slice(nextIndex + match[0].length);
+        currentOffset += nextIndex + match[0].length;
       } else if (nextIndex === nextOllamaIndex) {
         const match = ollamaMatches.find(m => m.index === nextIndex)!;
-        segments.push({ type: 'thinking', text: match[1].trim(), isThinkingInProgress: false });
+        rawSegments.push({ type: 'thinking', text: match[1].trim(), isThinkingInProgress: false, startOffset: currentOffset + nextIndex });
         remaining = remaining.slice(nextIndex + match[0].length);
+        currentOffset += nextIndex + match[0].length;
       }
     }
   };
   
-  processText(text);
+  processText(text, 0);
   
-  if (segments.length === 0) {
-    return [{ type: 'content', text: text.trim() }];
+  if (rawSegments.length === 0 && text.trim()) {
+    rawSegments.push({ type: 'content', text: text.trim(), startOffset: 0 });
   }
-  
-  return segments;
+
+  if (!toolRuns || toolRuns.length === 0) {
+    return rawSegments;
+  }
+
+  const toolRunSegments: MessageSegment[] = toolRuns.map(run => ({
+    type: 'toolRun' as const,
+    toolRun: run,
+    startOffset: run.textOffset ?? Infinity,
+  }));
+
+  const merged = [...rawSegments, ...toolRunSegments].sort((a, b) => {
+    if (a.startOffset !== b.startOffset) return a.startOffset - b.startOffset;
+    if (a.type === 'toolRun' && b.type !== 'toolRun') return 1;
+    if (a.type !== 'toolRun' && b.type === 'toolRun') return -1;
+    return 0;
+  });
+
+  return merged;
 };
 
 const CopyIcon = () => (
@@ -390,7 +414,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       <div className="py-8 pl-9">
         <div ref={messagesColumnRef} className="max-w-[800px] mx-auto">
           {messages.map((message) => {
-            const segments = parseMessageSegments(message.text, message.isStreaming);
+            const segments = parseMessageSegments(message.text, message.isStreaming, message.toolRuns);
             const isEditing = editingMessageId === message.id;
             
             return (
@@ -476,6 +500,11 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
                           <div key={`content-${index}`} className="text-base text-text-primary leading-[1.8]">
                             <MarkdownRenderer content={segment.text} />
                           </div>
+                        );
+                      }
+                      if (segment.type === 'toolRun' && segment.toolRun) {
+                        return (
+                          <BrowserToolRunCard key={segment.toolRun.id} run={segment.toolRun} />
                         );
                       }
                       return null;

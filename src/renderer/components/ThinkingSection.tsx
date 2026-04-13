@@ -4,9 +4,18 @@ import MarkdownRenderer from './MarkdownRenderer';
 interface ThinkingSectionProps {
   content: string;
   isStreaming?: boolean;
+  streamingLabel?: string;
+  finishedLabel?: string;
+  contentClassName?: string;
 }
 
-const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content, isStreaming = false }) => {
+const ThinkingSection: React.FC<ThinkingSectionProps> = ({
+  content,
+  isStreaming = false,
+  streamingLabel = 'Thinking...',
+  finishedLabel = 'Thought process',
+  contentClassName = 'italic text-text-tertiary',
+}) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const contentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
@@ -129,7 +138,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content, isStreaming 
             <polyline points="9 18 15 12 9 6" />
           </svg>
           <span className="font-mono text-[0.7rem] uppercase tracking-widest text-text-tertiary">
-            {isStreaming ? 'Thinking...' : 'Thought process'}
+            {isStreaming ? streamingLabel : finishedLabel}
           </span>
         </div>
         <span className="font-mono text-[0.65rem] text-text-muted">
@@ -141,7 +150,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({ content, isStreaming 
         <div className="px-4 pb-4 pt-2 border-t border-border-secondary">
           <div 
             ref={contentRef}
-            className={`italic text-text-tertiary overflow-y-auto thinking-scroll-container ${isStreaming ? 'max-h-[300px]' : ''}`}
+            className={`${contentClassName} overflow-y-auto thinking-scroll-container ${isStreaming ? 'max-h-[300px]' : ''}`}
           >
             <MarkdownRenderer content={content} />
           </div>

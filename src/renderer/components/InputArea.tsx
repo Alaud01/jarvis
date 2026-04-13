@@ -116,11 +116,11 @@ const InputArea: React.FC<InputAreaProps> = ({
 
   return (
     <div className="p-6 border-t border-border-primary bg-bg-primary shrink-0">
-      <div className="max-w-[800px] mx-auto">
-        <div className="bg-transparent border border-border-primary p-3 transition-all duration-[150ms] focus-within:border-text-primary">
+      <div className="max-w-200 mx-auto">
+        <div className="bg-transparent border border-border-primary p-3 transition-all duration-150 focus-within:border-text-primary">
           <textarea
             ref={textareaRef}
-            className="w-full min-h-[24px] max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-y-auto"
+            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-y-auto"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -138,7 +138,7 @@ const InputArea: React.FC<InputAreaProps> = ({
             </div>
             <div className="flex items-center gap-2">
               <button
-                className={`py-1 px-3 border font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] ${
+                className={`py-1 px-3 border font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-150 ${
                   voiceState === 'recording'
                     ? 'border-red-500 bg-red-500 text-white animate-pulse'
                     : voiceState === 'processing'

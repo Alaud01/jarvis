@@ -15,6 +15,7 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
+  toolRuns?: BrowserToolRun[];
 }
 
 interface Conversation {
@@ -24,11 +25,30 @@ interface Conversation {
   messages: Message[];
 }
 
+interface BrowserToolRun {
+  id: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  instruction: string;
+  startUrl?: string;
+  summary?: string;
+  currentUrl?: string;
+  pageTitle?: string;
+  actionsTaken?: number;
+  error?: string;
+  processing?: string;
+  model?: string;
+  mode?: 'dom' | 'hybrid' | 'cua';
+  startedAt: string;
+  finishedAt?: string;
+  textOffset?: number;
+}
+
 interface SerializedMessage {
   id: string;
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
+  toolRuns?: BrowserToolRun[];
 }
 
 interface SerializedConversation {
@@ -40,23 +60,42 @@ interface SerializedConversation {
 
 function serializeConversation(c: Conversation): SerializedConversation {
   return {
-    ...c,
+    id: c.id,
+    title: c.title,
     timestamp: c.timestamp.toISOString(),
     messages: c.messages.map(m => ({
-      ...m,
+      id: m.id,
+      text: m.text,
+      sender: m.sender,
       timestamp: m.timestamp.toISOString(),
+      toolRuns: m.toolRuns,
     })),
   };
 }
 
 function deserializeConversation(c: SerializedConversation): Conversation {
   return {
-    ...c,
+    id: c.id,
+    title: c.title,
     timestamp: new Date(c.timestamp),
     messages: c.messages.map(m => ({
-      ...m,
+      id: m.id,
+      text: m.text,
+      sender: m.sender,
       timestamp: new Date(m.timestamp),
+      toolRuns: m.toolRuns,
     })),
+  };
+}
+
+function mergeDefinedFields<T extends Record<string, unknown>>(base: T, patch: Partial<T>): T {
+  const definedPatch = Object.fromEntries(
+    Object.entries(patch).filter(([, value]) => value !== undefined)
+  ) as Partial<T>;
+
+  return {
+    ...base,
+    ...definedPatch,
   };
 }
 
@@ -69,17 +108,44 @@ interface PendingVoiceTranscript extends VoiceTranscriptPayload {
   id: string;
 }
 
+interface BrowserToolEventPayload {
+  conversationId: string;
+  assistantMessageId: string;
+  runId: string;
+  status: BrowserToolRun['status'];
+  instruction: string;
+  startUrl?: string;
+  summary?: string;
+  currentUrl?: string;
+  pageTitle?: string;
+  actionsTaken?: number;
+  error?: string;
+  processing?: string;
+  model?: string;
+  mode?: BrowserToolRun['mode'];
+  startedAt: string;
+  finishedAt?: string;
+}
+
+interface SendMessageStreamRequest {
+  conversationId: string;
+  assistantMessageId: string;
+  model: string;
+  messages: { role: 'user' | 'assistant'; content: string }[];
+}
+
 declare global {
   interface Window {
     assistant: {
       getModels: () => Promise<string[]>;
       sendMessage: (model: string, messages: { role: string; content: string }[]) => Promise<string>;
-      sendMessageStream: (model: string, messages: { role: string; content: string }[]) => Promise<{ success: boolean }>;
+      sendMessageStream: (request: SendMessageStreamRequest) => Promise<{ success: boolean; aborted?: boolean }>;
       stopStream: () => Promise<{ success: boolean }>;
       getVoiceShortcut: () => Promise<string>;
       onChunk: (callback: (chunk: string) => void) => () => void;
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
+      onBrowserToolEvent: (callback: (payload: BrowserToolEventPayload) => void) => () => void;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
@@ -247,6 +313,87 @@ const App: React.FC = () => {
       }
     };
 
+    const handleBrowserToolEvent = (payload: BrowserToolEventPayload) => {
+      const toolRunPatch: Partial<BrowserToolRun> & Pick<BrowserToolRun, 'id' | 'status' | 'instruction' | 'startedAt'> = {
+        id: payload.runId,
+        status: payload.status,
+        instruction: payload.instruction,
+        startedAt: payload.startedAt,
+      };
+
+      if (payload.startUrl !== undefined) {
+        toolRunPatch.startUrl = payload.startUrl;
+      }
+      if (payload.summary !== undefined) {
+        toolRunPatch.summary = payload.summary;
+      }
+      if (payload.currentUrl !== undefined) {
+        toolRunPatch.currentUrl = payload.currentUrl;
+      }
+      if (payload.pageTitle !== undefined) {
+        toolRunPatch.pageTitle = payload.pageTitle;
+      }
+      if (payload.actionsTaken !== undefined) {
+        toolRunPatch.actionsTaken = payload.actionsTaken;
+      }
+      if (payload.error !== undefined) {
+        toolRunPatch.error = payload.error;
+      }
+      if (payload.processing !== undefined) {
+        toolRunPatch.processing = payload.processing;
+      }
+      if (payload.model !== undefined) {
+        toolRunPatch.model = payload.model;
+      }
+      if (payload.mode !== undefined) {
+        toolRunPatch.mode = payload.mode;
+      }
+      if (payload.finishedAt !== undefined) {
+        toolRunPatch.finishedAt = payload.finishedAt;
+      }
+
+      setConversations(prev => {
+        const matchingConversation = prev.find(c =>
+          c.messages.some(m => m.id === payload.assistantMessageId)
+        );
+        const matchingMessage = matchingConversation?.messages.find(m => m.id === payload.assistantMessageId);
+
+        const isNewToolRun = matchingMessage
+          ? !(matchingMessage.toolRuns ?? []).some(run => run.id === payload.runId)
+          : false;
+
+        if (isNewToolRun && matchingMessage) {
+          toolRunPatch.textOffset = matchingMessage.text.length;
+        }
+
+        return prev.map(c => ({
+          ...c,
+          messages: c.messages.map(m => {
+            if (m.id !== payload.assistantMessageId) {
+              return m;
+            }
+
+            const existingToolRuns = m.toolRuns ?? [];
+            const existingToolRunIndex = existingToolRuns.findIndex(run => run.id === payload.runId);
+
+            if (existingToolRunIndex === -1) {
+              return {
+                ...m,
+                toolRuns: [...existingToolRuns, toolRunPatch as BrowserToolRun],
+              };
+            }
+
+            return {
+              ...m,
+              toolRuns: existingToolRuns.map(run =>
+                run.id === payload.runId ? mergeDefinedFields(run as unknown as Record<string, unknown>, toolRunPatch as unknown as Record<string, unknown>) as unknown as BrowserToolRun : run
+              ),
+            };
+          }),
+        }));
+      });
+    };
+
     const finishStreaming = () => {
       setConversations(prev =>
         prev.map(c => ({
@@ -289,8 +436,9 @@ const App: React.FC = () => {
     const chunkCleanup = window.assistant.onChunk(handleChunk);
     const doneCleanup = window.assistant.onDone(handleDone);
     const errorCleanup = window.assistant.onError(handleError);
+    const browserToolCleanup = window.assistant.onBrowserToolEvent(handleBrowserToolEvent);
 
-    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup];
+    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, browserToolCleanup];
 
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
@@ -477,7 +625,12 @@ const App: React.FC = () => {
         { role: 'user' as const, content: newText },
       ];
 
-      await window.assistant.sendMessageStream(selectedModel, conversationMessages);
+      await window.assistant.sendMessageStream({
+        conversationId: conversation.id,
+        assistantMessageId,
+        model: selectedModel,
+        messages: conversationMessages,
+      });
     } catch (error) {
       console.error('Error sending message:', error);
       setConversations(prev =>
@@ -558,7 +711,12 @@ const App: React.FC = () => {
         { role: 'user' as const, content: userMessage.text },
       ];
 
-      await window.assistant.sendMessageStream(selectedModel, conversationMessages);
+      await window.assistant.sendMessageStream({
+        conversationId: conversation.id,
+        assistantMessageId,
+        model: selectedModel,
+        messages: conversationMessages,
+      });
     } catch (error) {
       console.error('Error regenerating response:', error);
       setConversations(prev =>
@@ -653,7 +811,12 @@ const App: React.FC = () => {
         { role: 'user' as const, content: text },
       ];
 
-      await window.assistant.sendMessageStream(selectedModel, conversationMessages);
+      await window.assistant.sendMessageStream({
+        conversationId,
+        assistantMessageId,
+        model: selectedModel,
+        messages: conversationMessages,
+      });
     } catch (error) {
       console.error('Error sending message:', error);
       setConversations(prev =>
@@ -690,7 +853,7 @@ const App: React.FC = () => {
   return (
     <ThemeProvider>
       <CopyNotification />
-      <div className="flex flex-col h-[100vh] w-[100vw] bg-bg-primary">
+      <div className="flex flex-col h-screen w-screen bg-bg-primary">
         <TopNavbar 
           tabs={openTabs}
           activeTabId={currentConversationId}

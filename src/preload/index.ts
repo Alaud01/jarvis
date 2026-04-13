@@ -5,12 +5,43 @@ type VoiceTranscriptPayload = {
   autoSubmit: boolean;
 };
 
+type ChatMessagePayload = {
+  role: 'user' | 'assistant';
+  content: string;
+};
+
+type SendMessageStreamRequest = {
+  conversationId: string;
+  assistantMessageId: string;
+  model: string;
+  messages: ChatMessagePayload[];
+};
+
+type BrowserToolEventPayload = {
+  conversationId: string;
+  assistantMessageId: string;
+  runId: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  instruction: string;
+  startUrl?: string;
+  summary?: string;
+  currentUrl?: string;
+  pageTitle?: string;
+  actionsTaken?: number;
+  error?: string;
+  processing?: string;
+  model?: string;
+  mode?: 'dom' | 'hybrid' | 'cua';
+  startedAt: string;
+  finishedAt?: string;
+};
+
 contextBridge.exposeInMainWorld('assistant', {
   getModels: () => ipcRenderer.invoke('get-models'),
   sendMessage: (model: string, messages: { role: string; content: string }[]) => 
     ipcRenderer.invoke('send-message', model, messages),
-  sendMessageStream: (model: string, messages: { role: string; content: string }[]) =>
-    ipcRenderer.invoke('send-message-stream', model, messages),
+  sendMessageStream: (request: SendMessageStreamRequest) =>
+    ipcRenderer.invoke('send-message-stream', request),
   stopStream: () => ipcRenderer.invoke('stop-stream'),
   getVoiceShortcut: () => ipcRenderer.invoke('voice-shortcut-label'),
   onChunk: (callback: (chunk: string) => void) => {
@@ -27,6 +58,11 @@ contextBridge.exposeInMainWorld('assistant', {
     const listener = (_event: any, error: string) => callback(error);
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
+  },
+  onBrowserToolEvent: (callback: (payload: BrowserToolEventPayload) => void) => {
+    const listener = (_event: any, payload: BrowserToolEventPayload) => callback(payload);
+    ipcRenderer.on('browser-tool-event', listener);
+    return () => ipcRenderer.removeListener('browser-tool-event', listener);
   },
   startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
   stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),

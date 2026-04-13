@@ -1,10 +1,29 @@
 import Store from 'electron-store';
 
+export interface SerializedBrowserToolRun {
+  id: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  instruction: string;
+  startUrl?: string;
+  summary?: string;
+  currentUrl?: string;
+  pageTitle?: string;
+  actionsTaken?: number;
+  error?: string;
+  processing?: string;
+  model?: string;
+  mode?: 'dom' | 'hybrid' | 'cua';
+  startedAt: string;
+  finishedAt?: string;
+  textOffset?: number;
+}
+
 export interface SerializedMessage {
   id: string;
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
+  toolRuns?: SerializedBrowserToolRun[];
 }
 
 export interface SerializedConversation {
