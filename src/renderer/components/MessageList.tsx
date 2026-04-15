@@ -2,7 +2,8 @@ import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHa
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
 import TypingIndicator from './TypingIndicator';
-import BrowserToolRunCard, { type BrowserToolRun } from './BrowserToolRunCard';
+import BrowserToolRunCard from './BrowserToolRunCard';
+import type { BrowserToolRun } from '../../shared/browser';
 
 interface Message {
   id: string;
@@ -44,6 +45,58 @@ const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: Br
   const xmlThinkingRegex = /(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/g;
   const ollamaCompleteThinkingRegex = /Thinking\.\.\.\n([\s\S]*?)\n\.\.\.done thinking\./g;
   const ollamaStreamingStartRegex = /Thinking\.\.\.\n([\s\S]*)$/;
+
+  const pushContentSegment = (rawText: string, startOffset: number) => {
+    const firstNonWhitespaceIndex = rawText.search(/\S/);
+    if (firstNonWhitespaceIndex === -1) {
+      return;
+    }
+
+    const trimmedText = rawText.trimEnd().slice(firstNonWhitespaceIndex);
+    if (!trimmedText) {
+      return;
+    }
+
+    rawSegments.push({
+      type: 'content',
+      text: trimmedText,
+      startOffset: startOffset + firstNonWhitespaceIndex,
+    });
+  };
+
+  const pushThinkingSegment = (
+    rawText: string,
+    startOffset: number,
+    isThinkingInProgress: boolean
+  ) => {
+    const trimmedText = rawText.trim();
+    if (!trimmedText) {
+      return;
+    }
+
+    rawSegments.push({
+      type: 'thinking',
+      text: trimmedText,
+      isThinkingInProgress,
+      startOffset,
+    });
+  };
+
+  const collapseAdjacentThinkingSegments = (segments: MessageSegment[]): MessageSegment[] => {
+    return segments.reduce<MessageSegment[]>((collapsed, segment) => {
+      const previous = collapsed[collapsed.length - 1];
+      if (previous?.type === 'thinking' && segment.type === 'thinking' && previous.text && segment.text) {
+        previous.text = `${previous.text}\n\n${segment.text}`;
+        previous.isThinkingInProgress = Boolean(
+          previous.isThinkingInProgress || segment.isThinkingInProgress
+        );
+        return collapsed;
+      }
+
+      collapsed.push({ ...segment });
+      return collapsed;
+    }, []);
+  };
   
   const processText = (inputText: string, baseOffset: number) => {
     let remaining = inputText;
@@ -62,36 +115,34 @@ const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: Br
         const streamingMatch = remaining.match(ollamaStreamingStartRegex);
         if (streamingMatch) {
           const beforeStreaming = remaining.slice(0, remaining.indexOf(streamingMatch[0]));
-          if (beforeStreaming.trim()) {
-            rawSegments.push({ type: 'content', text: beforeStreaming.trim(), startOffset: currentOffset });
-          }
-          rawSegments.push({ type: 'thinking', text: streamingMatch[1].trim(), isThinkingInProgress: true, startOffset: currentOffset + remaining.indexOf(streamingMatch[0]) });
+          pushContentSegment(beforeStreaming, currentOffset);
+          pushThinkingSegment(
+            streamingMatch[1],
+            currentOffset + remaining.indexOf(streamingMatch[0]),
+            true
+          );
           return;
         }
       }
       
       if (nextIndex === Infinity) {
-        if (remaining.trim()) {
-          rawSegments.push({ type: 'content', text: remaining.trim(), startOffset: currentOffset });
-        }
+        pushContentSegment(remaining, currentOffset);
         return;
       }
       
       if (nextIndex > 0) {
         const beforeContent = remaining.slice(0, nextIndex);
-        if (beforeContent.trim()) {
-          rawSegments.push({ type: 'content', text: beforeContent.trim(), startOffset: currentOffset });
-        }
+        pushContentSegment(beforeContent, currentOffset);
       }
       
       if (nextIndex === nextXmlIndex) {
         const match = xmlMatches.find(m => m.index === nextIndex)!;
-        rawSegments.push({ type: 'thinking', text: match[1].trim(), isThinkingInProgress: false, startOffset: currentOffset + nextIndex });
+        pushThinkingSegment(match[1], currentOffset + nextIndex, false);
         remaining = remaining.slice(nextIndex + match[0].length);
         currentOffset += nextIndex + match[0].length;
       } else if (nextIndex === nextOllamaIndex) {
         const match = ollamaMatches.find(m => m.index === nextIndex)!;
-        rawSegments.push({ type: 'thinking', text: match[1].trim(), isThinkingInProgress: false, startOffset: currentOffset + nextIndex });
+        pushThinkingSegment(match[1], currentOffset + nextIndex, false);
         remaining = remaining.slice(nextIndex + match[0].length);
         currentOffset += nextIndex + match[0].length;
       }
@@ -101,11 +152,11 @@ const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: Br
   processText(text, 0);
   
   if (rawSegments.length === 0 && text.trim()) {
-    rawSegments.push({ type: 'content', text: text.trim(), startOffset: 0 });
+    pushContentSegment(text, 0);
   }
 
   if (!toolRuns || toolRuns.length === 0) {
-    return rawSegments;
+    return collapseAdjacentThinkingSegments(rawSegments);
   }
 
   const toolRunSegments: MessageSegment[] = toolRuns.map(run => ({
@@ -116,12 +167,12 @@ const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: Br
 
   const merged = [...rawSegments, ...toolRunSegments].sort((a, b) => {
     if (a.startOffset !== b.startOffset) return a.startOffset - b.startOffset;
-    if (a.type === 'toolRun' && b.type !== 'toolRun') return 1;
-    if (a.type !== 'toolRun' && b.type === 'toolRun') return -1;
+    if (a.type === 'toolRun' && b.type !== 'toolRun') return -1;
+    if (a.type !== 'toolRun' && b.type === 'toolRun') return 1;
     return 0;
   });
 
-  return merged;
+  return collapseAdjacentThinkingSegments(merged);
 };
 
 const CopyIcon = () => (

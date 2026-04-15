@@ -6,6 +6,7 @@ interface VoiceTranscriptPayload {
   id: string;
   text: string;
   autoSubmit: boolean;
+  newChat: boolean;
 }
 
 interface InputAreaProps {

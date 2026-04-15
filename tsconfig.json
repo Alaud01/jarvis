@@ -8,9 +8,9 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "rootDir": "src/renderer",
+    "rootDir": "src",
     "outDir": "dist/renderer"
   },
-  "include": ["src/renderer/**/*"],
+  "include": ["src/renderer/**/*", "src/shared/**/*"],
   "exclude": ["node_modules", "src/main", "src/preload"]
 }

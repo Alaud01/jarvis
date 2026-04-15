@@ -1,22 +1,7 @@
 import Store from 'electron-store';
+import type { BrowserToolRun } from '../shared/browser';
 
-export interface SerializedBrowserToolRun {
-  id: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
-  instruction: string;
-  startUrl?: string;
-  summary?: string;
-  currentUrl?: string;
-  pageTitle?: string;
-  actionsTaken?: number;
-  error?: string;
-  processing?: string;
-  model?: string;
-  mode?: 'dom' | 'hybrid' | 'cua';
-  startedAt: string;
-  finishedAt?: string;
-  textOffset?: number;
-}
+export type SerializedBrowserToolRun = BrowserToolRun;
 
 export interface SerializedMessage {
   id: string;
@@ -39,7 +24,7 @@ interface StoreSchema {
 }
 
 const store = new Store<StoreSchema>({
-  name: 'rhandy',
+  name: 'jarvis',
   defaults: {
     conversations: [],
     selectedModel: '',

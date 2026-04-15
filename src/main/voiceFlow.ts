@@ -9,6 +9,7 @@ type VoiceFlowState = 'idle' | 'recording' | 'processing';
 type VoiceTranscriptPayload = {
   text: string;
   autoSubmit: boolean;
+  newChat: boolean;
 };
 
 let voiceFlowState: VoiceFlowState = 'idle';
@@ -152,9 +153,16 @@ async function stopAndProcess(): Promise<void> {
       });
 
       if (sendToProjectApp) {
+        const projectWin = BrowserWindow.getAllWindows().find(win => !win.isDestroyed());
+        if (projectWin) {
+          if (projectWin.isMinimized()) projectWin.restore();
+          projectWin.show();
+          projectWin.focus();
+        }
         sendTranscriptToRenderer({
           text: result.text,
           autoSubmit: routeToProjectAppOnly,
+          newChat: routeToProjectAppOnly,
         });
       }
 

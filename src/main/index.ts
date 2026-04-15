@@ -6,7 +6,18 @@ import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './v
 import { setMainWindow } from './audioRecorder';
 import { loadConversations, saveConversations, deleteConversation, loadSelectedModel, saveSelectedModel } from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
-import { closeAllBrowserSessions, closeBrowserSession, executeBrowserAgent, getBrowserSessionSummary, type BrowserAgentProgressUpdate, type BrowserAgentResult, type BrowserAgentToolArgs } from './stagehandService';
+import {
+  closeAllBrowserSessions,
+  closeBrowserSession,
+  deleteBrowserArtifacts,
+  executeBrowserAgent,
+  getBrowserSessionSummary,
+  readBrowserArtifactAsPreviewDataUrl,
+  type BrowserAgentProgressUpdate,
+  type BrowserAgentResult,
+  type BrowserAgentToolArgs,
+} from './stagehandService';
+import type { BrowserLLMTrace, BrowserScreenshotArtifact, BrowserToolRun } from '../shared/browser';
 
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -15,6 +26,7 @@ let currentAbortController: AbortController | null = null;
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 
 const OLLAMA_BASE_URL = 'http://localhost:11434';
+const MAX_BROWSER_AGENT_STEPS = 40;
 
 interface OllamaModel {
   name: string;
@@ -45,6 +57,7 @@ interface OllamaToolCall {
 interface ChatMessage {
   role: ChatRole;
   content: string;
+  images?: string[];
   thinking?: string;
   tool_calls?: OllamaToolCall[];
   tool_name?: string;
@@ -76,6 +89,7 @@ interface ToolDefinition {
       type: 'object';
       properties: Record<string, unknown>;
       required?: string[];
+      additionalProperties?: boolean;
     };
   };
 }
@@ -87,6 +101,10 @@ interface StreamChunk {
 
 interface StreamTurnResult {
   assistantMessage?: ChatMessage;
+}
+
+interface StreamChatTurnOptions {
+  tools?: ToolDefinition[] | null;
 }
 
 interface BrowserToolEventPayload {
@@ -103,9 +121,12 @@ interface BrowserToolEventPayload {
   error?: string;
   processing?: string;
   model?: BrowserAgentResult['model'];
-  mode?: BrowserAgentResult['mode'];
+  mode?: BrowserToolRun['mode'];
+  screenshots?: BrowserScreenshotArtifact[];
+  llmTrace?: BrowserLLMTrace;
   startedAt: string;
   finishedAt?: string;
+  textOffset?: number;
 }
 
 interface SendMessageStreamRequest {
@@ -137,7 +158,8 @@ const CHAT_TOOLS: ToolDefinition[] = [
             description: 'Optional flag to return raw HTML instead of a cleaned readable version for HTML pages.'
           }
         },
-        required: ['url']
+        required: ['url'],
+        additionalProperties: false,
       }
     }
   },
@@ -145,24 +167,27 @@ const CHAT_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'browser_agent',
-      description: 'Use a real visible browser window to open websites, click, type, submit forms, and inspect live page content. This tool reuses the same browser session for the current conversation when available.',
+      description: 'Use a real visible browser window to open websites, click, type, submit forms, and inspect live page content. Provide one plain-English browser task only. Do not send Playwright-style selector or method JSON. This tool reuses the same browser session for the current conversation when available.',
       parameters: {
         type: 'object',
         properties: {
           instruction: {
             type: 'string',
-            description: 'The browser task to perform.'
+            description: 'One concise browser goal in plain English, for example "open the pricing page and click Start free trial". Do not include selectors, element IDs, or method/selector JSON.'
           },
           startUrl: {
             type: 'string',
-            description: 'Optional URL to open before carrying out the task.'
+            description: 'Optional absolute http or https URL to open before carrying out the task. Omit this when continuing from the current page.'
           },
           maxSteps: {
             type: 'number',
-            description: 'Optional limit for how many browser actions the task may take.'
+            description: `Optional integer limit for how many browser actions the task may take. Use a value between 1 and ${MAX_BROWSER_AGENT_STEPS}.`,
+            minimum: 1,
+            maximum: MAX_BROWSER_AGENT_STEPS,
           }
         },
-        required: ['instruction']
+        required: ['instruction'],
+        additionalProperties: false,
       }
     }
   }
@@ -197,7 +222,7 @@ async function sendToOllama(model: string, messages: ChatMessage[]): Promise<str
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama request failed: ${response.statusText}`);
+      throw await buildOllamaRequestError(response);
     }
 
     const data = (await response.json()) as OllamaChatResponse;
@@ -216,6 +241,40 @@ function isAbortLikeError(error: unknown): boolean {
   );
 }
 
+function parseOllamaErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: unknown };
+    if (typeof parsed.error === 'string' && parsed.error.trim()) {
+      return parsed.error.trim();
+    }
+  } catch {
+    // Fall back to the raw response body when Ollama does not return JSON.
+  }
+
+  return trimmed;
+}
+
+async function buildOllamaRequestError(response: Response): Promise<Error> {
+  const fallbackMessage = response.statusText.trim() || `HTTP ${response.status}`;
+
+  try {
+    const responseBody = await response.text();
+    const details = parseOllamaErrorBody(responseBody);
+    if (details) {
+      return new Error(`Ollama request failed (${response.status}): ${details}`);
+    }
+  } catch {
+    // Ignore body parsing failures and surface the HTTP status instead.
+  }
+
+  return new Error(`Ollama request failed (${response.status}): ${fallbackMessage}`);
+}
+
 async function buildSystemPrompt(conversationId: string): Promise<ChatMessage> {
   const browserSummary = await getBrowserSessionSummary(conversationId);
   const browserContext = browserSummary.hasActiveSession
@@ -225,7 +284,7 @@ async function buildSystemPrompt(conversationId: string): Promise<ChatMessage> {
   return {
     role: 'system',
     content: [
-      'You are Rhandy, a desktop assistant.',
+      'You are Jarvis, a desktop assistant. Your name is Jarvis.',
       'Use the fetch_url tool first for public webpages when you only need to read page content, summarize it, or extract information such as headlines, links, prices, or article text.',
       'Use the browser_agent tool only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
       'When web access is unnecessary, answer normally without calling a tool.',
@@ -236,16 +295,80 @@ async function buildSystemPrompt(conversationId: string): Promise<ChatMessage> {
   };
 }
 
-function parseBrowserAgentArgs(rawArguments: Record<string, unknown> | string): BrowserAgentToolArgs {
+function parseToolArgumentsObject(
+  toolName: string,
+  rawArguments: Record<string, unknown> | string
+): Record<string, unknown> {
   const parsed = typeof rawArguments === 'string'
-    ? JSON.parse(rawArguments)
+    ? (() => {
+      try {
+        return JSON.parse(rawArguments);
+      } catch {
+        throw new Error(`${toolName} arguments must be valid JSON.`);
+      }
+    })()
     : rawArguments;
 
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error('browser_agent arguments must be a JSON object.');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${toolName} arguments must be a JSON object.`);
   }
 
-  const args = parsed as Record<string, unknown>;
+  return parsed as Record<string, unknown>;
+}
+
+function parseBrowserAgentStartUrl(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  if (typeof value !== 'string') {
+    throw new Error('browser_agent "startUrl" must be a string when provided.');
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(trimmed);
+  } catch {
+    throw new Error('browser_agent "startUrl" must be an absolute http or https URL.');
+  }
+
+  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+    throw new Error('browser_agent "startUrl" must use the http or https protocol.');
+  }
+
+  return parsedUrl.toString();
+}
+
+function parseBrowserAgentMaxSteps(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  const numericValue = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? Number(value)
+      : NaN;
+
+  if (!Number.isFinite(numericValue)) {
+    throw new Error(`browser_agent "maxSteps" must be a finite number between 1 and ${MAX_BROWSER_AGENT_STEPS}.`);
+  }
+
+  const normalized = Math.floor(numericValue);
+  if (normalized < 1 || normalized > MAX_BROWSER_AGENT_STEPS) {
+    throw new Error(`browser_agent "maxSteps" must be between 1 and ${MAX_BROWSER_AGENT_STEPS}.`);
+  }
+
+  return normalized;
+}
+
+function parseBrowserAgentArgs(rawArguments: Record<string, unknown> | string): BrowserAgentToolArgs {
+  const args = parseToolArgumentsObject('browser_agent', rawArguments);
   const instruction = typeof args.instruction === 'string' ? args.instruction.trim() : '';
 
   if (!instruction) {
@@ -254,21 +377,13 @@ function parseBrowserAgentArgs(rawArguments: Record<string, unknown> | string): 
 
   return {
     instruction,
-    startUrl: typeof args.startUrl === 'string' && args.startUrl.trim() ? args.startUrl.trim() : undefined,
-    maxSteps: typeof args.maxSteps === 'number' && Number.isFinite(args.maxSteps) ? args.maxSteps : undefined,
+    startUrl: parseBrowserAgentStartUrl(args.startUrl),
+    maxSteps: parseBrowserAgentMaxSteps(args.maxSteps),
   };
 }
 
 function parseFetchToolArgs(rawArguments: Record<string, unknown> | string): FetchToolArgs {
-  const parsed = typeof rawArguments === 'string'
-    ? JSON.parse(rawArguments)
-    : rawArguments;
-
-  if (!parsed || typeof parsed !== 'object') {
-    throw new Error('fetch_url arguments must be a JSON object.');
-  }
-
-  const args = parsed as Record<string, unknown>;
+  const args = parseToolArgumentsObject('fetch_url', rawArguments);
   const url = typeof args.url === 'string' ? args.url.trim() : '';
 
   if (!url) {
@@ -280,6 +395,26 @@ function parseFetchToolArgs(rawArguments: Record<string, unknown> | string): Fet
     maxChars: typeof args.maxChars === 'number' && Number.isFinite(args.maxChars) ? args.maxChars : undefined,
     rawHtml: typeof args.rawHtml === 'boolean' ? args.rawHtml : undefined,
   };
+}
+
+// Ollama's Gemini adapter currently rejects round-tripped tool calls because
+// the follow-up request is missing provider-specific function call metadata.
+function requiresToolResultSynthesis(model: string): boolean {
+  return /\bgemini\b/i.test(model);
+}
+
+function logMainProcess(
+  prefix: 'LLM' | 'BrowserAgent',
+  message: string,
+  details?: Record<string, unknown>
+): void {
+  const label = `[${prefix}] ${message}`;
+  if (details) {
+    console.log(label, details);
+    return;
+  }
+
+  console.log(label);
 }
 
 function formatBrowserToolResult(result: BrowserAgentResult): string {
@@ -301,11 +436,23 @@ function formatBrowserToolResult(result: BrowserAgentResult): string {
   lines.push(`Actions taken: ${result.actionsTaken}`);
   lines.push(`Summary: ${result.summary}`);
 
+  if (result.screenshots?.length) {
+    lines.push(`Screenshot artifacts: ${result.screenshots.map((artifact) => artifact.label).join(', ')}`);
+  }
+
   if (result.error) {
     lines.push(`Error: ${result.error}`);
   }
 
   return lines.join('\n');
+}
+
+async function buildBrowserToolMessage(result: BrowserAgentResult): Promise<ChatMessage> {
+  return {
+    role: 'tool',
+    tool_name: 'browser_agent',
+    content: formatBrowserToolResult(result),
+  };
 }
 
 function formatFetchToolResult(result: FetchToolResult): string {
@@ -339,36 +486,84 @@ function formatFetchToolResult(result: FetchToolResult): string {
   return lines.join('\n');
 }
 
+function formatToolResultForSynthesis(toolMessage: ChatMessage, index: number): string {
+  return [
+    `Tool result ${index + 1} (${toolMessage.tool_name ?? 'tool'}):`,
+    toolMessage.content,
+  ].join('\n');
+}
+
+function buildToolResultSynthesisMessages(
+  baseMessages: ChatMessage[],
+  assistantMessage: ChatMessage | undefined,
+  toolMessages: ChatMessage[]
+): ChatMessage[] {
+  const synthesisMessages = [...baseMessages];
+  const assistantContent = assistantMessage?.content.trim();
+
+  if (assistantContent) {
+    synthesisMessages.push({
+      role: 'assistant',
+      content: assistantContent,
+    });
+  }
+
+  synthesisMessages.push({
+    role: 'system',
+    content: [
+      'A tool has already been executed for the latest user request.',
+      'Use the tool results provided next to answer the user directly.',
+      'Do not call more tools and do not mention internal tool mechanics unless the user explicitly asks.',
+    ].join(' '),
+  });
+  synthesisMessages.push({
+    role: 'user',
+    content: [
+      'Use these tool results to answer my previous request directly:',
+      ...toolMessages.map((toolMessage, index) => formatToolResultForSynthesis(toolMessage, index)),
+    ].join('\n\n'),
+  });
+
+  return synthesisMessages;
+}
+
 async function streamChatTurn(
   model: string,
   messages: ChatMessage[],
   abortController: AbortController,
-  onChunk: (chunk: StreamChunk) => void
+  onChunk: (chunk: StreamChunk) => void,
+  options?: StreamChatTurnOptions,
 ): Promise<StreamTurnResult> {
   let accumulatedContent = '';
   let accumulatedThinking = '';
   const toolCalls: OllamaToolCall[] = [];
   try {
+    const requestTools = options?.tools === undefined ? CHAT_TOOLS : options.tools;
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages,
+      stream: true,
+      think: true,
+      options: {
+        num_predict: 64000,
+      },
+    };
+
+    if (requestTools) {
+      requestBody.tools = requestTools;
+    }
+
     const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        tools: CHAT_TOOLS,
-        stream: true,
-        think: true,
-        options: {
-          num_predict: 64000,
-        },
-      }),
+      body: JSON.stringify(requestBody),
       signal: abortController.signal,
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama request failed: ${response.statusText}`);
+      throw await buildOllamaRequestError(response);
     }
 
     if (!response.body) {
@@ -508,7 +703,7 @@ async function streamChatTurn(
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 450,
+    width: 1000,
     height: 700,
     show: false,
     frame: true,
@@ -525,7 +720,7 @@ function createWindow(): void {
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools();
+    // mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
@@ -549,7 +744,7 @@ function createTray(): void {
     { label: 'Quit', click: () => app.quit() }
   ]);
   
-  tray.setToolTip('Rhandy');
+  tray.setToolTip('Jarvis');
   tray.setContextMenu(contextMenu);
   
   tray.on('click', () => {
@@ -570,35 +765,67 @@ ipcMain.handle('send-message', async (_event, model: string, messages: { role: s
 });
 
 ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRequest) => {
+  let flushThinkingConsoleBuffer = (_reason: string) => undefined;
+
   try {
     const abortController = new AbortController();
     currentAbortController = abortController;
     let inThinking = false;
+    let streamedTextLength = 0;
+    let thinkingConsoleBuffer = '';
+
+    const sendOllamaChunk = (chunk: string) => {
+      streamedTextLength += chunk.length;
+      event.sender.send('ollama-chunk', chunk);
+    };
+
+    flushThinkingConsoleBuffer = (reason: string) => {
+      const normalizedThinking = thinkingConsoleBuffer.trim();
+      if (!normalizedThinking) {
+        thinkingConsoleBuffer = '';
+        return;
+      }
+
+      logMainProcess(
+        'LLM',
+        `Thinking block (${reason})\n${normalizedThinking}`,
+        {
+          conversationId: request.conversationId,
+          model: request.model,
+          characters: normalizedThinking.length,
+        }
+      );
+      thinkingConsoleBuffer = '';
+    };
 
     const emitStreamChunk = (chunk: StreamChunk) => {
       if (chunk.type === 'thinking') {
         if (!inThinking) {
-          event.sender.send('ollama-chunk', 'Thinking...\n');
+          sendOllamaChunk('Thinking...\n');
           inThinking = true;
         }
-        event.sender.send('ollama-chunk', chunk.content);
+        thinkingConsoleBuffer += chunk.content;
+        sendOllamaChunk(chunk.content);
         return;
       }
 
       if (inThinking) {
-        event.sender.send('ollama-chunk', '\n...done thinking.\n');
+        flushThinkingConsoleBuffer('before-content');
+        sendOllamaChunk('\n...done thinking.\n');
         inThinking = false;
       }
 
-      event.sender.send('ollama-chunk', chunk.content);
+      sendOllamaChunk(chunk.content);
     };
 
-    const closeThinkingSection = () => {
+    const closeThinkingSection = (reason: string) => {
       if (!inThinking) {
+        flushThinkingConsoleBuffer(reason);
         return;
       }
 
-      event.sender.send('ollama-chunk', '\n...done thinking.\n');
+      flushThinkingConsoleBuffer(reason);
+      sendOllamaChunk('\n...done thinking.\n');
       inThinking = false;
     };
 
@@ -610,19 +837,15 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
     while (true) {
       const turnResult = await streamChatTurn(request.model, baseMessages, abortController, emitStreamChunk);
       const assistantMessage = turnResult.assistantMessage;
-
-      if (assistantMessage) {
-        baseMessages.push(assistantMessage);
-      }
-
       const toolCalls = assistantMessage?.tool_calls ?? [];
       if (!toolCalls.length) {
-        closeThinkingSection();
+        closeThinkingSection('turn-complete');
         event.sender.send('ollama-done');
         return { success: true };
       }
 
-      closeThinkingSection();
+      closeThinkingSection('before-tool-call');
+      const toolResultMessages: ChatMessage[] = [];
 
       for (const toolCall of toolCalls) {
         if (toolCall.function.name === 'fetch_url') {
@@ -631,7 +854,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             args = parseFetchToolArgs(toolCall.function.arguments);
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Invalid fetch_url arguments.';
-            baseMessages.push({
+            toolResultMessages.push({
               role: 'tool',
               tool_name: toolCall.function.name,
               content: `Fetch failed.\nError: ${errorMessage}`,
@@ -640,7 +863,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
           }
 
           const fetchResult = await fetchUrlContent(args);
-          baseMessages.push({
+          toolResultMessages.push({
             role: 'tool',
             tool_name: toolCall.function.name,
             content: formatFetchToolResult(fetchResult),
@@ -655,6 +878,13 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Invalid browser_agent arguments.';
             const failedAt = new Date().toISOString();
+            logMainProcess('BrowserAgent', 'Rejected browser_agent arguments', {
+              conversationId: request.conversationId,
+              assistantMessageId: request.assistantMessageId,
+              model: request.model,
+              rawArguments: toolCall.function.arguments,
+              error: errorMessage,
+            });
             event.sender.send('browser-tool-event', {
               conversationId: request.conversationId,
               assistantMessageId: request.assistantMessageId,
@@ -665,8 +895,9 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               error: errorMessage,
               startedAt: failedAt,
               finishedAt: failedAt,
+              textOffset: streamedTextLength,
             } satisfies BrowserToolEventPayload);
-            baseMessages.push({
+            toolResultMessages.push({
               role: 'tool',
               tool_name: toolCall.function.name,
               content: `Browser agent failed.\nError: ${errorMessage}`,
@@ -676,6 +907,16 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
 
           const runId = randomUUID();
           const startedAt = new Date().toISOString();
+          const textOffset = streamedTextLength;
+          logMainProcess('BrowserAgent', 'Dispatching browser_agent', {
+            conversationId: request.conversationId,
+            assistantMessageId: request.assistantMessageId,
+            runId,
+            model: request.model,
+            instruction: args.instruction,
+            startUrl: args.startUrl,
+            maxSteps: args.maxSteps,
+          });
           event.sender.send('browser-tool-event', {
             conversationId: request.conversationId,
             assistantMessageId: request.assistantMessageId,
@@ -685,6 +926,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             startUrl: args.startUrl,
             processing: 'Preparing browser task...',
             startedAt,
+            textOffset,
           } satisfies BrowserToolEventPayload);
 
           try {
@@ -707,7 +949,9 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
                   processing: update.processing,
                   model: update.model,
                   mode: update.mode,
+                  screenshots: update.screenshots,
                   startedAt,
+                  textOffset,
                 } satisfies BrowserToolEventPayload);
               }
             );
@@ -726,18 +970,23 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               processing: browserResult.processing,
               model: browserResult.model,
               mode: browserResult.mode,
+              screenshots: browserResult.screenshots,
+              llmTrace: browserResult.llmTrace,
               startedAt: browserResult.startedAt,
               finishedAt: browserResult.finishedAt,
+              textOffset,
             } satisfies BrowserToolEventPayload);
 
-            baseMessages.push({
-              role: 'tool',
-              tool_name: toolCall.function.name,
-              content: formatBrowserToolResult(browserResult),
-            });
+            toolResultMessages.push(await buildBrowserToolMessage(browserResult));
           } catch (error) {
             if (isAbortLikeError(error)) {
               const finishedAt = new Date().toISOString();
+              logMainProcess('BrowserAgent', 'Browser agent cancelled', {
+                conversationId: request.conversationId,
+                assistantMessageId: request.assistantMessageId,
+                runId,
+                instruction: args.instruction,
+              });
               event.sender.send('browser-tool-event', {
                 conversationId: request.conversationId,
                 assistantMessageId: request.assistantMessageId,
@@ -749,12 +998,21 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
                 error: 'Browser task cancelled.',
                 startedAt,
                 finishedAt,
+                textOffset,
               } satisfies BrowserToolEventPayload);
               throw error;
             }
 
             const errorMessage = error instanceof Error ? error.message : 'Unknown browser tool error.';
             const finishedAt = new Date().toISOString();
+            logMainProcess('BrowserAgent', 'Browser agent dispatch failed', {
+              conversationId: request.conversationId,
+              assistantMessageId: request.assistantMessageId,
+              runId,
+              instruction: args.instruction,
+              startUrl: args.startUrl,
+              error: errorMessage,
+            });
             event.sender.send('browser-tool-event', {
               conversationId: request.conversationId,
               assistantMessageId: request.assistantMessageId,
@@ -766,8 +1024,9 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               error: errorMessage,
               startedAt,
               finishedAt,
+              textOffset,
             } satisfies BrowserToolEventPayload);
-            baseMessages.push({
+            toolResultMessages.push({
               role: 'tool',
               tool_name: toolCall.function.name,
               content: `Browser agent failed.\nError: ${errorMessage}`,
@@ -776,14 +1035,47 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
           continue;
         }
 
-        baseMessages.push({
+        toolResultMessages.push({
           role: 'tool',
           tool_name: toolCall.function.name,
           content: `Unknown tool: ${toolCall.function.name}`,
         });
       }
+
+      if (requiresToolResultSynthesis(request.model)) {
+        logMainProcess('LLM', 'Using tool-result synthesis fallback', {
+          conversationId: request.conversationId,
+          model: request.model,
+          toolCallCount: toolCalls.length,
+        });
+        const synthesisResult = await streamChatTurn(
+          request.model,
+          buildToolResultSynthesisMessages(baseMessages, assistantMessage, toolResultMessages),
+          abortController,
+          emitStreamChunk,
+          { tools: null },
+        );
+
+        if (synthesisResult.assistantMessage?.tool_calls?.length) {
+          logMainProcess('LLM', 'Ignoring unexpected tool calls during synthesis fallback', {
+            conversationId: request.conversationId,
+            model: request.model,
+            toolCallCount: synthesisResult.assistantMessage.tool_calls.length,
+          });
+        }
+
+        closeThinkingSection('tool-synthesis-complete');
+        event.sender.send('ollama-done');
+        return { success: true };
+      }
+
+      if (assistantMessage) {
+        baseMessages.push(assistantMessage);
+      }
+      baseMessages.push(...toolResultMessages);
     }
   } catch (error) {
+    flushThinkingConsoleBuffer('stream-error');
     if (isAbortLikeError(error)) {
       event.sender.send('ollama-done');
       return { success: true, aborted: true };
@@ -816,8 +1108,13 @@ ipcMain.handle('store:save-conversations', async (_event, conversations: unknown
 
 ipcMain.handle('store:delete-conversation', async (_event, id: string) => {
   await closeBrowserSession(id);
+  await deleteBrowserArtifacts(id);
   deleteConversation(id);
   return { success: true };
+});
+
+ipcMain.handle('browser-artifact:data-url', async (_event, filePath: string) => {
+  return readBrowserArtifactAsPreviewDataUrl(filePath);
 });
 
 ipcMain.handle('store:load-model', async () => {

@@ -2,7 +2,7 @@ const DEFAULT_MAX_CHARS = 18000;
 const MAX_MAX_CHARS = 50000;
 const DEFAULT_TIMEOUT_MS = 15000;
 const MAX_TIMEOUT_MS = 45000;
-const FETCH_USER_AGENT = 'Rhandy/1.0 (+desktop assistant fetch tool)';
+const FETCH_USER_AGENT = 'Jarvis/1.0 (+desktop assistant fetch tool)';
 
 const HTML_ENTITY_MAP: Record<string, string> = {
   amp: '&',

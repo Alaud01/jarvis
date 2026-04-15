@@ -1,5 +1,5 @@
 {
-  "name": "rhandy",
+  "name": "jarvis",
   "version": "1.0.0",
   "description": "Mac menu bar assistant powered by Ollama",
   "main": "dist/main/index.js",
@@ -46,7 +46,7 @@
     "wait-on": "^8.0.0"
   },
   "build": {
-    "appId": "com.rhandy.app",
+    "appId": "com.jarvis.app",
     "mac": {
       "category": "public.app-category.productivity",
       "entitlements": "entitlements.mac.plist",

@@ -1,8 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { BrowserLLMTrace, BrowserScreenshotArtifact } from '../shared/browser';
 
 type VoiceTranscriptPayload = {
   text: string;
   autoSubmit: boolean;
+  newChat: boolean;
 };
 
 type ChatMessagePayload = {
@@ -32,8 +34,11 @@ type BrowserToolEventPayload = {
   processing?: string;
   model?: string;
   mode?: 'dom' | 'hybrid' | 'cua';
+  screenshots?: BrowserScreenshotArtifact[];
+  llmTrace?: BrowserLLMTrace;
   startedAt: string;
   finishedAt?: string;
+  textOffset?: number;
 };
 
 contextBridge.exposeInMainWorld('assistant', {
@@ -64,6 +69,7 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('browser-tool-event', listener);
     return () => ipcRenderer.removeListener('browser-tool-event', listener);
   },
+  getBrowserArtifactDataUrl: (filePath: string) => ipcRenderer.invoke('browser-artifact:data-url', filePath),
   startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
   stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),
   getVoiceRecordingState: () => ipcRenderer.invoke('voice-recording-state'),

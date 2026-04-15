@@ -2,11 +2,15 @@ import {
   Stagehand,
   providerEnvVarMap,
   type AgentResult as StagehandAgentResult,
-  type AgentToolMode,
 } from '@browserbasehq/stagehand';
+import { app } from 'electron';
+import { randomUUID } from 'crypto';
+import { mkdir, readFile, rm, writeFile } from 'fs/promises';
+import path from 'path';
+import type { BrowserLLMTrace, BrowserLLMTraceStep, BrowserScreenshotArtifact, BrowserToolMode } from '../shared/browser';
 
-const DEFAULT_MAX_STEPS = 12;
-const MAX_MAX_STEPS = 25;
+const DEFAULT_MAX_STEPS = 20;
+const MAX_MAX_STEPS = 40;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 const DEFAULT_BROWSER_EXECUTABLE_PATH = '/Applications/Helium.app/Contents/MacOS/Helium';
 const DEFAULT_STAGEHAND_MODEL = 'ollama/qwen3';
@@ -14,13 +18,27 @@ const OLLAMA_BASE_URL = 'http://localhost:11434';
 const OLLAMA_MODEL_CACHE_TTL_MS = 30_000;
 const MAX_PROCESSING_LINES = 80;
 const NAVIGATION_TIMEOUT_MS = 45000;
-const LIKELY_VISION_MODEL_PATTERNS = [
+const BROWSER_ARTIFACTS_DIR_NAME = 'browser-artifacts';
+const SCREENSHOT_EXTENSION = 'jpg';
+const SCREENSHOT_MIME_TYPE = 'image/jpeg';
+const SCREENSHOT_QUALITY = 80;
+const GEMINI_FAMILY_PATTERN = /gemini/i;
+const CUA_STAGEHAND_MODEL_PATTERNS = [
+  /^anthropic\/claude/i,
+  /^google(?:-vertex)?\/gemini/i,
+  /^openai\/computer-use/i,
+  /^microsoft\/fara/i,
+];
+const HYBRID_STAGEHAND_MODEL_PATTERNS = [
   /^anthropic\/claude/i,
   /^google(?:-vertex)?\/gemini/i,
   /^openai\/.*(?:gpt-4o|gpt-4\.1|o1|o3|computer-use)/i,
   /^azure\/.*(?:gpt-4o|gpt-4\.1|o1|o3)/i,
   /^microsoft\/fara/i,
-  /^ollama\/.*(?:vision|vl|llava|bakllava|moondream|minicpm|pixtral|gemma3)/i,
+  /^ollama\/.*(?:vision|vl|llava|bakllava|moondream|minicpm|pixtral)/i,
+  /gemini/i,
+  /gemma/i,
+  /kimi/i,
 ];
 const RELIABLE_STAGEHAND_MODEL_PATTERNS = [
   /^anthropic\/claude/i,
@@ -29,7 +47,9 @@ const RELIABLE_STAGEHAND_MODEL_PATTERNS = [
   /^azure\/.*(?:gpt-4o|gpt-4\.1|o1|o3|o4)/i,
   /^microsoft\/fara/i,
   /^ollama\/.*(?:qwen|functiongemma)/i,
+  /gemini/i,
 ];
+
 const PREFERRED_OLLAMA_BROWSER_MODEL_PATTERNS = [
   /^qwen3(?::|$)/i,
   /^qwen2\.5(?::|$)/i,
@@ -42,6 +62,7 @@ const STRUCTURED_EXTRACTION_PATTERNS = [
   /\b(?:extract|scrape|collect|pull)\b.*\b(?:data|details|fields|prices|names|links|emails?|phones?|addresses|rows|items|products|jobs|listings|results)\b/i,
   /\b(?:all|every)\b.*\b(?:results|rows|items|products|jobs|links|emails?)\b/i,
 ];
+const STAGEHAND_SCHEMA_VALIDATION_PATTERN = /no object generated|did not match schema|could not parse the response|ai_jsonparseerror|ai_typevalidationerror|invalid response schema|schema validation|schema mismatch|tool call validation|invalid tool (?:call|input)|invalid arguments(?: for tool)?|zod(?:error| schema)?|missing required(?: property| field)?/i;
 
 export interface BrowserAgentToolArgs {
   instruction: string;
@@ -58,10 +79,12 @@ export interface BrowserSessionSummary {
 export interface BrowserAgentProgressUpdate {
   processing?: string;
   model?: string;
-  mode?: AgentToolMode;
+  mode?: BrowserToolMode;
   actionsTaken?: number;
   currentUrl?: string;
   pageTitle?: string;
+  screenshots?: BrowserScreenshotArtifact[];
+  llmTraceStep?: BrowserLLMTraceStep;
 }
 
 export interface BrowserAgentResult {
@@ -75,10 +98,12 @@ export interface BrowserAgentResult {
   actionsTaken: number;
   processing?: string;
   model: string;
-  mode: AgentToolMode;
+  mode: BrowserToolMode;
   startedAt: string;
   finishedAt: string;
   error?: string;
+  screenshots?: BrowserScreenshotArtifact[];
+  llmTrace?: BrowserLLMTrace;
 }
 
 interface BrowserSession {
@@ -87,8 +112,18 @@ interface BrowserSession {
 }
 
 interface BrowserAgentExecutionPlan {
-  mode: AgentToolMode;
+  mode: BrowserToolMode;
   excludeTools: string[];
+  retryContext?: BrowserAgentRetryContext;
+}
+
+type BrowserAgentRetryReason = 'schema_validation' | 'vision_capability';
+
+interface BrowserAgentRetryContext {
+  reason: BrowserAgentRetryReason;
+  previousError?: string;
+  previousModel?: string;
+  previousMode?: BrowserToolMode;
 }
 
 interface BrowserModelSelection {
@@ -200,39 +235,123 @@ function getErrorMessage(error: unknown): string {
   return String(error ?? '').trim();
 }
 
-function isLikelyVisionCapableStagehandModel(model: string): boolean {
-  return LIKELY_VISION_MODEL_PATTERNS.some((pattern) => pattern.test(model));
+function isGeminiFamilyStagehandModel(model: string): boolean {
+  return GEMINI_FAMILY_PATTERN.test(model);
 }
 
 function isLikelyReliableStagehandModel(model: string): boolean {
   return RELIABLE_STAGEHAND_MODEL_PATTERNS.some((pattern) => pattern.test(model));
 }
 
+function isLikelyCuaCapableStagehandModel(model: string): boolean {
+  return CUA_STAGEHAND_MODEL_PATTERNS.some((pattern) => pattern.test(model));
+}
+
+function isLikelyHybridCapableStagehandModel(model: string): boolean {
+  return HYBRID_STAGEHAND_MODEL_PATTERNS.some((pattern) => pattern.test(model));
+}
+
+function resolveBrowserAutomationMode(model: string): BrowserToolMode {
+  if (isLikelyCuaCapableStagehandModel(model)) {
+    return 'cua';
+  }
+
+  if (isLikelyHybridCapableStagehandModel(model) || isGeminiFamilyStagehandModel(model)) {
+    return 'hybrid';
+  }
+
+  return 'dom';
+}
+
+function shouldAllowStagehandScreenshotTool(mode: BrowserToolMode): boolean {
+  return mode !== 'dom';
+}
+
 function shouldEnableStructuredExtraction(instruction: string): boolean {
   return STRUCTURED_EXTRACTION_PATTERNS.some((pattern) => pattern.test(instruction));
 }
 
-function buildBrowserAgentExecutionPlan(model: string, instruction: string): BrowserAgentExecutionPlan {
-  const visionCapable = isLikelyVisionCapableStagehandModel(model);
+function buildBrowserAgentExecutionPlan(
+  model: string,
+  instruction: string,
+  retryContext?: BrowserAgentRetryContext
+): BrowserAgentExecutionPlan {
+  const mode = resolveBrowserAutomationMode(model);
   const excludeTools: string[] = [];
 
-  if (!visionCapable) {
+  if (!shouldAllowStagehandScreenshotTool(mode)) {
     excludeTools.push('screenshot');
   }
+
+  excludeTools.push('click', 'type', 'dragAndDrop', 'clickAndHold');
 
   if (!shouldEnableStructuredExtraction(instruction)) {
     excludeTools.push('extract');
   }
 
   return {
-    mode: visionCapable ? 'hybrid' : 'dom',
+    mode,
     excludeTools: dedupeTools(excludeTools),
+    retryContext,
   };
 }
 
+function buildBrowserAgentSystemPrompt(plan: BrowserAgentExecutionPlan): string {
+  const modeGuidance = plan.mode === 'dom'
+    ? 'You are in DOM mode. Prefer semantic DOM tools such as act and fillForm. Do not rely on screenshots or coordinate clicks.'
+    : plan.mode === 'hybrid'
+      ? 'You are in hybrid mode. Prefer semantic DOM tools such as act and fillForm. Use screenshots for visual context only — never use coordinate-based actions.'
+      : 'You are in CUA mode. Use screenshot-aware actions for visual context, but prefer semantic DOM tools such as act and fillForm for interactions.';
+  const retryGuidance = plan.retryContext?.reason === 'schema_validation'
+    ? [
+      'The previous attempt failed because the model emitted an invalid structured Stagehand tool call.',
+      'Never return Playwright-style selector or method JSON such as {"method":"click","selector":"..."} unless a tool schema explicitly asks for those exact fields.',
+      'For the act tool, send exactly one plain-English action string such as "click the Submit button".',
+      'If the task needs multiple browser interactions, emit multiple tool calls across multiple steps instead of a list or array of actions.',
+    ].join(' ')
+    : plan.retryContext?.reason === 'vision_capability'
+      ? 'The previous attempt requested unsupported screenshot or vision behavior. Stay strictly within the available DOM-oriented tools.'
+      : undefined;
+
+  return [
+    'You are a browser automation agent running inside Stagehand.',
+    'Call only the tools provided by the runtime and match each tool schema exactly.',
+    'Do not invent your own action format and never send arrays of actions.',
+    'For the act tool, provide one natural-language action string that describes the interaction to perform.',
+    'Do not emit unsupported fields such as element, elementId, selector, method, args, or arguments unless the current tool schema explicitly requires them.',
+    'Take one deliberate browser action at a time, verify navigation-sensitive steps, and stop to report blockers instead of fabricating a tool call.',
+    modeGuidance,
+    retryGuidance,
+  ].join(' ');
+}
+
 function buildBrowserAgentInstruction(instruction: string, plan: BrowserAgentExecutionPlan): string {
+  const retryErrorSnippet = plan.retryContext?.previousError
+    ? toInlineSnippet(plan.retryContext.previousError, 220)
+    : undefined;
+  const retryLines = plan.retryContext?.reason === 'schema_validation'
+    ? [
+      retryErrorSnippet
+        ? `Recovery note: the previous browser attempt failed with a schema error: ${retryErrorSnippet}`
+        : 'Recovery note: the previous browser attempt failed with an invalid structured Stagehand tool call.',
+      'Recover by emitting exactly one valid Stagehand tool call at a time.',
+      'If the next interaction is a click, type, hover, or press, prefer the act tool with a single natural-language action sentence rather than selector or method JSON.',
+    ]
+    : plan.retryContext?.reason === 'vision_capability'
+      ? [
+        retryErrorSnippet
+          ? `Recovery note: the previous attempt requested unsupported screenshot or vision behavior: ${retryErrorSnippet}`
+          : 'Recovery note: the previous attempt requested unsupported screenshot or vision behavior.',
+        'Stay in DOM-oriented tools only and avoid screenshot-dependent actions.',
+      ]
+      : [];
+
   return [
     instruction,
+    ...retryLines,
+    plan.mode === 'dom'
+      ? 'Stick to DOM-based interactions whenever possible.'
+      : 'Use visual tools only when they meaningfully improve reliability.',
     'Reuse the existing browser state when it helps.',
     plan.excludeTools.includes('extract')
       ? 'Avoid structured extraction unless the task explicitly requires scraped or structured output.'
@@ -250,6 +369,121 @@ function normalizeStartUrl(startUrl?: string): string | undefined {
   return trimmed;
 }
 
+function sanitizeArtifactPathSegment(value: string): string {
+  return value.replace(/[^a-z0-9._-]/gi, '_');
+}
+
+function getBrowserArtifactsRootDirectory(): string {
+  return path.join(app.getPath('userData'), BROWSER_ARTIFACTS_DIR_NAME);
+}
+
+function getConversationBrowserArtifactsDirectory(conversationId: string): string {
+  return path.join(getBrowserArtifactsRootDirectory(), sanitizeArtifactPathSegment(conversationId));
+}
+
+function isPathInsideDirectory(targetPath: string, directoryPath: string): boolean {
+  const relativePath = path.relative(directoryPath, targetPath);
+  return relativePath !== '' && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
+}
+
+async function ensureConversationBrowserArtifactsDirectory(conversationId: string): Promise<string> {
+  const directoryPath = getConversationBrowserArtifactsDirectory(conversationId);
+  await mkdir(directoryPath, { recursive: true });
+  return directoryPath;
+}
+
+async function captureBrowserScreenshotArtifact(
+  conversationId: string,
+  page: Awaited<ReturnType<typeof getActiveSessionPage>>,
+  kind: BrowserScreenshotArtifact['kind']
+): Promise<BrowserScreenshotArtifact | undefined> {
+  const directoryPath = await ensureConversationBrowserArtifactsDirectory(conversationId);
+  const artifactId = randomUUID();
+  const filePath = path.join(directoryPath, `${artifactId}-${kind}.${SCREENSHOT_EXTENSION}`);
+
+  try {
+    await page.screenshot({
+      path: filePath,
+      type: 'jpeg',
+      quality: SCREENSHOT_QUALITY,
+      fullPage: false,
+      scale: 'css',
+    });
+
+    return {
+      id: artifactId,
+      kind,
+      path: filePath,
+      mimeType: SCREENSHOT_MIME_TYPE,
+      createdAt: new Date().toISOString(),
+      label: kind === 'error' ? 'Failure screenshot' : 'Final screenshot',
+    };
+  } catch (error) {
+    console.warn('[BrowserAgent] Failed to capture browser screenshot artifact', {
+      conversationId,
+      kind,
+      error: getErrorMessage(error),
+    });
+    return undefined;
+  }
+}
+
+async function persistBrowserLLMTrace(
+  conversationId: string,
+  trace: BrowserLLMTrace
+): Promise<string | undefined> {
+  const directoryPath = await ensureConversationBrowserArtifactsDirectory(conversationId);
+  const traceId = randomUUID();
+  const filePath = path.join(directoryPath, `${traceId}-llm-trace.json`);
+
+  try {
+    await writeFile(filePath, JSON.stringify(trace, null, 2), 'utf-8');
+    return filePath;
+  } catch (error) {
+    console.warn('[BrowserAgent] Failed to persist LLM trace', {
+      conversationId,
+      error: getErrorMessage(error),
+    });
+    return undefined;
+  }
+}
+
+export async function readBrowserArtifactAsBase64(filePath: string): Promise<string | null> {
+  const trimmedPath = filePath?.trim();
+  if (!trimmedPath) {
+    return null;
+  }
+
+  const resolvedPath = path.resolve(trimmedPath);
+  if (!isPathInsideDirectory(resolvedPath, getBrowserArtifactsRootDirectory())) {
+    return null;
+  }
+
+  try {
+    const buffer = await readFile(resolvedPath);
+    return buffer.toString('base64');
+  } catch {
+    return null;
+  }
+}
+
+export async function readBrowserArtifactAsPreviewDataUrl(filePath: string): Promise<string | null> {
+  const base64 = await readBrowserArtifactAsBase64(filePath);
+  if (!base64) {
+    return null;
+  }
+
+  const mimeType = filePath.toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg';
+  return `data:${mimeType};base64,${base64}`;
+}
+
+export async function deleteBrowserArtifacts(conversationId: string): Promise<void> {
+  await rm(getConversationBrowserArtifactsDirectory(conversationId), {
+    recursive: true,
+    force: true,
+  }).catch(() => undefined);
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw new DOMException('Aborted', 'AbortError');
@@ -265,7 +499,7 @@ function isAbortLikeError(error: unknown): boolean {
 }
 
 function isSchemaValidationMessage(message: string): boolean {
-  return /no object generated|did not match schema|could not parse the response|ai_jsonparseerror|ai_typevalidationerror|invalid response schema/i.test(message);
+  return STAGEHAND_SCHEMA_VALIDATION_PATTERN.test(message);
 }
 
 function isBadRequestLikeMessage(message: string): boolean {
@@ -556,6 +790,71 @@ function toInlineSnippet(value: string, maxLength = 180): string {
   return `${compact.slice(0, maxLength - 3)}...`;
 }
 
+function logBrowserAgent(
+  level: 'log' | 'warn' | 'error',
+  message: string,
+  details?: Record<string, unknown>
+): void {
+  const prefix = `[BrowserAgent] ${message}`;
+  if (level === 'error') {
+    if (details) {
+      console.error(prefix, details);
+      return;
+    }
+    console.error(prefix);
+    return;
+  }
+
+  if (level === 'warn') {
+    if (details) {
+      console.warn(prefix, details);
+      return;
+    }
+    console.warn(prefix);
+    return;
+  }
+
+  if (details) {
+    console.log(prefix, details);
+    return;
+  }
+
+  console.log(prefix);
+}
+
+function logStagehandLogLine(
+  conversationId: string,
+  model: string,
+  logLine: StagehandLogLine
+): void {
+  const message = logLine.message?.trim();
+  if (!message) {
+    return;
+  }
+
+  const rawResponse = getFirstAuxiliaryValue(logLine.auxiliary, ['text', 'value', 'cause']);
+  const details: Record<string, unknown> = {
+    conversationId,
+    model,
+    category: logLine.category,
+    level: logLine.level,
+    message,
+  };
+
+  if (rawResponse) {
+    details.rawResponse = rawResponse;
+  }
+
+  if (logLine.category === 'AISDK error' || isSchemaValidationMessage(message)) {
+    logBrowserAgent('error', 'Stagehand schema or AI SDK error', details);
+    return;
+  }
+
+  if (logLine.level === 0 || /warning|failed|error/i.test(message)) {
+    logBrowserAgent('warn', 'Stagehand diagnostic', details);
+  }
+}
+
 function formatStagehandLogLine(logLine: StagehandLogLine): string | null {
   const message = logLine.message?.trim();
   if (!message) {
@@ -628,18 +927,31 @@ function formatStagehandToolCall(toolCall: StagehandStepToolCall): string | null
 
   switch (toolName) {
     case 'act': {
-      const method = getStringArgument(input.method) ?? 'interact';
-      const description = getStringArgument(input.description) ?? getStringArgument(input.instruction);
-      const argumentsSummary = formatUnknownArgument(input.arguments);
-      const details = [description, argumentsSummary ? `(${argumentsSummary})` : undefined]
-        .filter(Boolean)
-        .join(' ');
-      return details ? `Action: ${method} ${details}` : `Action: ${method}.`;
+      const action = getStringArgument(input.action)
+        ?? getStringArgument(input.instruction)
+        ?? getStringArgument(input.description);
+      return action ? `Action: ${action}` : 'Action: interact.';
     }
 
     case 'fillForm': {
-      const description = getStringArgument(input.description) ?? getStringArgument(input.instruction);
-      return description ? `Form: ${description}` : 'Form: filling fields.';
+      const instruction = getStringArgument(input.instruction)
+        ?? getStringArgument(input.description)
+        ?? formatUnknownArgument(input.fields);
+      return instruction ? `Form: ${instruction}` : 'Form: filling fields.';
+    }
+
+    case 'fillFormVision': {
+      const instruction = getStringArgument(input.instruction)
+        ?? getStringArgument(input.description)
+        ?? 'filling fields visually';
+      return `Form: ${instruction}`;
+    }
+
+    case 'screenshot': {
+      const description = getStringArgument(input.instruction)
+        ?? getStringArgument(input.description)
+        ?? 'capturing a screenshot';
+      return `Vision: ${description}`;
     }
 
     case 'done': {
@@ -673,31 +985,66 @@ async function executeBrowserAgentAttempt(
   plan: BrowserAgentExecutionPlan,
   onStepFinish?: (event: StagehandStepEvent) => void
 ): Promise<StagehandAgentResult> {
-  console.log('[BrowserAgent] Starting Stagehand attempt', {
+  const stagehandInstruction = buildBrowserAgentInstruction(instruction, plan);
+
+  logBrowserAgent('log', 'Starting Stagehand attempt', {
     conversationId,
     model,
     mode: plan.mode,
     excludeTools: plan.excludeTools,
+    retryReason: plan.retryContext?.reason,
+    previousModel: plan.retryContext?.previousModel,
+    previousMode: plan.retryContext?.previousMode,
+    previousError: plan.retryContext?.previousError
+      ? toInlineSnippet(plan.retryContext.previousError, 240)
+      : undefined,
+    instructionPreview: toInlineSnippet(stagehandInstruction, 280),
   });
 
   const agent = session.stagehand.agent({
     model,
     executionModel: model,
     mode: plan.mode,
+    systemPrompt: buildBrowserAgentSystemPrompt(plan),
   });
 
-  return agent.execute({
-    instruction: buildBrowserAgentInstruction(instruction, plan),
+  const executeOptions: Parameters<typeof agent.execute>[0] = {
+    instruction: stagehandInstruction,
     maxSteps,
-    highlightCursor: true,
-    signal,
-    excludeTools: plan.excludeTools.length ? plan.excludeTools : undefined,
+    highlightCursor: false,
     callbacks: onStepFinish
       ? {
           onStepFinish: (event) => onStepFinish(event as StagehandStepEvent),
         }
       : undefined,
-  });
+  };
+
+  if (plan.mode !== 'cua') {
+    executeOptions.signal = signal;
+    executeOptions.excludeTools = plan.excludeTools.length ? plan.excludeTools : undefined;
+  }
+
+  try {
+    const result = await agent.execute(executeOptions);
+    logBrowserAgent(result.success ? 'log' : 'warn', 'Stagehand attempt finished', {
+      conversationId,
+      model,
+      mode: plan.mode,
+      success: result.success,
+      completed: result.completed,
+      actionsTaken: result.actions.length,
+      message: result.message,
+    });
+    return result;
+  } catch (error) {
+    logBrowserAgent('error', 'Stagehand attempt threw', {
+      conversationId,
+      model,
+      mode: plan.mode,
+      error: getErrorMessage(error),
+    });
+    throw error;
+  }
 }
 
 async function runBrowserAgentAttemptWithDomFallback(
@@ -725,7 +1072,14 @@ async function runBrowserAgentAttemptWithDomFallback(
     onStepFinish
   );
 
-  if (primaryResult.success || plan.mode !== 'hybrid' || !isBadRequestLikeMessage(primaryResult.message)) {
+  const shouldRetryInDomMode = !primaryResult.success
+    && plan.mode !== 'dom'
+    && (
+      isBadRequestLikeMessage(primaryResult.message)
+      || isSchemaValidationMessage(primaryResult.message)
+    );
+
+  if (!shouldRetryInDomMode) {
     return {
       result: primaryResult,
       plan,
@@ -736,16 +1090,27 @@ async function runBrowserAgentAttemptWithDomFallback(
   const fallbackPlan: BrowserAgentExecutionPlan = {
     mode: 'dom',
     excludeTools: dedupeTools([...plan.excludeTools, 'screenshot']),
+    retryContext: {
+      reason: isSchemaValidationMessage(primaryResult.message) ? 'schema_validation' : 'vision_capability',
+      previousError: primaryResult.message,
+      previousModel: model,
+      previousMode: plan.mode,
+    },
   };
 
-  console.warn('[BrowserAgent] Retrying with DOM fallback', {
+  logBrowserAgent('warn', 'Retrying with DOM fallback', {
     conversationId,
     model,
     previousMode: plan.mode,
     error: primaryResult.message,
+    retryReason: fallbackPlan.retryContext?.reason,
   });
 
-  addProcessingLine('Retrying in DOM-only mode because the previous browser attempt required unsupported vision or screenshot capabilities.');
+  addProcessingLine(
+    isSchemaValidationMessage(primaryResult.message)
+      ? 'Retrying in DOM-only mode because the previous browser attempt returned invalid structured actions.'
+      : 'Retrying in DOM-only mode because the previous browser attempt required unsupported vision or screenshot capabilities.'
+  );
   onPlanChange(fallbackPlan);
 
   if (startUrl) {
@@ -782,7 +1147,13 @@ export async function executeBrowserAgent(
   const startUrl = normalizeStartUrl(args.startUrl);
   const processingLines: string[] = [];
   let activeModel = normalizeStagehandModel(preferredModel) ?? DEFAULT_STAGEHAND_MODEL;
-  let activeMode: AgentToolMode = 'dom';
+  let activeMode: BrowserToolMode = 'dom';
+  let traceSystemPrompt = '';
+  let traceInstruction = '';
+  const traceSteps: BrowserLLMTraceStep[] = [];
+  let traceStepIndex = 0;
+  let stepLogLines: string[] = [];
+  let page!: Awaited<ReturnType<typeof getActiveSessionPage>>;
 
   const publishUpdate = (extra: Partial<BrowserAgentProgressUpdate> = {}) => {
     onUpdate?.({
@@ -799,21 +1170,76 @@ export async function executeBrowserAgent(
     }
   };
 
+  const flushTraceStep = (partial?: Partial<BrowserLLMTraceStep>) => {
+    if (stepLogLines.length === 0 && !partial?.reasoning && !(partial?.toolCalls?.length)) {
+      return;
+    }
+
+    const step: BrowserLLMTraceStep = {
+      stepIndex: traceStepIndex,
+      timestamp: new Date().toISOString(),
+      reasoning: partial?.reasoning,
+      finishReason: partial?.finishReason,
+      toolCalls: partial?.toolCalls,
+      rawLogLines: stepLogLines.length > 0 ? [...stepLogLines] : undefined,
+    };
+
+    traceSteps.push(step);
+    traceStepIndex++;
+    stepLogLines = [];
+
+    publishUpdate({ llmTraceStep: step });
+  };
+
   const handleStepFinish = (event: StagehandStepEvent) => {
     const reasoning = event.text?.trim();
     if (reasoning) {
+      logBrowserAgent('log', 'Stagehand reasoning', {
+        conversationId,
+        model: activeModel,
+        mode: activeMode,
+        text: reasoning,
+        finishReason: event.finishReason,
+      });
       addProcessingLine(`Reasoning: ${reasoning}`);
     }
 
+    const toolCalls = event.toolCalls?.map((tc) => ({
+      toolName: tc.toolName ?? '',
+      input: tc.input ?? {},
+    }));
+
     for (const toolCall of event.toolCalls ?? []) {
       const formatted = formatStagehandToolCall(toolCall);
+      logBrowserAgent('log', 'Stagehand tool call', {
+        conversationId,
+        model: activeModel,
+        mode: activeMode,
+        toolName: toolCall.toolName,
+        formatted: formatted ?? undefined,
+        input: toolCall.input,
+      });
       if (formatted) {
         addProcessingLine(formatted);
       }
+
     }
+
+    flushTraceStep({
+      reasoning,
+      finishReason: event.finishReason,
+      toolCalls: toolCalls?.length ? toolCalls : undefined,
+    });
   };
 
   activeBrowserProgressReporters.set(conversationId, (logLine) => {
+    logStagehandLogLine(conversationId, activeModel, logLine);
+
+    const message = logLine.message?.trim();
+    if (message) {
+      stepLogLines.push(message);
+    }
+
     const formatted = formatStagehandLogLine(logLine);
     if (formatted) {
       addProcessingLine(formatted);
@@ -824,7 +1250,7 @@ export async function executeBrowserAgent(
     throwIfAborted(signal);
 
     const session = await getOrCreateBrowserSession(conversationId, preferredModel);
-    const page = await getActiveSessionPage(session.stagehand);
+    page = await getActiveSessionPage(session.stagehand);
     const maxSteps = clampMaxSteps(args.maxSteps);
     const modelSelection = await resolveBrowserAutomationModel(preferredModel);
 
@@ -839,14 +1265,21 @@ export async function executeBrowserAgent(
       addProcessingLine(`Starting from \`${startUrl}\`.`);
     }
 
-    const executeWithModel = async (model: string): Promise<{
+    const executeWithModel = async (
+      model: string,
+      retryContext?: BrowserAgentRetryContext
+    ): Promise<{
       result: StagehandAgentResult;
       plan: BrowserAgentExecutionPlan;
       model: string;
     }> => {
-      const initialPlan = buildBrowserAgentExecutionPlan(model, args.instruction);
+      const initialPlan = buildBrowserAgentExecutionPlan(model, args.instruction, retryContext);
       activeModel = model;
       activeMode = initialPlan.mode;
+
+      traceSystemPrompt = buildBrowserAgentSystemPrompt(initialPlan);
+      traceInstruction = buildBrowserAgentInstruction(args.instruction, initialPlan);
+
       publishUpdate();
 
       addProcessingLine(`Using browser model \`${model}\` in \`${initialPlan.mode}\` mode.`);
@@ -878,12 +1311,34 @@ export async function executeBrowserAgent(
 
     let attempt = await executeWithModel(modelSelection.model);
 
-    if (!attempt.result.success) {
-      const fallbackModel = modelSelection.fallbackModels.find((candidate) => candidate !== attempt.model);
+    if (!attempt.result.success && isSchemaValidationMessage(attempt.result.message)) {
+      const attemptedModels = new Set([attempt.model]);
 
-      if (fallbackModel && isSchemaValidationMessage(attempt.result.message)) {
+      for (const fallbackModel of modelSelection.fallbackModels) {
+        if (attemptedModels.has(fallbackModel)) {
+          continue;
+        }
+
         addProcessingLine(`The browser model \`${attempt.model}\` returned invalid structured actions. Retrying with \`${fallbackModel}\`.`);
-        attempt = await executeWithModel(fallbackModel);
+        logBrowserAgent('warn', 'Retrying with fallback browser model after schema error', {
+          conversationId,
+          previousModel: attempt.model,
+          previousMode: attempt.plan.mode,
+          fallbackModel,
+          error: attempt.result.message,
+        });
+
+        attempt = await executeWithModel(fallbackModel, {
+          reason: 'schema_validation',
+          previousError: attempt.result.message,
+          previousModel: attempt.model,
+          previousMode: attempt.plan.mode,
+        });
+        attemptedModels.add(fallbackModel);
+
+        if (attempt.result.success || !isSchemaValidationMessage(attempt.result.message)) {
+          break;
+        }
       }
     }
 
@@ -891,9 +1346,23 @@ export async function executeBrowserAgent(
 
     const context = await getCurrentBrowserContext(session.stagehand);
     const processing = buildProcessingContent(processingLines);
+    const llmTrace: BrowserLLMTrace = {
+      model: attempt.model,
+      mode: attempt.plan.mode,
+      systemPrompt: traceSystemPrompt,
+      instruction: traceInstruction,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      steps: traceSteps,
+    };
 
     if (!attempt.result.success) {
-      return {
+      const errorScreenshot = await captureBrowserScreenshotArtifact(conversationId, page, 'error');
+      if (llmTrace.steps.length > 0) {
+        llmTrace.error = formatStagehandError(attempt.result.message, attempt.model);
+        await persistBrowserLLMTrace(conversationId, llmTrace);
+      }
+      const failureResult: BrowserAgentResult = {
         success: false,
         completed: attempt.result.completed,
         summary: 'Browser task failed.',
@@ -908,10 +1377,27 @@ export async function executeBrowserAgent(
         startedAt,
         finishedAt: new Date().toISOString(),
         error: formatStagehandError(attempt.result.message, attempt.model),
+        screenshots: errorScreenshot ? [errorScreenshot] : undefined,
+        llmTrace: llmTrace.steps.length > 0 ? llmTrace : undefined,
       };
+      logBrowserAgent('warn', 'Browser task failed', {
+        conversationId,
+        model: failureResult.model,
+        mode: failureResult.mode,
+        completed: failureResult.completed,
+        actionsTaken: failureResult.actionsTaken,
+        currentUrl: failureResult.currentUrl,
+        pageTitle: failureResult.pageTitle,
+        error: failureResult.error,
+      });
+      return failureResult;
     }
 
-    return {
+    const finalScreenshot = await captureBrowserScreenshotArtifact(conversationId, page, 'final');
+    if (llmTrace.steps.length > 0) {
+      await persistBrowserLLMTrace(conversationId, llmTrace);
+    }
+    const successResult: BrowserAgentResult = {
       success: attempt.result.success,
       completed: attempt.result.completed,
       summary: attempt.result.message || 'Browser task finished.',
@@ -925,17 +1411,36 @@ export async function executeBrowserAgent(
       mode: attempt.plan.mode,
       startedAt,
       finishedAt: new Date().toISOString(),
+      screenshots: finalScreenshot ? [finalScreenshot] : undefined,
+      llmTrace: llmTrace.steps.length > 0 ? llmTrace : undefined,
     };
+    logBrowserAgent('log', 'Browser task completed', {
+      conversationId,
+      model: successResult.model,
+      mode: successResult.mode,
+      completed: successResult.completed,
+      actionsTaken: successResult.actionsTaken,
+      currentUrl: successResult.currentUrl,
+      pageTitle: successResult.pageTitle,
+      summary: successResult.summary,
+    });
+    return successResult;
   } catch (error) {
     if (isAbortLikeError(error) || signal?.aborted) {
       throw new DOMException('Aborted', 'AbortError');
     }
 
+    const session = browserSessions.get(conversationId);
     const context: Pick<BrowserAgentResult, 'currentUrl' | 'pageTitle'> = browserSessions.has(conversationId)
-      ? await getCurrentBrowserContext(browserSessions.get(conversationId)!.stagehand).catch(() => ({}))
+      ? await getCurrentBrowserContext(session!.stagehand).catch(() => ({}))
       : {};
+    const errorScreenshot = session
+      ? await getActiveSessionPage(session.stagehand)
+        .then((page) => captureBrowserScreenshotArtifact(conversationId, page, 'error'))
+        .catch(() => undefined)
+      : undefined;
 
-    return {
+    const failureResult: BrowserAgentResult = {
       success: false,
       completed: false,
       summary: 'Browser task failed.',
@@ -950,7 +1455,28 @@ export async function executeBrowserAgent(
       startedAt,
       finishedAt: new Date().toISOString(),
       error: formatStagehandError(error, activeModel),
+      screenshots: errorScreenshot ? [errorScreenshot] : undefined,
+      llmTrace: traceSteps.length > 0 ? {
+        model: activeModel,
+        mode: activeMode,
+        systemPrompt: traceSystemPrompt,
+        instruction: traceInstruction,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        steps: traceSteps,
+        error: getErrorMessage(error),
+      } : undefined,
     };
+    logBrowserAgent('error', 'Browser task threw', {
+      conversationId,
+      model: failureResult.model,
+      mode: failureResult.mode,
+      currentUrl: failureResult.currentUrl,
+      pageTitle: failureResult.pageTitle,
+      error: getErrorMessage(error),
+      userFacingError: failureResult.error,
+    });
+    return failureResult;
   } finally {
     activeBrowserProgressReporters.delete(conversationId);
   }

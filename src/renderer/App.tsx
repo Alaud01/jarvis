@@ -8,6 +8,7 @@ import CopyNotification from './components/CopyNotification';
 import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
+import type { BrowserLLMTrace, BrowserScreenshotArtifact, BrowserToolRun } from '../shared/browser';
 
 interface Message {
   id: string;
@@ -23,24 +24,6 @@ interface Conversation {
   title: string;
   timestamp: Date;
   messages: Message[];
-}
-
-interface BrowserToolRun {
-  id: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
-  instruction: string;
-  startUrl?: string;
-  summary?: string;
-  currentUrl?: string;
-  pageTitle?: string;
-  actionsTaken?: number;
-  error?: string;
-  processing?: string;
-  model?: string;
-  mode?: 'dom' | 'hybrid' | 'cua';
-  startedAt: string;
-  finishedAt?: string;
-  textOffset?: number;
 }
 
 interface SerializedMessage {
@@ -102,6 +85,7 @@ function mergeDefinedFields<T extends Record<string, unknown>>(base: T, patch: P
 interface VoiceTranscriptPayload {
   text: string;
   autoSubmit: boolean;
+  newChat: boolean;
 }
 
 interface PendingVoiceTranscript extends VoiceTranscriptPayload {
@@ -123,8 +107,11 @@ interface BrowserToolEventPayload {
   processing?: string;
   model?: string;
   mode?: BrowserToolRun['mode'];
+  screenshots?: BrowserScreenshotArtifact[];
+  llmTrace?: BrowserLLMTrace;
   startedAt: string;
   finishedAt?: string;
+  textOffset?: number;
 }
 
 interface SendMessageStreamRequest {
@@ -132,6 +119,13 @@ interface SendMessageStreamRequest {
   assistantMessageId: string;
   model: string;
   messages: { role: 'user' | 'assistant'; content: string }[];
+}
+
+function toStreamMessage(message: Pick<Message, 'sender' | 'text'>): SendMessageStreamRequest['messages'][number] {
+  return {
+    role: message.sender === 'user' ? 'user' : 'assistant',
+    content: message.text,
+  };
 }
 
 declare global {
@@ -146,6 +140,7 @@ declare global {
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
       onBrowserToolEvent: (callback: (payload: BrowserToolEventPayload) => void) => () => void;
+      getBrowserArtifactDataUrl: (filePath: string) => Promise<string | null>;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
@@ -180,6 +175,8 @@ const App: React.FC = () => {
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const isInitialLoadRef = useRef(true);
+  const pendingJarvisMessageRef = useRef<string | null>(null);
+  const [newChatTrigger, setNewChatTrigger] = useState(0);
 
   useEffect(() => {
     const loadModels = async () => {
@@ -272,11 +269,18 @@ const App: React.FC = () => {
     
     const cleanup = window.assistant.onVoiceTranscript((payload) => {
       if (payload?.text) {
-        setVoiceTranscript({
-          id: crypto.randomUUID(),
-          text: payload.text,
-          autoSubmit: payload.autoSubmit,
-        });
+        if (payload.newChat && payload.autoSubmit) {
+          pendingJarvisMessageRef.current = payload.text;
+          setCurrentConversationId(null);
+          setNewChatTrigger(prev => prev + 1);
+        } else {
+          setVoiceTranscript({
+            id: crypto.randomUUID(),
+            text: payload.text,
+            autoSubmit: payload.autoSubmit,
+            newChat: payload.newChat,
+          });
+        }
       }
     });
     
@@ -348,8 +352,17 @@ const App: React.FC = () => {
       if (payload.mode !== undefined) {
         toolRunPatch.mode = payload.mode;
       }
+      if (payload.screenshots !== undefined) {
+        toolRunPatch.screenshots = payload.screenshots;
+      }
+      if (payload.llmTrace !== undefined) {
+        toolRunPatch.llmTrace = payload.llmTrace;
+      }
       if (payload.finishedAt !== undefined) {
         toolRunPatch.finishedAt = payload.finishedAt;
+      }
+      if (payload.textOffset !== undefined) {
+        toolRunPatch.textOffset = payload.textOffset;
       }
 
       setConversations(prev => {
@@ -363,7 +376,7 @@ const App: React.FC = () => {
           : false;
 
         if (isNewToolRun && matchingMessage) {
-          toolRunPatch.textOffset = matchingMessage.text.length;
+          toolRunPatch.textOffset ??= matchingMessage.text.length;
         }
 
         return prev.map(c => ({
@@ -617,12 +630,9 @@ const App: React.FC = () => {
     streamingMessageIdRef.current = assistantMessageId;
 
     try {
-      const conversationMessages = [
-        ...conversation.messages.slice(0, messageIndex).map(m => ({
-          role: m.sender === 'user' ? 'user' : 'assistant' as const,
-          content: m.text,
-        })),
-        { role: 'user' as const, content: newText },
+      const conversationMessages: SendMessageStreamRequest['messages'] = [
+        ...conversation.messages.slice(0, messageIndex).map(toStreamMessage),
+        { role: 'user', content: newText },
       ];
 
       await window.assistant.sendMessageStream({
@@ -703,12 +713,9 @@ const App: React.FC = () => {
     streamingMessageIdRef.current = assistantMessageId;
 
     try {
-      const conversationMessages = [
-        ...conversation.messages.slice(0, userMessageIndex).map(m => ({
-          role: m.sender === 'user' ? 'user' : 'assistant' as const,
-          content: m.text,
-        })),
-        { role: 'user' as const, content: userMessage.text },
+      const conversationMessages: SendMessageStreamRequest['messages'] = [
+        ...conversation.messages.slice(0, userMessageIndex).map(toStreamMessage),
+        { role: 'user', content: userMessage.text },
       ];
 
       await window.assistant.sendMessageStream({
@@ -803,12 +810,9 @@ const App: React.FC = () => {
     streamingMessageIdRef.current = assistantMessageId;
 
     try {
-      const conversationMessages = [
-        ...messages.map(m => ({
-          role: m.sender === 'user' ? 'user' : 'assistant' as const,
-          content: m.text,
-        })),
-        { role: 'user' as const, content: text },
+      const conversationMessages: SendMessageStreamRequest['messages'] = [
+        ...messages.map(toStreamMessage),
+        { role: 'user', content: text },
       ];
 
       await window.assistant.sendMessageStream({
@@ -841,6 +845,14 @@ const App: React.FC = () => {
       streamingMessageIdRef.current = null;
     }
   }, [currentConversationId, selectedModel, messages]);
+
+  useEffect(() => {
+    if (currentConversationId === null && pendingJarvisMessageRef.current) {
+      const text = pendingJarvisMessageRef.current;
+      pendingJarvisMessageRef.current = null;
+      handleSendMessage(text);
+    }
+  }, [currentConversationId, newChatTrigger, handleSendMessage]);
 
   const openTabs = openTabIds.map(id => {
     const convo = conversations.find(c => c.id === id);

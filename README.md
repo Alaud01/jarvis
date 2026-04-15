@@ -1,4 +1,4 @@
-# Rhandy
+# Jarvis
 
 Electron menu bar assistant powered by Ollama.
 
@@ -11,7 +11,7 @@ Electron menu bar assistant powered by Ollama.
 ## Structure
 
 ```
-rhandy/
+jarvis/
 ├── assets/              # Icons, images
 ├── src/
 │   ├── main/           # Electron main process
@@ -32,7 +32,7 @@ rhandy/
 ## Setup
 
 ```bash
-cd rhandy
+cd jarvis
 npm install
 ```
 
