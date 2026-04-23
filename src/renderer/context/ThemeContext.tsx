@@ -67,6 +67,10 @@ export const ThemeProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     
     root.setAttribute('data-theme', theme);
     root.setAttribute('data-resolved-theme', effectiveTheme);
+
+    if (window.assistant?.setThemeBackground) {
+      window.assistant.setThemeBackground(effectiveTheme === 'dark');
+    }
     
     if (theme === 'custom') {
       Object.entries(customColors).forEach(([key, value]) => {
@@ -89,6 +93,9 @@ export const ThemeProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       const newResolved = getSystemTheme();
       setResolvedTheme(newResolved);
       document.documentElement.setAttribute('data-resolved-theme', newResolved);
+      if (window.assistant?.setThemeBackground) {
+        window.assistant.setThemeBackground(newResolved === 'dark');
+      }
     };
     
     mediaQuery.addEventListener('change', handleChange);

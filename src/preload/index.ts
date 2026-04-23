@@ -92,6 +92,10 @@ contextBridge.exposeInMainWorld('assistant', {
   storeLoadConversations: () => ipcRenderer.invoke('store:load-conversations'),
   storeSaveConversations: (conversations: unknown) => ipcRenderer.invoke('store:save-conversations', conversations),
   storeDeleteConversation: (id: string) => ipcRenderer.invoke('store:delete-conversation', id),
+  storeLoadFolders: () => ipcRenderer.invoke('store:load-folders'),
+  storeSaveFolders: (folders: unknown) => ipcRenderer.invoke('store:save-folders', folders),
+  storeDeleteFolder: (id: string) => ipcRenderer.invoke('store:delete-folder', id),
   storeLoadModel: () => ipcRenderer.invoke('store:load-model'),
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
+  setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

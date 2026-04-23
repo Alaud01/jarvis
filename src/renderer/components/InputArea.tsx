@@ -116,7 +116,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   const isDisabled = isLoading || disabled || voiceState === 'processing';
 
   return (
-    <div className="p-6 border-t border-border-primary bg-bg-primary shrink-0">
+    <div className="p-6 bg-bg-primary shrink-0">
       <div className="max-w-200 mx-auto">
         <div className="bg-transparent border border-border-primary p-3 transition-all duration-150 focus-within:border-text-primary">
           <textarea

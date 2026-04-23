@@ -24,6 +24,13 @@ interface Conversation {
   title: string;
   timestamp: Date;
   messages: Message[];
+  folderId: string | null;
+}
+
+interface Folder {
+  id: string;
+  name: string;
+  timestamp: Date;
 }
 
 interface SerializedMessage {
@@ -39,6 +46,13 @@ interface SerializedConversation {
   title: string;
   timestamp: string;
   messages: SerializedMessage[];
+  folderId: string | null;
+}
+
+interface SerializedFolder {
+  id: string;
+  name: string;
+  timestamp: string;
 }
 
 function serializeConversation(c: Conversation): SerializedConversation {
@@ -53,6 +67,7 @@ function serializeConversation(c: Conversation): SerializedConversation {
       timestamp: m.timestamp.toISOString(),
       toolRuns: m.toolRuns,
     })),
+    folderId: c.folderId,
   };
 }
 
@@ -68,7 +83,41 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       timestamp: new Date(m.timestamp),
       toolRuns: m.toolRuns,
     })),
+    folderId: c.folderId ?? null,
   };
+}
+
+function serializeFolder(f: Folder): SerializedFolder {
+  return {
+    id: f.id,
+    name: f.name,
+    timestamp: f.timestamp.toISOString(),
+  };
+}
+
+function deserializeFolder(f: SerializedFolder): Folder {
+  return {
+    id: f.id,
+    name: f.name,
+    timestamp: new Date(f.timestamp),
+  };
+}
+
+function getNextFolderName(existingFolders: Folder[]): string {
+  const normalizedNames = new Set(
+    existingFolders.map(folder => folder.name.trim().toLowerCase())
+  );
+
+  if (!normalizedNames.has('new folder')) {
+    return 'New Folder';
+  }
+
+  let suffix = 2;
+  while (normalizedNames.has(`new folder ${suffix}`)) {
+    suffix += 1;
+  }
+
+  return `New Folder ${suffix}`;
 }
 
 function mergeDefinedFields<T extends Record<string, unknown>>(base: T, patch: Partial<T>): T {
@@ -151,8 +200,12 @@ declare global {
       storeLoadConversations: () => Promise<SerializedConversation[]>;
       storeSaveConversations: (conversations: SerializedConversation[]) => Promise<{ success: boolean }>;
       storeDeleteConversation: (id: string) => Promise<{ success: boolean }>;
+      storeLoadFolders: () => Promise<SerializedFolder[]>;
+      storeSaveFolders: (folders: SerializedFolder[]) => Promise<{ success: boolean }>;
+      storeDeleteFolder: (id: string) => Promise<{ success: boolean }>;
       storeLoadModel: () => Promise<string>;
       storeSaveModel: (model: string) => Promise<{ success: boolean }>;
+      setThemeBackground: (isDark: boolean) => void;
     };
   }
 }
@@ -160,6 +213,7 @@ declare global {
 const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [folders, setFolders] = useState<Folder[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -174,7 +228,7 @@ const App: React.FC = () => {
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const isInitialLoadRef = useRef(true);
+  const [hasHydratedStore, setHasHydratedStore] = useState(false);
   const pendingJarvisMessageRef = useRef<string | null>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
@@ -184,8 +238,8 @@ const App: React.FC = () => {
       try {
         const fetchedModels = await window.assistant.getModels();
         setModels(fetchedModels);
-        if (fetchedModels.length > 0 && !selectedModel) {
-          setSelectedModel(fetchedModels[0]);
+        if (fetchedModels.length > 0) {
+          setSelectedModel(prev => prev ?? fetchedModels[0]);
         }
       } catch (error) {
         console.error('Failed to load models:', error);
@@ -198,36 +252,63 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
     const loadStoredData = async () => {
-      try {
-        const stored = await window.assistant.storeLoadConversations();
-        if (stored && stored.length > 0) {
-          setConversations(stored.map(deserializeConversation));
-          const lastId = stored[stored.length - 1].id;
-          setCurrentConversationId(lastId);
-          setOpenTabIds([lastId]);
-        }
-      } catch (error) {
-        console.error('Failed to load stored conversations:', error);
+      const [conversationsResult, foldersResult, modelResult] = await Promise.allSettled([
+        window.assistant.storeLoadConversations(),
+        window.assistant.storeLoadFolders(),
+        window.assistant.storeLoadModel(),
+      ]);
+
+      if (!isMounted) {
+        return;
       }
 
-      try {
-        const storedModel = await window.assistant.storeLoadModel();
-        if (storedModel) {
-          setSelectedModel(storedModel);
+      if (conversationsResult.status === 'fulfilled') {
+        const storedConversations = conversationsResult.value;
+        setConversations(storedConversations.map(deserializeConversation));
+        if (storedConversations.length > 0) {
+          const lastId = storedConversations[storedConversations.length - 1].id;
+          setCurrentConversationId(lastId);
+          setOpenTabIds([lastId]);
+        } else {
+          setCurrentConversationId(null);
+          setOpenTabIds([]);
         }
-      } catch (error) {
-        console.error('Failed to load stored model:', error);
+      } else {
+        console.error('Failed to load stored conversations:', conversationsResult.reason);
       }
+
+      if (foldersResult.status === 'fulfilled') {
+        setFolders(foldersResult.value.map(deserializeFolder));
+      } else {
+        console.error('Failed to load stored folders:', foldersResult.reason);
+      }
+
+      if (modelResult.status === 'fulfilled') {
+        if (modelResult.value) {
+          setSelectedModel(modelResult.value);
+        }
+      } else {
+        console.error('Failed to load stored model:', modelResult.reason);
+      }
+
+      setHasHydratedStore(true);
     };
-    loadStoredData();
+
+    void loadStoredData();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   useEffect(() => {
-    if (isInitialLoadRef.current) {
-      isInitialLoadRef.current = false;
+    if (!hasHydratedStore) {
       return;
     }
+
     const hasStreaming = conversations.some(c => c.messages.some(m => m.isStreaming));
     if (hasStreaming) return;
 
@@ -235,17 +316,26 @@ const App: React.FC = () => {
     window.assistant.storeSaveConversations(serialized).catch(err => {
       console.error('Failed to save conversations:', err);
     });
-  }, [conversations]);
+  }, [conversations, hasHydratedStore]);
 
   useEffect(() => {
-    if (isInitialLoadRef.current) return;
+    if (!hasHydratedStore) return;
+
+    const serialized = folders.map(serializeFolder);
+    window.assistant.storeSaveFolders(serialized).catch(err => {
+      console.error('Failed to save folders:', err);
+    });
+  }, [folders, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) return;
 
     if (selectedModel) {
       window.assistant.storeSaveModel(selectedModel).catch(err => {
         console.error('Failed to save selected model:', err);
       });
     }
-  }, [selectedModel]);
+  }, [selectedModel, hasHydratedStore]);
 
   useEffect(() => {
     const loadVoiceShortcut = async () => {
@@ -493,29 +583,110 @@ const App: React.FC = () => {
 
   const handleDeleteConversation = useCallback((id: string) => {
     if (!window.confirm('Delete this conversation?')) return;
-    
-    window.assistant.storeDeleteConversation(id).catch(err => {
-      console.error('Failed to delete conversation from store:', err);
-    });
-    
-    setConversations(prev => prev.filter(c => c.id !== id));
-    setOpenTabIds(prev => prev.filter(tabId => tabId !== id));
-    
-    if (currentConversationId === id) {
-      const remainingConversations = conversations.filter(c => c.id !== id);
-      if (remainingConversations.length > 0) {
-        setCurrentConversationId(remainingConversations[0].id);
+
+    const remainingConversations = conversations.filter(c => c.id !== id);
+    const nextConversationId = currentConversationId === id
+      ? remainingConversations[0]?.id ?? null
+      : currentConversationId;
+
+    void window.assistant.storeDeleteConversation(id)
+      .then(() => {
+        setConversations(prev => prev.filter(c => c.id !== id));
         setOpenTabIds(prev => {
-          if (!prev.includes(remainingConversations[0].id)) {
-            return [remainingConversations[0].id];
-          }
-          return prev.filter(tabId => tabId !== id);
+          const filtered = prev.filter(tabId => tabId !== id);
+          return nextConversationId && !filtered.includes(nextConversationId)
+            ? [...filtered, nextConversationId]
+            : filtered;
         });
-      } else {
-        setCurrentConversationId(null);
-      }
-    }
+
+        if (currentConversationId === id) {
+          setCurrentConversationId(nextConversationId);
+        }
+      })
+      .catch(err => {
+        console.error('Failed to delete conversation from store:', err);
+        window.alert('Failed to delete conversation. Please try again.');
+      });
   }, [currentConversationId, conversations]);
+
+  const handleCreateFolder = useCallback(() => {
+    const newFolder: Folder = {
+      id: crypto.randomUUID(),
+      name: getNextFolderName(folders),
+      timestamp: new Date(),
+    };
+    setFolders(prev => [newFolder, ...prev]);
+    return newFolder.id;
+  }, [folders]);
+
+  const handleRenameFolder = useCallback((id: string, name: string) => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      return;
+    }
+
+    setFolders(prev => prev.map(f => f.id === id ? { ...f, name: trimmedName } : f));
+  }, []);
+
+  const handleDeleteFolder = useCallback((id: string) => {
+    const folder = folders.find(f => f.id === id);
+    if (!folder) return;
+    const convosInFolder = conversations.filter(c => c.folderId === id);
+    const count = convosInFolder.length;
+    const deletedIds = new Set(convosInFolder.map(c => c.id));
+    const confirmationMessage = count === 0
+      ? `Delete empty folder "${folder.name}"?`
+      : `Delete folder "${folder.name}"? This will permanently delete ${count} conversation${count !== 1 ? 's' : ''} inside it.`;
+    if (!window.confirm(confirmationMessage)) return;
+
+    const remainingConversations = conversations.filter(c => c.folderId !== id);
+    const nextConversationId = currentConversationId && deletedIds.has(currentConversationId)
+      ? remainingConversations[0]?.id ?? null
+      : currentConversationId;
+
+    void window.assistant.storeDeleteFolder(id)
+      .then(() => {
+        setConversations(prev => prev.filter(c => c.folderId !== id));
+        setFolders(prev => prev.filter(f => f.id !== id));
+        setOpenTabIds(prev => {
+          const filtered = prev.filter(tabId => !deletedIds.has(tabId));
+          return nextConversationId && !filtered.includes(nextConversationId)
+            ? [...filtered, nextConversationId]
+            : filtered;
+        });
+
+        if (currentConversationId && deletedIds.has(currentConversationId)) {
+          setCurrentConversationId(nextConversationId);
+        }
+      })
+      .catch(err => {
+        console.error('Failed to delete folder from store:', err);
+        window.alert('Failed to delete folder. Please try again.');
+      });
+  }, [folders, conversations, currentConversationId]);
+
+  const handleMoveConversation = useCallback((conversationId: string, folderId: string | null) => {
+    setConversations(prev => prev.map(c =>
+      c.id === conversationId ? { ...c, folderId } : c
+    ));
+  }, []);
+
+  useEffect(() => {
+    const handleKeyboardShortcut = (e: KeyboardEvent) => {
+      if (e.metaKey && e.shiftKey && e.key === 'o') {
+        e.preventDefault();
+        handleNewChat();
+      }
+      if (e.metaKey && e.shiftKey && e.key === 'Backspace') {
+        e.preventDefault();
+        if (currentConversationId) {
+          handleDeleteConversation(currentConversationId);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyboardShortcut);
+    return () => window.removeEventListener('keydown', handleKeyboardShortcut);
+  }, [handleNewChat, handleDeleteConversation, currentConversationId]);
 
   const handleTabClose = useCallback((id: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -765,6 +936,7 @@ const App: React.FC = () => {
         title: newTitle,
         timestamp: new Date(),
         messages: [],
+        folderId: null,
       };
       setConversations(prev => [newConversation, ...prev]);
       setCurrentConversationId(conversationId);
@@ -880,12 +1052,18 @@ const App: React.FC = () => {
             conversations={conversations.map(c => ({ 
               id: c.id, 
               title: c.title, 
-              timestamp: c.timestamp 
+              timestamp: c.timestamp,
+              folderId: c.folderId,
             }))}
+            folders={folders}
             currentConversationId={currentConversationId}
             onConversationSelect={handleConversationSelect}
             onConversationDelete={handleDeleteConversation}
             onNewChat={handleNewChat}
+            onCreateFolder={handleCreateFolder}
+            onRenameFolder={handleRenameFolder}
+            onDeleteFolder={handleDeleteFolder}
+            onMoveConversation={handleMoveConversation}
           />
           
           <main className="flex flex-col flex-1 min-w-0 bg-bg-primary">

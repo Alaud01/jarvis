@@ -4,7 +4,7 @@ import * as path from 'path';
 import { startPythonService, stopPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
 import { setMainWindow } from './audioRecorder';
-import { loadConversations, saveConversations, deleteConversation, loadSelectedModel, saveSelectedModel } from './store';
+import { loadConversations, saveConversations, deleteConversation, loadFolders, saveFolders, deleteFolderAndConversations, loadSelectedModel, saveSelectedModel } from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
 import {
   closeAllBrowserSessions,
@@ -709,6 +709,7 @@ function createWindow(): void {
     frame: true,
     resizable: true,
     titleBarStyle: 'hiddenInset',
+    backgroundColor: '#0a0a0a',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -1113,6 +1114,25 @@ ipcMain.handle('store:delete-conversation', async (_event, id: string) => {
   return { success: true };
 });
 
+ipcMain.handle('store:load-folders', async () => {
+  return loadFolders();
+});
+
+ipcMain.handle('store:save-folders', async (_event, folders: unknown) => {
+  saveFolders(folders as import('./store').SerializedFolder[]);
+  return { success: true };
+});
+
+ipcMain.handle('store:delete-folder', async (_event, id: string) => {
+  const folderConversations = loadConversations().filter(c => c.folderId === id);
+  for (const c of folderConversations) {
+    await closeBrowserSession(c.id);
+    await deleteBrowserArtifacts(c.id);
+  }
+  deleteFolderAndConversations(id);
+  return { success: true };
+});
+
 ipcMain.handle('browser-artifact:data-url', async (_event, filePath: string) => {
   return readBrowserArtifactAsPreviewDataUrl(filePath);
 });
@@ -1126,7 +1146,18 @@ ipcMain.handle('store:save-model', async (_event, model: string) => {
   return { success: true };
 });
 
+ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
+  const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
+  if (win) {
+    win.setBackgroundColor(isDark ? '#0a0a0a' : '#ffffff');
+  }
+});
+
 app.whenReady().then(async () => {
+  if (process.platform === 'darwin' && !isDev) {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([]));
+  }
+
   createTray();
   createWindow();
   

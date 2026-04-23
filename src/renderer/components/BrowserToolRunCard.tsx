@@ -150,12 +150,8 @@ const BrowserToolRunCard: React.FC<BrowserToolRunCardProps> = ({ run }) => {
 
       {run.llmTrace && <LLMTraceSection trace={run.llmTrace} />}
 
-      {(run.startUrl || run.currentUrl || run.pageTitle || run.model || run.mode || startedAt || finishedAt) && (
+      {(run.mode || startedAt || finishedAt) && (
         <div className="mt-3 flex flex-col gap-1 font-mono text-[0.65rem] text-text-tertiary">
-          {run.startUrl && <span className="break-all">start: {run.startUrl}</span>}
-          {run.currentUrl && <span className="break-all">current: {run.currentUrl}</span>}
-          {run.pageTitle && <span>title: {run.pageTitle}</span>}
-          {run.model && <span>model: {run.model}</span>}
           {run.mode && <span>mode: {run.mode}</span>}
           {startedAt && <span>started: {startedAt}</span>}
           {finishedAt && <span>finished: {finishedAt}</span>}
