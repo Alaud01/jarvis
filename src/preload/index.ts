@@ -36,6 +36,7 @@ type BrowserToolEventPayload = {
   mode?: 'dom' | 'hybrid' | 'cua';
   screenshots?: BrowserScreenshotArtifact[];
   llmTrace?: BrowserLLMTrace;
+  extractionOutput?: Record<string, unknown>;
   startedAt: string;
   finishedAt?: string;
   textOffset?: number;

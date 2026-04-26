@@ -120,7 +120,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   }, [isStreaming, isExpanded]);
 
   return (
-    <div className="my-4 border border-border-secondary rounded bg-bg-secondary">
+    <div className="my-2 border border-border-secondary rounded bg-bg-secondary">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-bg-hover transition-colors"
@@ -147,10 +147,10 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       </button>
       
       {isExpanded && (
-        <div className="px-4 pb-4 pt-2 border-t border-border-secondary">
+        <div className="px-4 pb-4 pt-2 border-t text-sm border-border-secondary overflow-y-auto">
           <div 
             ref={contentRef}
-            className={`${contentClassName} overflow-y-auto thinking-scroll-container ${isStreaming ? 'max-h-[300px]' : ''}`}
+            className={`${contentClassName} thinking-scroll-container ${isStreaming ? 'max-h-[300px]' : ''}`}
           >
             <MarkdownRenderer content={content} />
           </div>

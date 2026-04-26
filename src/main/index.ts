@@ -124,6 +124,7 @@ interface BrowserToolEventPayload {
   mode?: BrowserToolRun['mode'];
   screenshots?: BrowserScreenshotArtifact[];
   llmTrace?: BrowserLLMTrace;
+  extractionOutput?: Record<string, unknown>;
   startedAt: string;
   finishedAt?: string;
   textOffset?: number;
@@ -444,6 +445,10 @@ function formatBrowserToolResult(result: BrowserAgentResult): string {
     lines.push(`Error: ${result.error}`);
   }
 
+  if (result.extractionOutput && Object.keys(result.extractionOutput).length > 0) {
+    lines.push(`Structured data: ${JSON.stringify(result.extractionOutput, null, 2)}`);
+  }
+
   return lines.join('\n');
 }
 
@@ -703,8 +708,8 @@ async function streamChatTurn(
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1000,
-    height: 700,
+    width: 1280,
+    height: 800,
     show: false,
     frame: true,
     resizable: true,
@@ -768,6 +773,18 @@ ipcMain.handle('send-message', async (_event, model: string, messages: { role: s
 ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRequest) => {
   let flushThinkingConsoleBuffer = (_reason: string) => undefined;
 
+  const sendToRenderer = (channel: string, ...args: unknown[]) => {
+    try {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send(channel, ...args);
+      } else {
+        currentAbortController?.abort();
+      }
+    } catch {
+      currentAbortController?.abort();
+    }
+  };
+
   try {
     const abortController = new AbortController();
     currentAbortController = abortController;
@@ -777,7 +794,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
 
     const sendOllamaChunk = (chunk: string) => {
       streamedTextLength += chunk.length;
-      event.sender.send('ollama-chunk', chunk);
+      sendToRenderer('ollama-chunk', chunk);
     };
 
     flushThinkingConsoleBuffer = (reason: string) => {
@@ -826,8 +843,8 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       }
 
       flushThinkingConsoleBuffer(reason);
-      sendOllamaChunk('\n...done thinking.\n');
-      inThinking = false;
+        sendOllamaChunk('\n...done thinking.\n');
+        inThinking = false;
     };
 
     const baseMessages: ChatMessage[] = [
@@ -841,7 +858,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       const toolCalls = assistantMessage?.tool_calls ?? [];
       if (!toolCalls.length) {
         closeThinkingSection('turn-complete');
-        event.sender.send('ollama-done');
+        sendToRenderer('ollama-done');
         return { success: true };
       }
 
@@ -886,7 +903,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               rawArguments: toolCall.function.arguments,
               error: errorMessage,
             });
-            event.sender.send('browser-tool-event', {
+            sendToRenderer('browser-tool-event', {
               conversationId: request.conversationId,
               assistantMessageId: request.assistantMessageId,
               runId: randomUUID(),
@@ -918,7 +935,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             startUrl: args.startUrl,
             maxSteps: args.maxSteps,
           });
-          event.sender.send('browser-tool-event', {
+          sendToRenderer('browser-tool-event', {
             conversationId: request.conversationId,
             assistantMessageId: request.assistantMessageId,
             runId,
@@ -937,7 +954,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               abortController.signal,
               request.model,
               (update: BrowserAgentProgressUpdate) => {
-                event.sender.send('browser-tool-event', {
+                sendToRenderer('browser-tool-event', {
                   conversationId: request.conversationId,
                   assistantMessageId: request.assistantMessageId,
                   runId,
@@ -956,7 +973,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
                 } satisfies BrowserToolEventPayload);
               }
             );
-            event.sender.send('browser-tool-event', {
+            sendToRenderer('browser-tool-event', {
               conversationId: request.conversationId,
               assistantMessageId: request.assistantMessageId,
               runId,
@@ -973,6 +990,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               mode: browserResult.mode,
               screenshots: browserResult.screenshots,
               llmTrace: browserResult.llmTrace,
+              extractionOutput: browserResult.extractionOutput,
               startedAt: browserResult.startedAt,
               finishedAt: browserResult.finishedAt,
               textOffset,
@@ -988,7 +1006,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
                 runId,
                 instruction: args.instruction,
               });
-              event.sender.send('browser-tool-event', {
+              sendToRenderer('browser-tool-event', {
                 conversationId: request.conversationId,
                 assistantMessageId: request.assistantMessageId,
                 runId,
@@ -1014,7 +1032,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
               startUrl: args.startUrl,
               error: errorMessage,
             });
-            event.sender.send('browser-tool-event', {
+            sendToRenderer('browser-tool-event', {
               conversationId: request.conversationId,
               assistantMessageId: request.assistantMessageId,
               runId,
@@ -1066,7 +1084,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
         }
 
         closeThinkingSection('tool-synthesis-complete');
-        event.sender.send('ollama-done');
+        sendToRenderer('ollama-done');
         return { success: true };
       }
 
@@ -1078,11 +1096,11 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
   } catch (error) {
     flushThinkingConsoleBuffer('stream-error');
     if (isAbortLikeError(error)) {
-      event.sender.send('ollama-done');
+      sendToRenderer('ollama-done');
       return { success: true, aborted: true };
     }
     const errorMessage = error instanceof Error ? error.message : 'Unknown error during streaming';
-    event.sender.send('ollama-error', errorMessage);
+    sendToRenderer('ollama-error', errorMessage);
     throw error;
   } finally {
     currentAbortController = null;
@@ -1110,7 +1128,6 @@ ipcMain.handle('store:save-conversations', async (_event, conversations: unknown
 ipcMain.handle('store:delete-conversation', async (_event, id: string) => {
   await closeBrowserSession(id);
   await deleteBrowserArtifacts(id);
-  deleteConversation(id);
   return { success: true };
 });
 
@@ -1129,7 +1146,6 @@ ipcMain.handle('store:delete-folder', async (_event, id: string) => {
     await closeBrowserSession(c.id);
     await deleteBrowserArtifacts(c.id);
   }
-  deleteFolderAndConversations(id);
   return { success: true };
 });
 

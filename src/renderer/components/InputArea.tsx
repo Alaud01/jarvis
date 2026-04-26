@@ -17,6 +17,8 @@ interface InputAreaProps {
   voiceTranscript?: VoiceTranscriptPayload | null;
   onVoiceTextUsed?: () => void;
   voiceShortcut?: string;
+  /** Increments when the user starts a new chat; focuses the composer without focusing on first app mount. */
+  composeFocusKey?: number;
 }
 
 const InputArea: React.FC<InputAreaProps> = ({ 
@@ -26,12 +28,27 @@ const InputArea: React.FC<InputAreaProps> = ({
   disabled = false,
   voiceTranscript,
   onVoiceTextUsed,
-  voiceShortcut
+  voiceShortcut,
+  composeFocusKey = 0,
 }) => {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastComposeFocusKeyRef = useRef<number | null>(null);
   const lastHandledVoiceIdRef = useRef<string | null>(null);
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
+
+  useEffect(() => {
+    if (lastComposeFocusKeyRef.current === null) {
+      lastComposeFocusKeyRef.current = composeFocusKey;
+      return;
+    }
+    if (lastComposeFocusKeyRef.current !== composeFocusKey) {
+      lastComposeFocusKeyRef.current = composeFocusKey;
+      queueMicrotask(() => {
+        textareaRef.current?.focus({ preventScroll: true });
+      });
+    }
+  }, [composeFocusKey]);
 
   useEffect(() => {
     if (!voiceTranscript || !onVoiceTextUsed) {
@@ -116,7 +133,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   const isDisabled = isLoading || disabled || voiceState === 'processing';
 
   return (
-    <div className="p-6 bg-bg-primary shrink-0">
+    <div className="pb-6 bg-bg-primary shrink-0">
       <div className="max-w-200 mx-auto">
         <div className="bg-transparent border border-border-primary p-3 transition-all duration-150 focus-within:border-text-primary">
           <textarea

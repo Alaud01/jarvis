@@ -2,7 +2,10 @@ import {
   Stagehand,
   providerEnvVarMap,
   type AgentResult as StagehandAgentResult,
+  type Action as StagehandAction,
+  type StagehandZodObject,
 } from '@browserbasehq/stagehand';
+import { z } from 'zod';
 import { app } from 'electron';
 import { randomUUID } from 'crypto';
 import { mkdir, readFile, rm, writeFile } from 'fs/promises';
@@ -19,6 +22,7 @@ const OLLAMA_MODEL_CACHE_TTL_MS = 30_000;
 const MAX_PROCESSING_LINES = 80;
 const NAVIGATION_TIMEOUT_MS = 45000;
 const BROWSER_ARTIFACTS_DIR_NAME = 'browser-artifacts';
+const BROWSER_ACTION_CACHE_DIR_NAME = 'browser-action-cache';
 const SCREENSHOT_EXTENSION = 'jpg';
 const SCREENSHOT_MIME_TYPE = 'image/jpeg';
 const SCREENSHOT_QUALITY = 80;
@@ -104,6 +108,7 @@ export interface BrowserAgentResult {
   error?: string;
   screenshots?: BrowserScreenshotArtifact[];
   llmTrace?: BrowserLLMTrace;
+  extractionOutput?: Record<string, unknown>;
 }
 
 interface BrowserSession {
@@ -115,6 +120,8 @@ interface BrowserAgentExecutionPlan {
   mode: BrowserToolMode;
   excludeTools: string[];
   retryContext?: BrowserAgentRetryContext;
+  observedActionsContext?: string;
+  extractionSchema?: StagehandZodObject;
 }
 
 type BrowserAgentRetryReason = 'schema_validation' | 'vision_capability';
@@ -271,6 +278,37 @@ function shouldEnableStructuredExtraction(instruction: string): boolean {
   return STRUCTURED_EXTRACTION_PATTERNS.some((pattern) => pattern.test(instruction));
 }
 
+const EXTRACTION_FIELD_INFERRERS = [
+  { pattern: /\b(?:name|title|label)\b/i, field: 'name', schema: z.string(), description: 'The name or title' },
+  { pattern: /\b(?:price|cost|rate|fee)\b/i, field: 'price', schema: z.string(), description: 'The price as displayed, including currency' },
+  { pattern: /\b(?:email|e-mail)\b/i, field: 'email', schema: z.string().email(), description: 'Email address' },
+  { pattern: /\b(?:url|link|href|website)\b/i, field: 'url', schema: z.string().url(), description: 'The URL or link' },
+  { pattern: /\b(?:phone|tel|mobile)\b/i, field: 'phone', schema: z.string(), description: 'Phone number' },
+  { pattern: /\b(?:address|location)\b/i, field: 'address', schema: z.string(), description: 'The address or location' },
+  { pattern: /\b(?:date|time|when)\b/i, field: 'date', schema: z.string(), description: 'The date or time' },
+  { pattern: /\b(?:description|detail|summary|about)\b/i, field: 'description', schema: z.string(), description: 'A description or summary' },
+  { pattern: /\b(?:status|state|availability)\b/i, field: 'status', schema: z.string(), description: 'The status or availability' },
+  { pattern: /\b(?:id|identifier)\b/i, field: 'id', schema: z.string(), description: 'The identifier' },
+] as const;
+
+const IS_PLURAL_LIST_PATTERN = /\b(?:all|every|list|each)\b.*\b(?:items?|products?|listings?|results?|rows?|entries?|records?)\b/i;
+
+function inferExtractionSchema(instruction: string): StagehandZodObject | undefined {
+  const shape: Record<string, z.ZodString | z.ZodString> = {};
+
+  for (const inferrer of EXTRACTION_FIELD_INFERRERS) {
+    if (inferrer.pattern.test(instruction)) {
+      shape[inferrer.field] = inferrer.schema.describe(inferrer.description);
+    }
+  }
+
+  if (Object.keys(shape).length === 0) {
+    return undefined;
+  }
+
+  return z.object(shape);
+}
+
 function buildBrowserAgentExecutionPlan(
   model: string,
   instruction: string,
@@ -285,14 +323,18 @@ function buildBrowserAgentExecutionPlan(
 
   excludeTools.push('click', 'type', 'dragAndDrop', 'clickAndHold');
 
-  if (!shouldEnableStructuredExtraction(instruction)) {
+  const enableExtraction = shouldEnableStructuredExtraction(instruction);
+  if (!enableExtraction) {
     excludeTools.push('extract');
   }
+
+  const extractionSchema = enableExtraction ? inferExtractionSchema(instruction) : undefined;
 
   return {
     mode,
     excludeTools: dedupeTools(excludeTools),
     retryContext,
+    extractionSchema,
   };
 }
 
@@ -313,7 +355,7 @@ function buildBrowserAgentSystemPrompt(plan: BrowserAgentExecutionPlan): string 
       ? 'The previous attempt requested unsupported screenshot or vision behavior. Stay strictly within the available DOM-oriented tools.'
       : undefined;
 
-  return [
+  const parts = [
     'You are a browser automation agent running inside Stagehand.',
     'Call only the tools provided by the runtime and match each tool schema exactly.',
     'Do not invent your own action format and never send arrays of actions.',
@@ -322,7 +364,13 @@ function buildBrowserAgentSystemPrompt(plan: BrowserAgentExecutionPlan): string 
     'Take one deliberate browser action at a time, verify navigation-sensitive steps, and stop to report blockers instead of fabricating a tool call.',
     modeGuidance,
     retryGuidance,
-  ].join(' ');
+  ];
+
+  if (plan.observedActionsContext) {
+    parts.push(plan.observedActionsContext);
+  }
+
+  return parts.filter(Boolean).join(' ');
 }
 
 function buildBrowserAgentInstruction(instruction: string, plan: BrowserAgentExecutionPlan): string {
@@ -379,6 +427,10 @@ function getBrowserArtifactsRootDirectory(): string {
 
 function getConversationBrowserArtifactsDirectory(conversationId: string): string {
   return path.join(getBrowserArtifactsRootDirectory(), sanitizeArtifactPathSegment(conversationId));
+}
+
+function getBrowserActionCacheDirectory(conversationId: string): string {
+  return path.join(app.getPath('userData'), BROWSER_ACTION_CACHE_DIR_NAME, sanitizeArtifactPathSegment(conversationId));
 }
 
 function isPathInsideDirectory(targetPath: string, directoryPath: string): boolean {
@@ -478,10 +530,15 @@ export async function readBrowserArtifactAsPreviewDataUrl(filePath: string): Pro
 }
 
 export async function deleteBrowserArtifacts(conversationId: string): Promise<void> {
-  await rm(getConversationBrowserArtifactsDirectory(conversationId), {
-    recursive: true,
-    force: true,
-  }).catch(() => undefined);
+  await Promise.all([
+    rm(getConversationBrowserArtifactsDirectory(conversationId), { recursive: true, force: true }).catch(() => undefined),
+    rm(getBrowserActionCacheDirectory(conversationId), { recursive: true, force: true }).catch(() => undefined),
+  ]);
+}
+
+export async function invalidateBrowserActionCache(conversationId: string): Promise<void> {
+  await rm(getBrowserActionCacheDirectory(conversationId), { recursive: true, force: true }).catch(() => undefined);
+  await mkdir(getBrowserActionCacheDirectory(conversationId), { recursive: true }).catch(() => undefined);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -669,11 +726,15 @@ async function createBrowserSession(conversationId: string, model: string): Prom
   ensureStagehandProviderCredentials(model);
 
   const executablePath = getBrowserExecutablePath();
+  const cacheDir = getBrowserActionCacheDirectory(conversationId);
+  await mkdir(cacheDir, { recursive: true });
+
   const stagehand = new Stagehand({
     env: 'LOCAL',
     model,
     experimental: true,
     verbose: 0,
+    cacheDir,
     logger: (logLine) => emitBrowserSessionLog(conversationId, logLine as StagehandLogLine),
     localBrowserLaunchOptions: {
       headless: false,
@@ -861,6 +922,10 @@ function formatStagehandLogLine(logLine: StagehandLogLine): string | null {
     return null;
   }
 
+  if (/cache hit|using cached/i.test(message)) {
+    return 'Using cached browser action.';
+  }
+
   if (logLine.category === 'AISDK error' || isSchemaValidationMessage(message)) {
     const rawResponse = getFirstAuxiliaryValue(logLine.auxiliary, ['text', 'value', 'cause']);
     if (rawResponse) {
@@ -975,6 +1040,45 @@ function formatStagehandToolCall(toolCall: StagehandStepToolCall): string | null
   }
 }
 
+const MAX_OBSERVE_ACTIONS = 10;
+
+async function observePageForAgent(
+  stagehand: Stagehand,
+  instruction: string
+): Promise<StagehandAction[]> {
+  try {
+    const actions = await stagehand.observe(
+      'find actionable elements relevant to: ' + instruction,
+      { timeout: 10000 }
+    );
+    return actions.slice(0, MAX_OBSERVE_ACTIONS);
+  } catch (error) {
+    logBrowserAgent('warn', 'Observe failed, proceeding without pre-discovered actions', {
+      error: getErrorMessage(error),
+    });
+    return [];
+  }
+}
+
+function formatObservedActionsForSystemPrompt(actions: StagehandAction[]): string {
+  if (actions.length === 0) {
+    return '';
+  }
+
+  const lines = actions.map((action) => {
+    const method = action.method ? `[${action.method}]` : '[action]';
+    const description = action.description ? `"${action.description}"` : 'element';
+    const selector = action.selector ? `(selector: ${action.selector})` : '';
+    return `- ${method} ${description} ${selector}`;
+  });
+
+  return [
+    'Available actions discovered on this page:',
+    ...lines,
+    'Use these discovered actions when they match your task. You may also use other DOM tools as needed.',
+  ].join('\n');
+}
+
 async function executeBrowserAgentAttempt(
   conversationId: string,
   session: BrowserSession,
@@ -1018,6 +1122,10 @@ async function executeBrowserAgentAttempt(
         }
       : undefined,
   };
+
+  if (plan.extractionSchema) {
+    executeOptions.output = plan.extractionSchema;
+  }
 
   if (plan.mode !== 'cua') {
     executeOptions.signal = signal;
@@ -1284,11 +1392,37 @@ export async function executeBrowserAgent(
 
       addProcessingLine(`Using browser model \`${model}\` in \`${initialPlan.mode}\` mode.`);
 
+      if (initialPlan.extractionSchema) {
+        const shape = initialPlan.extractionSchema instanceof z.ZodArray
+          ? initialPlan.extractionSchema.element
+          : initialPlan.extractionSchema;
+        const fieldNames = shape instanceof z.ZodObject ? Object.keys(shape.shape) : [];
+        if (fieldNames.length > 0) {
+          addProcessingLine(`Extracting structured data with inferred schema (${fieldNames.length} field${fieldNames.length === 1 ? '' : 's'}: ${fieldNames.join(', ')}).`);
+        } else {
+          addProcessingLine('Extracting structured data with inferred schema.');
+        }
+      }
+
       if (startUrl) {
         addProcessingLine(`Navigating to \`${startUrl}\`.`);
         await navigateToStartUrl(page, startUrl);
         publishUpdate(await getCurrentBrowserContext(session.stagehand));
       }
+
+      let observedActionsContext: string | undefined;
+      if (initialPlan.mode !== 'cua') {
+        const observedActions = await observePageForAgent(session.stagehand, args.instruction);
+        if (observedActions.length > 0) {
+          observedActionsContext = formatObservedActionsForSystemPrompt(observedActions);
+          addProcessingLine(`Observed ${observedActions.length} actionable element${observedActions.length === 1 ? '' : 's'} on the page.`);
+        }
+      }
+
+      const plan: BrowserAgentExecutionPlan = {
+        ...initialPlan,
+        observedActionsContext,
+      };
 
       return runBrowserAgentAttemptWithDomFallback(
         conversationId,
@@ -1298,7 +1432,7 @@ export async function executeBrowserAgent(
         args.instruction,
         maxSteps,
         signal,
-        initialPlan,
+        plan,
         startUrl,
         (nextPlan) => {
           activeMode = nextPlan.mode;
@@ -1413,6 +1547,7 @@ export async function executeBrowserAgent(
       finishedAt: new Date().toISOString(),
       screenshots: finalScreenshot ? [finalScreenshot] : undefined,
       llmTrace: llmTrace.steps.length > 0 ? llmTrace : undefined,
+      extractionOutput: attempt.result.output,
     };
     logBrowserAgent('log', 'Browser task completed', {
       conversationId,

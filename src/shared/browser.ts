@@ -51,6 +51,7 @@ export interface BrowserToolRun {
   mode?: BrowserToolMode;
   screenshots?: BrowserScreenshotArtifact[];
   llmTrace?: BrowserLLMTrace;
+  extractionOutput?: Record<string, unknown>;
   startedAt: string;
   finishedAt?: string;
   textOffset?: number;

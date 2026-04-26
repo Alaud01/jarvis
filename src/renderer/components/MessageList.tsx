@@ -16,6 +16,7 @@ interface Message {
 
 interface MessageListProps {
   messages: Message[];
+  scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   isLoading?: boolean;
   editingMessageId?: string | null;
   onEditMessage?: (messageId: string) => void;
@@ -26,6 +27,7 @@ interface MessageListProps {
 
 export interface MessageListHandle {
   scrollToMessage: (messageId: string) => void;
+  scrollToMessageHeader: (messageId: string, headerIndex: number) => void;
   scrollToBottom: () => void;
   isAutoScrollEnabled: () => boolean;
   enableAutoScroll: () => void;
@@ -233,6 +235,7 @@ const MessageActionButton: React.FC<MessageActionButtonProps> = ({ onClick, labe
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(({ 
   messages, 
+  scrollContainerRef,
   isLoading = false,
   editingMessageId,
   onEditMessage,
@@ -240,7 +243,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   onResubmitMessage,
   onRegenerateResponse,
 }, ref) => {
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messageRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const autoScrollEnabledRef = useRef(true);
   const isStreamingRef = useRef(false);
@@ -275,6 +277,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     }, 450);
   };
 
+  const scrollElementIntoView = useCallback((element: Element, offset: number = 16) => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    const targetScrollTop = container.scrollTop + elementRect.top - containerRect.top - offset;
+
+    programmaticScrollRef.current = true;
+    container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+    lastScrollTopRef.current = container.scrollTop;
+    endProgrammaticScrollAfterSmooth();
+  }, []);
+
   const flushScrollToBottom = useCallback(() => {
     if (!autoScrollEnabledRef.current) return;
     const container = scrollContainerRef.current;
@@ -290,16 +306,18 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   useImperativeHandle(ref, () => ({
     scrollToMessage: (messageId: string) => {
       const messageElement = messageRefsRef.current.get(messageId);
-      const container = scrollContainerRef.current;
-      if (messageElement && container) {
-        const containerRect = container.getBoundingClientRect();
-        const elementRect = messageElement.getBoundingClientRect();
-        const currentScrollTop = container.scrollTop;
-        const targetScrollTop = currentScrollTop + elementRect.top - containerRect.top - 16;
-        programmaticScrollRef.current = true;
-        container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
-        lastScrollTopRef.current = container.scrollTop;
-        endProgrammaticScrollAfterSmooth();
+      if (messageElement) {
+        scrollElementIntoView(messageElement);
+      }
+    },
+    scrollToMessageHeader: (messageId: string, headerIndex: number) => {
+      const messageElement = messageRefsRef.current.get(messageId);
+      const headerElement = messageElement?.querySelectorAll('h1, h2, h3')[headerIndex];
+
+      if (headerElement) {
+        scrollElementIntoView(headerElement, 24);
+      } else if (messageElement) {
+        scrollElementIntoView(messageElement);
       }
     },
     scrollToBottom: () => {
@@ -447,7 +465,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const showEmptyPlaceholder = messages.length === 0 && !isLoading;
 
   return (
-    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto message-scroll-container">
+    <div className="flex-1 min-w-0">
       {showEmptyPlaceholder ? (
         <div className="py-8">
           <div className="max-w-[800px] mx-auto px-6">
@@ -462,8 +480,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
           </div>
         </div>
       ) : (
-      <div className="py-8 pl-9">
-        <div ref={messagesColumnRef} className="max-w-[800px] mx-auto">
+      <div className="py-4">
+        <div ref={messagesColumnRef} className="max-w-[836px] mx-auto pl-9">
           {messages.map((message) => {
             const segments = parseMessageSegments(message.text, message.isStreaming, message.toolRuns);
             const isEditing = editingMessageId === message.id;

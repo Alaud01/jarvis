@@ -158,6 +158,7 @@ interface BrowserToolEventPayload {
   mode?: BrowserToolRun['mode'];
   screenshots?: BrowserScreenshotArtifact[];
   llmTrace?: BrowserLLMTrace;
+  extractionOutput?: Record<string, unknown>;
   startedAt: string;
   finishedAt?: string;
   textOffset?: number;
@@ -231,6 +232,7 @@ const App: React.FC = () => {
   const [hasHydratedStore, setHasHydratedStore] = useState(false);
   const pendingJarvisMessageRef = useRef<string | null>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
+  const chatScrollContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const loadModels = async () => {
@@ -317,6 +319,21 @@ const App: React.FC = () => {
       console.error('Failed to save conversations:', err);
     });
   }, [conversations, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) return;
+
+    const validIds = new Set(conversations.map(c => c.id));
+
+    setOpenTabIds(prev => {
+      const filtered = prev.filter(id => validIds.has(id));
+      return filtered.length !== prev.length ? filtered : prev;
+    });
+
+    if (currentConversationId && !validIds.has(currentConversationId)) {
+      setCurrentConversationId(conversations[0]?.id ?? null);
+    }
+  }, [conversations, currentConversationId, hasHydratedStore]);
 
   useEffect(() => {
     if (!hasHydratedStore) return;
@@ -448,6 +465,9 @@ const App: React.FC = () => {
       if (payload.llmTrace !== undefined) {
         toolRunPatch.llmTrace = payload.llmTrace;
       }
+      if (payload.extractionOutput !== undefined) {
+        toolRunPatch.extractionOutput = payload.extractionOutput;
+      }
       if (payload.finishedAt !== undefined) {
         toolRunPatch.finishedAt = payload.finishedAt;
       }
@@ -569,6 +589,7 @@ const App: React.FC = () => {
 
   const handleNewChat = useCallback(() => {
     setCurrentConversationId(null);
+    setNewChatTrigger(prev => prev + 1);
   }, []);
 
   const handleConversationSelect = useCallback((id: string) => {
@@ -727,7 +748,12 @@ const App: React.FC = () => {
     setIsLoading(false);
   }, []);
 
-  const handleScrollToMessage = useCallback((messageId: string) => {
+  const handleScrollToMessage = useCallback((messageId: string, headerIndex?: number) => {
+    if (headerIndex !== undefined) {
+      messageListRef.current?.scrollToMessageHeader(messageId, headerIndex);
+      return;
+    }
+
     messageListRef.current?.scrollToMessage(messageId);
   }, []);
 
@@ -1026,13 +1052,21 @@ const App: React.FC = () => {
     }
   }, [currentConversationId, newChatTrigger, handleSendMessage]);
 
-  const openTabs = openTabIds.map(id => {
-    const convo = conversations.find(c => c.id === id);
-    return {
-      id,
-      title: convo ? convo.title : 'New Chat'
-    };
-  });
+  const validConversationIds = new Set(conversations.map(c => c.id));
+
+  const openTabs = openTabIds
+    .filter(id => validConversationIds.has(id))
+    .map(id => {
+      const convo = conversations.find(c => c.id === id);
+      return {
+        id,
+        title: convo ? convo.title : 'New Chat'
+      };
+    });
+
+  const activeConversation = currentConversationId && validConversationIds.has(currentConversationId)
+    ? conversations.find(c => c.id === currentConversationId) ?? null
+    : null;
 
   return (
     <ThemeProvider>
@@ -1076,9 +1110,10 @@ const App: React.FC = () => {
               isLoadingModels={isLoadingModels}
             />
             
-            <div className="flex flex-1 min-h-0 relative">
+            <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageList 
                 ref={messageListRef} 
+                scrollContainerRef={chatScrollContainerRef}
                 messages={messages} 
                 isLoading={isLoading}
                 editingMessageId={editingMessageId}
@@ -1099,6 +1134,7 @@ const App: React.FC = () => {
               voiceTranscript={voiceTranscript}
               onVoiceTextUsed={handleVoiceTextUsed}
               voiceShortcut={voiceShortcut}
+              composeFocusKey={newChatTrigger}
             />
           </main>
         </div>
