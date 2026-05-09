@@ -1,12 +1,28 @@
 import React from 'react';
 
+interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  available: boolean;
+}
+
 interface ChatHeaderProps {
   onMenuClick: () => void;
   title: string;
-  models: string[];
+  models: ModelInfo[];
   selectedModel: string | null;
   onModelSelect: (model: string) => void;
   isLoadingModels?: boolean;
+  providers: ProviderInfo[];
+  selectedProvider: string;
+  onProviderSelect: (providerId: string) => void;
+  onRefreshModels: () => void;
 }
 
 const ChatHeader: React.FC<ChatHeaderProps> = ({
@@ -16,9 +32,15 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({
   selectedModel,
   onModelSelect,
   isLoadingModels = false,
+  providers,
+  selectedProvider,
+  onProviderSelect,
+  onRefreshModels,
 }) => {
+  const filteredModels = models.filter(m => m.provider === selectedProvider);
+
   return (
-    <header className="h-10 px-6 flex items-center justify-between border-b border-border-primary shrink-0">
+    <header className="h-10 px-6 flex items-center justify-between border-b border-border-primary shrink-0 [-webkit-app-region:no-drag]">
       <div className="flex items-center gap-4">
         <button 
           className="w-8 h-8 border border-transparent bg-transparent text-text-primary flex items-center justify-center cursor-pointer transition-all duration-[150ms] hover:border-border-primary" 
@@ -34,29 +56,56 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({
         <h1 className="font-mono text-sm text-text-primary">{title}</h1>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2">
+        {providers.length > 1 && (
+          <div className="relative">
+            <select
+              value={selectedProvider}
+              onChange={(e) => onProviderSelect(e.target.value)}
+              className="appearance-none bg-transparent border border-border-secondary px-2 py-1 pr-6 font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary focus:outline-none focus:border-text-primary"
+            >
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+            <div className="absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-tertiary">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </div>
+          </div>
+        )}
         <div className="relative">
-          <select
-            value={selectedModel || ''}
-            onChange={(e) => onModelSelect(e.target.value)}
-            disabled={isLoadingModels || models.length === 0}
-            className="appearance-none bg-transparent border border-border-secondary px-3 py-1 pr-8 font-mono text-[0.7rem] text-text-secondary uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:border-text-primary"
-          >
-            {isLoadingModels && (
-              <option value="" disabled>Loading...</option>
-            )}
-            {!isLoadingModels && models.length === 0 && (
-              <option value="" disabled>No models</option>
-            )}
-            {!isLoadingModels && models.length > 0 && (
-              <option value="" disabled>Select model</option>
-            )}
-            {models.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))}
-          </select>
+          {filteredModels.length === 0 && !isLoadingModels ? (
+            <button
+              onClick={onRefreshModels}
+              className="appearance-none bg-transparent border border-border-secondary px-3 py-1 pr-8 font-mono text-[0.7rem] text-text-secondary uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary focus:outline-none focus:border-text-primary"
+              title="No models found - click to retry"
+            >
+              No models - retry
+            </button>
+          ) : (
+            <select
+              value={selectedModel || ''}
+              onChange={(e) => onModelSelect(e.target.value)}
+              disabled={isLoadingModels}
+              className="appearance-none bg-transparent border border-border-secondary px-3 py-1 pr-8 font-mono text-[0.7rem] text-text-secondary uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:border-text-primary"
+            >
+              {isLoadingModels && (
+                <option value="" disabled>Loading...</option>
+              )}
+              {!isLoadingModels && filteredModels.length > 0 && (
+                <option value="" disabled>Select model</option>
+              )}
+              {filteredModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          )}
           <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-tertiary">
               <polyline points="6 9 12 15 18 9" />

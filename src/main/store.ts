@@ -1,14 +1,10 @@
 import Store from 'electron-store';
-import type { BrowserToolRun } from '../shared/browser';
-
-export type SerializedBrowserToolRun = BrowserToolRun;
 
 export interface SerializedMessage {
   id: string;
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
-  toolRuns?: SerializedBrowserToolRun[];
 }
 
 export interface SerializedConversation {
@@ -29,6 +25,7 @@ interface StoreSchema {
   conversations: SerializedConversation[];
   folders: SerializedFolder[];
   selectedModel: string;
+  selectedProvider: string;
 }
 
 const store = new Store<StoreSchema>({
@@ -37,6 +34,7 @@ const store = new Store<StoreSchema>({
     conversations: [],
     folders: [],
     selectedModel: '',
+    selectedProvider: 'ollama',
   },
 }) as any;
 
@@ -74,6 +72,14 @@ export function loadSelectedModel(): string {
 
 export function saveSelectedModel(model: string): void {
   store.set('selectedModel', model);
+}
+
+export function loadSelectedProvider(): string {
+  return store.get('selectedProvider', 'ollama') as string;
+}
+
+export function saveSelectedProvider(provider: string): void {
+  store.set('selectedProvider', provider);
 }
 
 export default store;

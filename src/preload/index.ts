@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { BrowserLLMTrace, BrowserScreenshotArtifact } from '../shared/browser';
 
 type VoiceTranscriptPayload = {
   text: string;
@@ -12,40 +11,30 @@ type ChatMessagePayload = {
   content: string;
 };
 
+type ModelInfo = {
+  id: string;
+  name: string;
+  provider: string;
+};
+
+type ProviderInfo = {
+  id: string;
+  name: string;
+  available: boolean;
+};
+
 type SendMessageStreamRequest = {
   conversationId: string;
   assistantMessageId: string;
   model: string;
+  provider: string;
   messages: ChatMessagePayload[];
-};
-
-type BrowserToolEventPayload = {
-  conversationId: string;
-  assistantMessageId: string;
-  runId: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
-  instruction: string;
-  startUrl?: string;
-  summary?: string;
-  currentUrl?: string;
-  pageTitle?: string;
-  actionsTaken?: number;
-  error?: string;
-  processing?: string;
-  model?: string;
-  mode?: 'dom' | 'hybrid' | 'cua';
-  screenshots?: BrowserScreenshotArtifact[];
-  llmTrace?: BrowserLLMTrace;
-  extractionOutput?: Record<string, unknown>;
-  startedAt: string;
-  finishedAt?: string;
-  textOffset?: number;
 };
 
 contextBridge.exposeInMainWorld('assistant', {
   getModels: () => ipcRenderer.invoke('get-models'),
-  sendMessage: (model: string, messages: { role: string; content: string }[]) => 
-    ipcRenderer.invoke('send-message', model, messages),
+  getModelsForProvider: (providerId: string) => ipcRenderer.invoke('get-models-for-provider', providerId),
+  getProviders: () => ipcRenderer.invoke('get-providers'),
   sendMessageStream: (request: SendMessageStreamRequest) =>
     ipcRenderer.invoke('send-message-stream', request),
   stopStream: () => ipcRenderer.invoke('stop-stream'),
@@ -65,12 +54,6 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
   },
-  onBrowserToolEvent: (callback: (payload: BrowserToolEventPayload) => void) => {
-    const listener = (_event: any, payload: BrowserToolEventPayload) => callback(payload);
-    ipcRenderer.on('browser-tool-event', listener);
-    return () => ipcRenderer.removeListener('browser-tool-event', listener);
-  },
-  getBrowserArtifactDataUrl: (filePath: string) => ipcRenderer.invoke('browser-artifact:data-url', filePath),
   startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
   stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),
   getVoiceRecordingState: () => ipcRenderer.invoke('voice-recording-state'),
@@ -98,5 +81,7 @@ contextBridge.exposeInMainWorld('assistant', {
   storeDeleteFolder: (id: string) => ipcRenderer.invoke('store:delete-folder', id),
   storeLoadModel: () => ipcRenderer.invoke('store:load-model'),
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
+  storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
+  storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
   setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

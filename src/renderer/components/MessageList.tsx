@@ -2,8 +2,6 @@ import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHa
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
 import TypingIndicator from './TypingIndicator';
-import BrowserToolRunCard from './BrowserToolRunCard';
-import type { BrowserToolRun } from '../../shared/browser';
 
 interface Message {
   id: string;
@@ -11,7 +9,6 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
-  toolRuns?: BrowserToolRun[];
 }
 
 interface MessageListProps {
@@ -34,14 +31,13 @@ export interface MessageListHandle {
 }
 
 export interface MessageSegment {
-  type: 'thinking' | 'content' | 'toolRun';
+  type: 'thinking' | 'content';
   text?: string;
   isThinkingInProgress?: boolean;
-  toolRun?: BrowserToolRun;
   startOffset: number;
 }
 
-const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: BrowserToolRun[]): MessageSegment[] => {
+const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegment[] => {
   const rawSegments: MessageSegment[] = [];
   
   const xmlThinkingRegex = /(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/g;
@@ -157,24 +153,7 @@ const parseMessageSegments = (text: string, isStreaming?: boolean, toolRuns?: Br
     pushContentSegment(text, 0);
   }
 
-  if (!toolRuns || toolRuns.length === 0) {
-    return collapseAdjacentThinkingSegments(rawSegments);
-  }
-
-  const toolRunSegments: MessageSegment[] = toolRuns.map(run => ({
-    type: 'toolRun' as const,
-    toolRun: run,
-    startOffset: run.textOffset ?? Infinity,
-  }));
-
-  const merged = [...rawSegments, ...toolRunSegments].sort((a, b) => {
-    if (a.startOffset !== b.startOffset) return a.startOffset - b.startOffset;
-    if (a.type === 'toolRun' && b.type !== 'toolRun') return -1;
-    if (a.type !== 'toolRun' && b.type === 'toolRun') return 1;
-    return 0;
-  });
-
-  return collapseAdjacentThinkingSegments(merged);
+  return collapseAdjacentThinkingSegments(rawSegments);
 };
 
 const CopyIcon = () => (
@@ -483,7 +462,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       <div className="py-4">
         <div ref={messagesColumnRef} className="max-w-[836px] mx-auto pl-9">
           {messages.map((message) => {
-            const segments = parseMessageSegments(message.text, message.isStreaming, message.toolRuns);
+            const segments = parseMessageSegments(message.text, message.isStreaming);
             const isEditing = editingMessageId === message.id;
             
             return (
@@ -570,13 +549,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
                             <MarkdownRenderer content={segment.text} />
                           </div>
                         );
-                      }
-                      if (segment.type === 'toolRun' && segment.toolRun) {
-                        return (
-                          <BrowserToolRunCard key={segment.toolRun.id} run={segment.toolRun} />
-                        );
-                      }
-                      return null;
+                        }
+                        return null;
                     })}
                       
                       {!message.isStreaming && !isLoading && (

@@ -8,7 +8,6 @@ import CopyNotification from './components/CopyNotification';
 import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
-import type { BrowserLLMTrace, BrowserScreenshotArtifact, BrowserToolRun } from '../shared/browser';
 
 interface Message {
   id: string;
@@ -16,7 +15,6 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
-  toolRuns?: BrowserToolRun[];
 }
 
 interface Conversation {
@@ -38,7 +36,6 @@ interface SerializedMessage {
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
-  toolRuns?: BrowserToolRun[];
 }
 
 interface SerializedConversation {
@@ -65,7 +62,6 @@ function serializeConversation(c: Conversation): SerializedConversation {
       text: m.text,
       sender: m.sender,
       timestamp: m.timestamp.toISOString(),
-      toolRuns: m.toolRuns,
     })),
     folderId: c.folderId,
   };
@@ -81,7 +77,6 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       text: m.text,
       sender: m.sender,
       timestamp: new Date(m.timestamp),
-      toolRuns: m.toolRuns,
     })),
     folderId: c.folderId ?? null,
   };
@@ -120,17 +115,6 @@ function getNextFolderName(existingFolders: Folder[]): string {
   return `New Folder ${suffix}`;
 }
 
-function mergeDefinedFields<T extends Record<string, unknown>>(base: T, patch: Partial<T>): T {
-  const definedPatch = Object.fromEntries(
-    Object.entries(patch).filter(([, value]) => value !== undefined)
-  ) as Partial<T>;
-
-  return {
-    ...base,
-    ...definedPatch,
-  };
-}
-
 interface VoiceTranscriptPayload {
   text: string;
   autoSubmit: boolean;
@@ -141,33 +125,23 @@ interface PendingVoiceTranscript extends VoiceTranscriptPayload {
   id: string;
 }
 
-interface BrowserToolEventPayload {
-  conversationId: string;
-  assistantMessageId: string;
-  runId: string;
-  status: BrowserToolRun['status'];
-  instruction: string;
-  startUrl?: string;
-  summary?: string;
-  currentUrl?: string;
-  pageTitle?: string;
-  actionsTaken?: number;
-  error?: string;
-  processing?: string;
-  model?: string;
-  mode?: BrowserToolRun['mode'];
-  screenshots?: BrowserScreenshotArtifact[];
-  llmTrace?: BrowserLLMTrace;
-  extractionOutput?: Record<string, unknown>;
-  startedAt: string;
-  finishedAt?: string;
-  textOffset?: number;
+interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  available: boolean;
 }
 
 interface SendMessageStreamRequest {
   conversationId: string;
   assistantMessageId: string;
   model: string;
+  provider: string;
   messages: { role: 'user' | 'assistant'; content: string }[];
 }
 
@@ -181,16 +155,15 @@ function toStreamMessage(message: Pick<Message, 'sender' | 'text'>): SendMessage
 declare global {
   interface Window {
     assistant: {
-      getModels: () => Promise<string[]>;
-      sendMessage: (model: string, messages: { role: string; content: string }[]) => Promise<string>;
+      getModels: () => Promise<ModelInfo[]>;
+      getModelsForProvider: (providerId: string) => Promise<ModelInfo[]>;
+      getProviders: () => Promise<ProviderInfo[]>;
       sendMessageStream: (request: SendMessageStreamRequest) => Promise<{ success: boolean; aborted?: boolean }>;
       stopStream: () => Promise<{ success: boolean }>;
       getVoiceShortcut: () => Promise<string>;
       onChunk: (callback: (chunk: string) => void) => () => void;
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
-      onBrowserToolEvent: (callback: (payload: BrowserToolEventPayload) => void) => () => void;
-      getBrowserArtifactDataUrl: (filePath: string) => Promise<string | null>;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
@@ -206,6 +179,8 @@ declare global {
       storeDeleteFolder: (id: string) => Promise<{ success: boolean }>;
       storeLoadModel: () => Promise<string>;
       storeSaveModel: (model: string) => Promise<{ success: boolean }>;
+      storeLoadProvider: () => Promise<string>;
+      storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
       setThemeBackground: (isDark: boolean) => void;
     };
   }
@@ -218,8 +193,10 @@ const App: React.FC = () => {
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState<string>('ollama');
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [voiceTranscript, setVoiceTranscript] = useState<PendingVoiceTranscript | null>(null);
@@ -233,34 +210,96 @@ const App: React.FC = () => {
   const pendingJarvisMessageRef = useRef<string | null>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
+  const selectedProviderRef = useRef(selectedProvider);
 
   useEffect(() => {
-    const loadModels = async () => {
+    selectedProviderRef.current = selectedProvider;
+  }, [selectedProvider]);
+
+  const fetchModelsForProvider = useCallback(async (providerId: string) => {
+    setIsLoadingModels(true);
+    try {
+      const fetchedModels = await window.assistant.getModelsForProvider(providerId);
+      setModels(fetchedModels);
+      const currentStillValid = fetchedModels.some(m => m.id === selectedModel);
+      if (!currentStillValid && fetchedModels.length > 0) {
+        setSelectedModel(fetchedModels[0].id);
+      } else if (fetchedModels.length === 0) {
+        setSelectedModel(null);
+      }
+    } catch (error) {
+      console.error('Failed to fetch models for provider:', error);
+      setModels([]);
+    } finally {
+      setIsLoadingModels(false);
+    }
+  }, [selectedModel]);
+
+  const refreshModels = useCallback(async () => {
+    setIsLoadingModels(true);
+    try {
+      const fetchedProviders = await window.assistant.getProviders();
+      setProviders(fetchedProviders);
+      const providerId = selectedProviderRef.current;
+      const fetchedModels = await window.assistant.getModelsForProvider(providerId);
+      setModels(fetchedModels);
+      const currentStillValid = fetchedModels.some(m => m.id === selectedModel);
+      if (!currentStillValid && fetchedModels.length > 0) {
+        setSelectedModel(fetchedModels[0].id);
+      } else if (fetchedModels.length === 0) {
+        setSelectedModel(null);
+      }
+    } catch (error) {
+      console.error('Failed to refresh models:', error);
+      setModels([]);
+    } finally {
+      setIsLoadingModels(false);
+    }
+  }, [selectedModel]);
+
+  useEffect(() => {
+    const loadProvidersAndModels = async () => {
       setIsLoadingModels(true);
       try {
-        const fetchedModels = await window.assistant.getModels();
-        setModels(fetchedModels);
-        if (fetchedModels.length > 0) {
-          setSelectedModel(prev => prev ?? fetchedModels[0]);
+        const fetchedProviders = await window.assistant.getProviders();
+        setProviders(fetchedProviders);
+
+        const providerId = selectedProviderRef.current;
+        if (fetchedProviders.length > 0 && !fetchedProviders.find(p => p.id === providerId)) {
+          const firstProvider = fetchedProviders[0].id;
+          setSelectedProvider(firstProvider);
+          selectedProviderRef.current = firstProvider;
+          const fetchedModels = await window.assistant.getModelsForProvider(firstProvider);
+          setModels(fetchedModels);
+          if (fetchedModels.length > 0) {
+            setSelectedModel(prev => prev ?? fetchedModels[0].id);
+          }
+        } else {
+          const fetchedModels = await window.assistant.getModelsForProvider(providerId);
+          setModels(fetchedModels);
+          if (fetchedModels.length > 0) {
+            setSelectedModel(prev => prev ?? fetchedModels[0].id);
+          }
         }
       } catch (error) {
-        console.error('Failed to load models:', error);
+        console.error('Failed to load providers/models:', error);
         setModels([]);
       } finally {
         setIsLoadingModels(false);
       }
     };
-    loadModels();
+    loadProvidersAndModels();
   }, []);
 
   useEffect(() => {
     let isMounted = true;
 
     const loadStoredData = async () => {
-      const [conversationsResult, foldersResult, modelResult] = await Promise.allSettled([
+      const [conversationsResult, foldersResult, modelResult, providerResult] = await Promise.allSettled([
         window.assistant.storeLoadConversations(),
         window.assistant.storeLoadFolders(),
         window.assistant.storeLoadModel(),
+        window.assistant.storeLoadProvider(),
       ]);
 
       if (!isMounted) {
@@ -294,6 +333,22 @@ const App: React.FC = () => {
         }
       } else {
         console.error('Failed to load stored model:', modelResult.reason);
+      }
+
+      if (providerResult.status === 'fulfilled') {
+        if (providerResult.value) {
+          const storedProvider = providerResult.value;
+          const validProviders = await window.assistant.getProviders();
+          if (validProviders.some(p => p.id === storedProvider)) {
+            setSelectedProvider(storedProvider);
+            selectedProviderRef.current = storedProvider;
+          } else if (validProviders.length > 0) {
+            setSelectedProvider(validProviders[0].id);
+            selectedProviderRef.current = validProviders[0].id;
+          }
+        }
+      } else {
+        console.error('Failed to load stored provider:', providerResult.reason);
       }
 
       setHasHydratedStore(true);
@@ -353,6 +408,23 @@ const App: React.FC = () => {
       });
     }
   }, [selectedModel, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) return;
+
+    if (selectedProvider) {
+      window.assistant.storeSaveProvider(selectedProvider).catch(err => {
+        console.error('Failed to save selected provider:', err);
+      });
+    }
+  }, [selectedProvider, hasHydratedStore]);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!hasHydratedStore) return;
+
+    fetchModelsForProvider(selectedProvider);
+  }, [selectedProvider, hasHydratedStore]);
 
   useEffect(() => {
     const loadVoiceShortcut = async () => {
@@ -424,99 +496,6 @@ const App: React.FC = () => {
       }
     };
 
-    const handleBrowserToolEvent = (payload: BrowserToolEventPayload) => {
-      const toolRunPatch: Partial<BrowserToolRun> & Pick<BrowserToolRun, 'id' | 'status' | 'instruction' | 'startedAt'> = {
-        id: payload.runId,
-        status: payload.status,
-        instruction: payload.instruction,
-        startedAt: payload.startedAt,
-      };
-
-      if (payload.startUrl !== undefined) {
-        toolRunPatch.startUrl = payload.startUrl;
-      }
-      if (payload.summary !== undefined) {
-        toolRunPatch.summary = payload.summary;
-      }
-      if (payload.currentUrl !== undefined) {
-        toolRunPatch.currentUrl = payload.currentUrl;
-      }
-      if (payload.pageTitle !== undefined) {
-        toolRunPatch.pageTitle = payload.pageTitle;
-      }
-      if (payload.actionsTaken !== undefined) {
-        toolRunPatch.actionsTaken = payload.actionsTaken;
-      }
-      if (payload.error !== undefined) {
-        toolRunPatch.error = payload.error;
-      }
-      if (payload.processing !== undefined) {
-        toolRunPatch.processing = payload.processing;
-      }
-      if (payload.model !== undefined) {
-        toolRunPatch.model = payload.model;
-      }
-      if (payload.mode !== undefined) {
-        toolRunPatch.mode = payload.mode;
-      }
-      if (payload.screenshots !== undefined) {
-        toolRunPatch.screenshots = payload.screenshots;
-      }
-      if (payload.llmTrace !== undefined) {
-        toolRunPatch.llmTrace = payload.llmTrace;
-      }
-      if (payload.extractionOutput !== undefined) {
-        toolRunPatch.extractionOutput = payload.extractionOutput;
-      }
-      if (payload.finishedAt !== undefined) {
-        toolRunPatch.finishedAt = payload.finishedAt;
-      }
-      if (payload.textOffset !== undefined) {
-        toolRunPatch.textOffset = payload.textOffset;
-      }
-
-      setConversations(prev => {
-        const matchingConversation = prev.find(c =>
-          c.messages.some(m => m.id === payload.assistantMessageId)
-        );
-        const matchingMessage = matchingConversation?.messages.find(m => m.id === payload.assistantMessageId);
-
-        const isNewToolRun = matchingMessage
-          ? !(matchingMessage.toolRuns ?? []).some(run => run.id === payload.runId)
-          : false;
-
-        if (isNewToolRun && matchingMessage) {
-          toolRunPatch.textOffset ??= matchingMessage.text.length;
-        }
-
-        return prev.map(c => ({
-          ...c,
-          messages: c.messages.map(m => {
-            if (m.id !== payload.assistantMessageId) {
-              return m;
-            }
-
-            const existingToolRuns = m.toolRuns ?? [];
-            const existingToolRunIndex = existingToolRuns.findIndex(run => run.id === payload.runId);
-
-            if (existingToolRunIndex === -1) {
-              return {
-                ...m,
-                toolRuns: [...existingToolRuns, toolRunPatch as BrowserToolRun],
-              };
-            }
-
-            return {
-              ...m,
-              toolRuns: existingToolRuns.map(run =>
-                run.id === payload.runId ? mergeDefinedFields(run as unknown as Record<string, unknown>, toolRunPatch as unknown as Record<string, unknown>) as unknown as BrowserToolRun : run
-              ),
-            };
-          }),
-        }));
-      });
-    };
-
     const finishStreaming = () => {
       setConversations(prev =>
         prev.map(c => ({
@@ -544,7 +523,7 @@ const App: React.FC = () => {
               m.id === streamingMessageIdRef.current
                 ? {
                     ...m,
-                    text: `Error: ${error}. Make sure Ollama is running.`,
+                    text: `Error: ${error}. Make sure your selected provider is running and configured.`,
                     isStreaming: false,
                   }
                 : m
@@ -559,9 +538,8 @@ const App: React.FC = () => {
     const chunkCleanup = window.assistant.onChunk(handleChunk);
     const doneCleanup = window.assistant.onDone(handleDone);
     const errorCleanup = window.assistant.onError(handleError);
-    const browserToolCleanup = window.assistant.onBrowserToolEvent(handleBrowserToolEvent);
 
-    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, browserToolCleanup];
+    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup];
 
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
@@ -728,6 +706,12 @@ const App: React.FC = () => {
     setSelectedModel(model);
   }, []);
 
+  const handleProviderSelect = useCallback((providerId: string) => {
+    setSelectedProvider(providerId);
+    selectedProviderRef.current = providerId;
+    setSelectedModel(null);
+  }, []);
+
   const handleStopStreaming = useCallback(async () => {
     await window.assistant.stopStream();
     
@@ -785,11 +769,6 @@ const App: React.FC = () => {
     const messageIndex = conversation.messages.findIndex(m => m.id === messageId);
     if (messageIndex === -1) return;
 
-    const updatedMessages = conversation.messages.slice(0, messageIndex).map(m => ({
-      ...m,
-      text: m.id === messageId ? newText : m.text
-    }));
-
     const editedMessage: Message = {
       id: messageId,
       text: newText,
@@ -835,7 +814,8 @@ const App: React.FC = () => {
       await window.assistant.sendMessageStream({
         conversationId: conversation.id,
         assistantMessageId,
-        model: selectedModel,
+        model: selectedModel!,
+        provider: selectedProvider,
         messages: conversationMessages,
       });
     } catch (error) {
@@ -849,7 +829,7 @@ const App: React.FC = () => {
                   m.id === assistantMessageId
                     ? {
                         ...m,
-                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure Ollama is running.`,
+                        text: `Error: ${error}. Make sure your selected provider is running and configured.`,
                         isStreaming: false,
                       }
                     : m
@@ -861,7 +841,7 @@ const App: React.FC = () => {
       setIsLoading(false);
       streamingMessageIdRef.current = null;
     }
-  }, [currentConversationId, selectedModel, conversations]);
+  }, [currentConversationId, selectedModel, selectedProvider, conversations]);
 
   const handleRegenerateResponse = useCallback(async (messageId: string) => {
     if (!selectedModel) {
@@ -918,7 +898,8 @@ const App: React.FC = () => {
       await window.assistant.sendMessageStream({
         conversationId: conversation.id,
         assistantMessageId,
-        model: selectedModel,
+        model: selectedModel!,
+        provider: selectedProvider,
         messages: conversationMessages,
       });
     } catch (error) {
@@ -932,7 +913,7 @@ const App: React.FC = () => {
                   m.id === assistantMessageId
                     ? {
                         ...m,
-                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure Ollama is running.`,
+                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure your selected provider is running and configured.`,
                         isStreaming: false,
                       }
                     : m
@@ -944,7 +925,7 @@ const App: React.FC = () => {
       setIsLoading(false);
       streamingMessageIdRef.current = null;
     }
-  }, [currentConversationId, selectedModel, conversations]);
+  }, [currentConversationId, selectedModel, selectedProvider, conversations]);
 
   const handleSendMessage = useCallback(async (text: string) => {
     if (!selectedModel) {
@@ -1014,9 +995,10 @@ const App: React.FC = () => {
       ];
 
       await window.assistant.sendMessageStream({
-        conversationId,
+        conversationId: conversationId!,
         assistantMessageId,
-        model: selectedModel,
+        model: selectedModel!,
+        provider: selectedProvider,
         messages: conversationMessages,
       });
     } catch (error) {
@@ -1030,7 +1012,7 @@ const App: React.FC = () => {
                   m.id === assistantMessageId
                     ? {
                         ...m,
-                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure Ollama is running.`,
+                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure your selected provider is running and configured.`,
                         isStreaming: false,
                       }
                     : m
@@ -1042,7 +1024,7 @@ const App: React.FC = () => {
       setIsLoading(false);
       streamingMessageIdRef.current = null;
     }
-  }, [currentConversationId, selectedModel, messages]);
+  }, [currentConversationId, selectedModel, selectedProvider, messages]);
 
   useEffect(() => {
     if (currentConversationId === null && pendingJarvisMessageRef.current) {
@@ -1108,6 +1090,10 @@ const App: React.FC = () => {
               selectedModel={selectedModel}
               onModelSelect={handleModelSelect}
               isLoadingModels={isLoadingModels}
+              providers={providers}
+              selectedProvider={selectedProvider}
+              onProviderSelect={handleProviderSelect}
+              onRefreshModels={refreshModels}
             />
             
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">

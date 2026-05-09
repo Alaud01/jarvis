@@ -66,9 +66,9 @@ const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props 
     }
   }, [code, language, inline]);
 
-  if (inline) {
+  if (inline || !className) {
     return (
-      <code className="bg-bg-code px-1 py-0.5 rounded text-sm font-mono" {...props}>
+      <code className="bg-bg-code px-1.5 py-0.5 rounded text-[0.875em] font-mono inline" {...props}>
         {children}
       </code>
     );
