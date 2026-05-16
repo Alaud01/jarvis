@@ -60,6 +60,16 @@
       {
         "from": "build/FnKeyMonitor",
         "to": "native/FnKeyMonitor"
+      },
+      {
+        "from": "browser-service",
+        "to": "browser-service",
+        "filter": [
+          "**/*",
+          "!venv/**",
+          "!__pycache__/**",
+          "!*.pyc"
+        ]
       }
     ]
   }

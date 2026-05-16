@@ -1,6 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import Sidebar from './components/Sidebar';
-import ChatHeader from './components/ChatHeader';
 import MessageList, { MessageListHandle } from './components/MessageList';
 import InputArea from './components/InputArea';
 import TopNavbar from './components/TopNavbar';
@@ -8,6 +7,7 @@ import CopyNotification from './components/CopyNotification';
 import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
+import type { BrowserLLMTraceStep, BrowserToolRun, BrowserTraceEvent } from '../shared/browser';
 
 interface Message {
   id: string;
@@ -15,6 +15,7 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
+  browserRuns?: BrowserToolRun[];
 }
 
 interface Conversation {
@@ -36,6 +37,7 @@ interface SerializedMessage {
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
+  browserRuns?: BrowserToolRun[];
 }
 
 interface SerializedConversation {
@@ -62,6 +64,7 @@ function serializeConversation(c: Conversation): SerializedConversation {
       text: m.text,
       sender: m.sender,
       timestamp: m.timestamp.toISOString(),
+      browserRuns: m.browserRuns,
     })),
     folderId: c.folderId,
   };
@@ -77,6 +80,7 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       text: m.text,
       sender: m.sender,
       timestamp: new Date(m.timestamp),
+      browserRuns: m.browserRuns,
     })),
     folderId: c.folderId ?? null,
   };
@@ -152,6 +156,96 @@ function toStreamMessage(message: Pick<Message, 'sender' | 'text'>): SendMessage
   };
 }
 
+function mergeTraceStep(
+  steps: BrowserLLMTraceStep[],
+  incomingStep: BrowserLLMTraceStep
+): BrowserLLMTraceStep[] {
+  const existingIndex = steps.findIndex(step => step.stepIndex === incomingStep.stepIndex);
+  if (existingIndex === -1) {
+    return [...steps, incomingStep].sort((a, b) => a.stepIndex - b.stepIndex);
+  }
+
+  return steps.map((step, index) => (
+    index === existingIndex
+      ? {
+          ...step,
+          ...incomingStep,
+          actions: incomingStep.actions ?? step.actions,
+          results: incomingStep.results ?? step.results,
+        }
+      : step
+  ));
+}
+
+function applyBrowserTraceEventToRuns(
+  runs: BrowserToolRun[] | undefined,
+  event: BrowserTraceEvent,
+  textOffset: number
+): BrowserToolRun[] {
+  const existingRuns = runs ?? [];
+  const startedAt = event.event === 'started' ? event.timestamp : new Date().toISOString();
+  const existingRun = existingRuns.find(run => run.id === event.runId);
+  const run: BrowserToolRun = existingRun ?? {
+    id: event.runId,
+    status: event.status,
+    instruction: event.instruction ?? 'Browser task',
+    model: event.model,
+    mode: 'dom',
+    textOffset,
+    startedAt,
+    llmTrace: {
+      model: event.model ?? 'unknown',
+      provider: event.provider,
+      plannerModel: event.plannerModel,
+      useVision: event.useVision,
+      llmScreenshotSize: event.llmScreenshotSize,
+      instruction: event.instruction ?? 'Browser task',
+      startedAt,
+      steps: [],
+    },
+  };
+
+  const currentSteps = run.llmTrace?.steps ?? [];
+  const nextSteps = event.step ? mergeTraceStep(currentSteps, event.step) : currentSteps;
+  const lastStep = event.step ?? nextSteps[nextSteps.length - 1];
+  const isFinished = event.status !== 'running';
+
+  const nextRun: BrowserToolRun = {
+    ...run,
+    status: event.status,
+    instruction: event.instruction ?? run.instruction,
+    summary: event.summary ?? run.summary,
+    error: event.error ?? run.error,
+    model: event.model ?? run.model,
+    currentUrl: lastStep?.url ?? run.currentUrl,
+    pageTitle: lastStep?.pageTitle ?? run.pageTitle,
+    actionsTaken: event.steps ?? nextSteps.length,
+    textOffset: run.textOffset ?? textOffset,
+    startedAt: run.startedAt,
+    finishedAt: isFinished ? event.timestamp : run.finishedAt,
+    llmTrace: {
+      model: event.model ?? run.llmTrace?.model ?? 'unknown',
+      mode: run.llmTrace?.mode,
+      provider: event.provider ?? run.llmTrace?.provider,
+      plannerModel: event.plannerModel ?? run.llmTrace?.plannerModel,
+      useVision: event.useVision ?? run.llmTrace?.useVision,
+      llmScreenshotSize: event.llmScreenshotSize ?? run.llmTrace?.llmScreenshotSize,
+      systemPrompt: run.llmTrace?.systemPrompt,
+      instruction: event.instruction ?? run.llmTrace?.instruction ?? run.instruction,
+      startedAt: run.llmTrace?.startedAt ?? run.startedAt,
+      finishedAt: isFinished ? event.timestamp : run.llmTrace?.finishedAt,
+      steps: nextSteps,
+      error: event.error ?? run.llmTrace?.error,
+    },
+  };
+
+  const updatedRuns = existingRuns.some(existing => existing.id === event.runId)
+    ? existingRuns.map(existing => existing.id === event.runId ? nextRun : existing)
+    : [...existingRuns, nextRun];
+
+  return updatedRuns;
+}
+
 declare global {
   interface Window {
     assistant: {
@@ -164,6 +258,7 @@ declare global {
       onChunk: (callback: (chunk: string) => void) => () => void;
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
+      onBrowserTraceEvent: (callback: (event: BrowserTraceEvent) => void) => () => void;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
@@ -181,6 +276,11 @@ declare global {
       storeSaveModel: (model: string) => Promise<{ success: boolean }>;
       storeLoadProvider: () => Promise<string>;
       storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
+      storeLoadOpenTabIds: () => Promise<string[]>;
+      storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
+      storeLoadCurrentConversationId: () => Promise<string | null>;
+      storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
+      generateTitle: (message: string, model: string, provider: string) => Promise<string>;
       setThemeBackground: (isDark: boolean) => void;
     };
   }
@@ -295,11 +395,13 @@ const App: React.FC = () => {
     let isMounted = true;
 
     const loadStoredData = async () => {
-      const [conversationsResult, foldersResult, modelResult, providerResult] = await Promise.allSettled([
+      const [conversationsResult, foldersResult, modelResult, providerResult, tabIdsResult, currentConvResult] = await Promise.allSettled([
         window.assistant.storeLoadConversations(),
         window.assistant.storeLoadFolders(),
         window.assistant.storeLoadModel(),
         window.assistant.storeLoadProvider(),
+        window.assistant.storeLoadOpenTabIds(),
+        window.assistant.storeLoadCurrentConversationId(),
       ]);
 
       if (!isMounted) {
@@ -308,11 +410,16 @@ const App: React.FC = () => {
 
       if (conversationsResult.status === 'fulfilled') {
         const storedConversations = conversationsResult.value;
-        setConversations(storedConversations.map(deserializeConversation));
+        const deserialized = storedConversations.map(deserializeConversation);
+        setConversations(deserialized);
         if (storedConversations.length > 0) {
-          const lastId = storedConversations[storedConversations.length - 1].id;
-          setCurrentConversationId(lastId);
-          setOpenTabIds([lastId]);
+          const validIds = new Set(deserialized.map(c => c.id));
+          const storedTabIds = tabIdsResult.status === 'fulfilled' ? tabIdsResult.value : [];
+          const storedCurrentId = currentConvResult.status === 'fulfilled' ? currentConvResult.value : null;
+          const filteredTabs = storedTabIds.filter((id: string) => validIds.has(id));
+          const resolvedCurrentId = (storedCurrentId && validIds.has(storedCurrentId)) ? storedCurrentId : (filteredTabs.length > 0 ? filteredTabs[filteredTabs.length - 1] : deserialized[deserialized.length - 1].id);
+          setCurrentConversationId(resolvedCurrentId);
+          setOpenTabIds(filteredTabs.length > 0 ? filteredTabs : [resolvedCurrentId]);
         } else {
           setCurrentConversationId(null);
           setOpenTabIds([]);
@@ -418,6 +525,22 @@ const App: React.FC = () => {
       });
     }
   }, [selectedProvider, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) return;
+
+    window.assistant.storeSaveOpenTabIds(openTabIds).catch(err => {
+      console.error('Failed to save open tab IDs:', err);
+    });
+  }, [openTabIds, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) return;
+
+    window.assistant.storeSaveCurrentConversationId(currentConversationId).catch(err => {
+      console.error('Failed to save current conversation ID:', err);
+    });
+  }, [currentConversationId, hasHydratedStore]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
@@ -535,11 +658,32 @@ const App: React.FC = () => {
       }
     };
 
+    const handleBrowserTraceEvent = (event: BrowserTraceEvent) => {
+      if (!event.assistantMessageId) {
+        return;
+      }
+
+      setConversations(prev =>
+        prev.map(c => ({
+          ...c,
+          messages: c.messages.map(m =>
+            m.id === event.assistantMessageId
+              ? {
+                  ...m,
+                  browserRuns: applyBrowserTraceEventToRuns(m.browserRuns, event, m.text.length),
+                }
+              : m
+          ),
+        }))
+      );
+    };
+
     const chunkCleanup = window.assistant.onChunk(handleChunk);
     const doneCleanup = window.assistant.onDone(handleDone);
     const errorCleanup = window.assistant.onError(handleError);
+    const browserTraceCleanup = window.assistant.onBrowserTraceEvent(handleBrowserTraceEvent);
 
-    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup];
+    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, browserTraceCleanup];
 
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
@@ -560,7 +704,7 @@ const App: React.FC = () => {
     return () => clearInterval(intervalId);
   }, [messages]);
 
-  const generateTitle = (text: string): string => {
+  const generateTitleFallback = (text: string): string => {
     const words = text.split(' ').slice(0, 5);
     return words.join(' ') + (words.length < text.split(' ').length ? '...' : '');
   };
@@ -937,10 +1081,9 @@ const App: React.FC = () => {
     
     if (!conversationId) {
       conversationId = Date.now().toString();
-      const newTitle = generateTitle(text);
       const newConversation: Conversation = {
         id: conversationId,
-        title: newTitle,
+        title: generateTitleFallback(text),
         timestamp: new Date(),
         messages: [],
         folderId: null,
@@ -950,6 +1093,18 @@ const App: React.FC = () => {
       
       const cid = conversationId;
       setOpenTabIds(prev => [...prev, cid]);
+
+      window.assistant.generateTitle(text, selectedModel, selectedProvider)
+        .then((title) => {
+          setConversations(prev =>
+            prev.map(c =>
+              c.id === cid
+                ? { ...c, title }
+                : c
+            )
+          );
+        })
+        .catch(() => {});
     }
 
     const userMessage: Message = {
@@ -1059,6 +1214,7 @@ const App: React.FC = () => {
           activeTabId={currentConversationId}
           onTabSelect={handleConversationSelect}
           onTabClose={handleTabClose}
+          onMenuClick={() => setSidebarOpen(!sidebarOpen)}
         />
         
         <div className="flex flex-1 min-h-0 bg-bg-primary">
@@ -1082,20 +1238,7 @@ const App: React.FC = () => {
             onMoveConversation={handleMoveConversation}
           />
           
-          <main className="flex flex-col flex-1 min-w-0 bg-bg-primary">
-            <ChatHeader
-              onMenuClick={() => setSidebarOpen(!sidebarOpen)}
-              title={currentConversation?.title || 'New Entry'}
-              models={models}
-              selectedModel={selectedModel}
-              onModelSelect={handleModelSelect}
-              isLoadingModels={isLoadingModels}
-              providers={providers}
-              selectedProvider={selectedProvider}
-              onProviderSelect={handleProviderSelect}
-              onRefreshModels={refreshModels}
-            />
-            
+          <main className="relative flex flex-col flex-1 min-w-0 bg-bg-primary">
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageList 
                 ref={messageListRef} 
@@ -1120,6 +1263,14 @@ const App: React.FC = () => {
               voiceTranscript={voiceTranscript}
               onVoiceTextUsed={handleVoiceTextUsed}
               voiceShortcut={voiceShortcut}
+              models={models}
+              selectedModel={selectedModel}
+              onModelSelect={handleModelSelect}
+              isLoadingModels={isLoadingModels}
+              providers={providers}
+              selectedProvider={selectedProvider}
+              onProviderSelect={handleProviderSelect}
+              onRefreshModels={refreshModels}
               composeFocusKey={newChatTrigger}
             />
           </main>

@@ -1,7 +1,9 @@
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHandle, forwardRef, useState } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
+import BrowserTraceSection from './BrowserTraceSection';
 import TypingIndicator from './TypingIndicator';
+import type { BrowserToolRun } from '../../shared/browser';
 
 interface Message {
   id: string;
@@ -9,6 +11,7 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
+  browserRuns?: BrowserToolRun[];
 }
 
 interface MessageListProps {
@@ -36,6 +39,124 @@ export interface MessageSegment {
   isThinkingInProgress?: boolean;
   startOffset: number;
 }
+
+type MessageRenderItem =
+  | (MessageSegment & { renderType: 'segment'; key: string })
+  | { renderType: 'browserRun'; key: string; run: BrowserToolRun; startOffset: number };
+
+const getSegmentEndOffset = (segment: MessageSegment) => (
+  segment.startOffset + (segment.text?.length ?? 0)
+);
+
+const createSegmentItem = (
+  segment: MessageSegment,
+  key: string,
+  text = segment.text,
+  startOffset = segment.startOffset
+): MessageRenderItem | null => {
+  if (!text?.trim()) {
+    return null;
+  }
+
+  return {
+    ...segment,
+    renderType: 'segment',
+    key,
+    text,
+    startOffset,
+  };
+};
+
+const buildMessageRenderItems = (
+  segments: MessageSegment[],
+  runs: BrowserToolRun[] = []
+): MessageRenderItem[] => {
+  const sortedRuns = [...runs].sort((a, b) => {
+    const offsetA = a.textOffset ?? Number.MAX_SAFE_INTEGER;
+    const offsetB = b.textOffset ?? Number.MAX_SAFE_INTEGER;
+    if (offsetA !== offsetB) return offsetA - offsetB;
+    return a.startedAt.localeCompare(b.startedAt);
+  });
+  const items: MessageRenderItem[] = [];
+  let runIndex = 0;
+
+  const pushRunsUntil = (offset: number) => {
+    while (
+      runIndex < sortedRuns.length
+      && (sortedRuns[runIndex].textOffset ?? Number.MAX_SAFE_INTEGER) <= offset
+    ) {
+      const run = sortedRuns[runIndex];
+      items.push({
+        renderType: 'browserRun',
+        key: `browser-${run.id}`,
+        run,
+        startOffset: run.textOffset ?? Number.MAX_SAFE_INTEGER,
+      });
+      runIndex += 1;
+    }
+  };
+
+  segments.forEach((segment, segmentIndex) => {
+    const text = segment.text ?? '';
+    const segmentStart = segment.startOffset;
+    const segmentEnd = getSegmentEndOffset(segment);
+    let cursor = segmentStart;
+
+    pushRunsUntil(segmentStart);
+
+    while (
+      runIndex < sortedRuns.length
+      && (sortedRuns[runIndex].textOffset ?? Number.MAX_SAFE_INTEGER) > cursor
+      && (sortedRuns[runIndex].textOffset ?? Number.MAX_SAFE_INTEGER) < segmentEnd
+    ) {
+      const run = sortedRuns[runIndex];
+      const runOffset = run.textOffset ?? segmentEnd;
+      const beforeText = text.slice(cursor - segmentStart, runOffset - segmentStart);
+      const beforeItem = createSegmentItem(
+        segment,
+        `segment-${segmentIndex}-${cursor}`,
+        beforeText,
+        cursor
+      );
+      if (beforeItem) {
+        items.push(beforeItem);
+      }
+
+      items.push({
+        renderType: 'browserRun',
+        key: `browser-${run.id}`,
+        run,
+        startOffset: runOffset,
+      });
+      runIndex += 1;
+      cursor = runOffset;
+    }
+
+    const remainingText = text.slice(cursor - segmentStart);
+    const remainingItem = createSegmentItem(
+      segment,
+      `segment-${segmentIndex}-${cursor}`,
+      remainingText,
+      cursor
+    );
+    if (remainingItem) {
+      items.push(remainingItem);
+    }
+  });
+
+  while (runIndex < sortedRuns.length) {
+    const run = sortedRuns[runIndex];
+    items.push({
+      renderType: 'browserRun',
+      key: `browser-${run.id}`,
+      run,
+      startOffset: run.textOffset ?? Number.MAX_SAFE_INTEGER,
+    });
+    runIndex += 1;
+  }
+
+  return items;
+};
 
 const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegment[] => {
   const rawSegments: MessageSegment[] = [];
@@ -201,16 +322,30 @@ interface MessageActionButtonProps {
 const MessageActionButton: React.FC<MessageActionButtonProps> = ({ onClick, label, icon, variant = 'default' }) => (
   <button
     onClick={onClick}
-    className={`flex items-center gap-1.5 px-2 py-1 font-mono text-[0.65rem] uppercase tracking-wider transition-all duration-150 ${
+    title={label}
+    className={`flex items-center justify-center p-1.5 transition-all duration-150 ${
       variant === 'primary'
         ? 'border border-text-primary bg-text-primary text-bg-primary hover:bg-transparent hover:text-text-primary'
         : 'border border-border-secondary text-text-secondary hover:border-text-primary hover:text-text-primary'
     }`}
   >
     {icon}
-    {label}
   </button>
 );
+
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
+const STREAMING_STICKY_BOTTOM_THRESHOLD = 50;
+
+const isNearBottom = (
+  container: HTMLElement,
+  threshold = AUTO_SCROLL_BOTTOM_THRESHOLD
+) => (
+  container.scrollHeight - container.scrollTop - container.clientHeight < threshold
+);
+
+interface ScrollSnapshot {
+  shouldMaintain: boolean;
+}
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(({ 
   messages, 
@@ -224,37 +359,42 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 }, ref) => {
   const messageRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const autoScrollEnabledRef = useRef(true);
-  const isStreamingRef = useRef(false);
-  const programmaticScrollRef = useRef(false);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
-  const programmaticScrollClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastScrollTopRef = useRef(0);
 
-  const userInteractingRef = useRef(false);
-  const userInteractingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setAutoScrollEnabled = useCallback((enabled: boolean) => {
+    autoScrollEnabledRef.current = enabled;
+  }, []);
 
-  const markUserInteracting = () => {
-    userInteractingRef.current = true;
-    if (userInteractingTimerRef.current) clearTimeout(userInteractingTimerRef.current);
-    userInteractingTimerRef.current = setTimeout(() => {
-      userInteractingRef.current = false;
-    }, 150);
-  };
+  const cancelAutoScroll = useCallback(() => {
+    setAutoScrollEnabled(false);
+  }, [setAutoScrollEnabled]);
 
-  const clearProgrammaticScrollTimer = () => {
-    if (programmaticScrollClearTimerRef.current !== null) {
-      clearTimeout(programmaticScrollClearTimerRef.current);
-      programmaticScrollClearTimerRef.current = null;
+  const reactivateAutoScroll = useCallback(() => {
+    setAutoScrollEnabled(true);
+  }, [setAutoScrollEnabled]);
+
+  const reactivateAutoScrollIfAtBottom = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (container && isNearBottom(container)) {
+      reactivateAutoScroll();
     }
-  };
+  }, [reactivateAutoScroll, scrollContainerRef]);
 
-  const endProgrammaticScrollAfterSmooth = () => {
-    clearProgrammaticScrollTimer();
-    programmaticScrollClearTimerRef.current = setTimeout(() => {
-      programmaticScrollRef.current = false;
-      programmaticScrollClearTimerRef.current = null;
-    }, 450);
-  };
+  const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior });
+    setAutoScrollEnabled(true);
+  }, [scrollContainerRef, setAutoScrollEnabled]);
+
+  const maintainScrollAtEnd = useCallback((snapshot: ScrollSnapshot) => {
+    if (!snapshot.shouldMaintain) {
+      setAutoScrollEnabled(false);
+      return;
+    }
+
+    scrollToBottomNow();
+  }, [scrollToBottomNow, setAutoScrollEnabled]);
 
   const scrollElementIntoView = useCallback((element: Element, offset: number = 16) => {
     const container = scrollContainerRef.current;
@@ -263,24 +403,17 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     const containerRect = container.getBoundingClientRect();
     const elementRect = element.getBoundingClientRect();
     const targetScrollTop = container.scrollTop + elementRect.top - containerRect.top - offset;
+    const maxScrollTop = container.scrollHeight - container.clientHeight;
+    const targetIsNearBottom = maxScrollTop - targetScrollTop < AUTO_SCROLL_BOTTOM_THRESHOLD;
 
-    programmaticScrollRef.current = true;
+    if (!targetIsNearBottom) {
+      cancelAutoScroll();
+    } else {
+      reactivateAutoScroll();
+    }
+
     container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
-    lastScrollTopRef.current = container.scrollTop;
-    endProgrammaticScrollAfterSmooth();
-  }, []);
-
-  const flushScrollToBottom = useCallback(() => {
-    if (!autoScrollEnabledRef.current) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    programmaticScrollRef.current = true;
-    container.scrollTop = container.scrollHeight;
-    lastScrollTopRef.current = container.scrollTop;
-    requestAnimationFrame(() => {
-      programmaticScrollRef.current = false;
-    });
-  }, []);
+  }, [cancelAutoScroll, reactivateAutoScroll, scrollContainerRef]);
 
   useImperativeHandle(ref, () => ({
     scrollToMessage: (messageId: string) => {
@@ -301,111 +434,45 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     },
     scrollToBottom: () => {
       autoScrollEnabledRef.current = true;
-      const container = scrollContainerRef.current;
-      if (container) {
-        programmaticScrollRef.current = true;
-        container.scrollTo({
-          top: container.scrollHeight,
-          behavior: 'smooth'
-        });
-        lastScrollTopRef.current = container.scrollTop;
-        endProgrammaticScrollAfterSmooth();
-      }
+      scrollToBottomNow('smooth');
     },
     isAutoScrollEnabled: () => autoScrollEnabledRef.current,
     enableAutoScroll: () => {
-      autoScrollEnabledRef.current = true;
+      reactivateAutoScroll();
     }
   }));
 
-  useEffect(() => {
-    isStreamingRef.current = messages.some(m => m.isStreaming);
-  }, [messages]);
-
   const streamingActive = messages.some(m => m.isStreaming);
+  const scrollSnapshot: ScrollSnapshot = (() => {
+    if (!streamingActive || !autoScrollEnabledRef.current) {
+      return { shouldMaintain: false };
+    }
+    const container = scrollContainerRef.current;
+    return {
+      shouldMaintain: container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true,
+    };
+  })();
 
   useLayoutEffect(() => {
     if (!streamingActive) return;
-    flushScrollToBottom();
-  }, [messages, streamingActive, flushScrollToBottom]);
-
-  useEffect(() => {
-    if (!streamingActive) return;
-    const el = messagesColumnRef.current;
-    if (!el) return;
-
-    const ro = new ResizeObserver(() => {
-      flushScrollToBottom();
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [streamingActive, flushScrollToBottom]);
+    maintainScrollAtEnd(scrollSnapshot);
+  }, [messages, streamingActive, scrollSnapshot, maintainScrollAtEnd]);
 
   useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    lastScrollTopRef.current = container.scrollTop;
-
-    const handleWheel = (e: WheelEvent) => {
-      markUserInteracting();
-      if (!isStreamingRef.current) return;
-      if (e.deltaY < 0) {
-        autoScrollEnabledRef.current = false;
-      }
-    };
-
-    let touchStartY = 0;
-    const handleTouchStart = (e: TouchEvent) => {
-      touchStartY = e.touches[0].clientY;
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      markUserInteracting();
-      if (!isStreamingRef.current) return;
-      const y = e.touches[0].clientY;
-      if (y > touchStartY + 8) {
-        autoScrollEnabledRef.current = false;
-      }
-      touchStartY = y;
-    };
+    setAutoScrollEnabled(isNearBottom(container));
 
     const handleScroll = () => {
-      if (programmaticScrollRef.current) {
-        lastScrollTopRef.current = container.scrollTop;
-        return;
-      }
-      const { scrollTop, scrollHeight, clientHeight } = container;
-      if (scrollTop < lastScrollTopRef.current - 1) {
-        autoScrollEnabledRef.current = false;
-      }
-      lastScrollTopRef.current = scrollTop;
-      if (userInteractingRef.current) {
-        const isAtBottom = scrollHeight - scrollTop - clientHeight < 50;
-        if (isAtBottom && isStreamingRef.current) {
-          autoScrollEnabledRef.current = true;
-        }
-      }
+      setAutoScrollEnabled(isNearBottom(container));
     };
 
-    container.addEventListener('wheel', handleWheel, { passive: true, capture: true });
-    container.addEventListener('touchstart', handleTouchStart, { passive: true });
-    container.addEventListener('touchmove', handleTouchMove, { passive: true });
     container.addEventListener('scroll', handleScroll, { passive: true });
     return () => {
-      container.removeEventListener('wheel', handleWheel, true);
-      container.removeEventListener('touchstart', handleTouchStart);
-      container.removeEventListener('touchmove', handleTouchMove);
       container.removeEventListener('scroll', handleScroll);
     };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      clearProgrammaticScrollTimer();
-      if (userInteractingTimerRef.current) clearTimeout(userInteractingTimerRef.current);
-    };
-  }, []);
+  }, [scrollContainerRef, setAutoScrollEnabled]);
 
   const formatTime = (date: Date): string => {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -463,6 +530,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         <div ref={messagesColumnRef} className="max-w-[836px] mx-auto pl-9">
           {messages.map((message) => {
             const segments = parseMessageSegments(message.text, message.isStreaming);
+            const renderItems = buildMessageRenderItems(segments, message.browserRuns);
             const isEditing = editingMessageId === message.id;
             
             return (
@@ -475,11 +543,11 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
                     messageRefsRef.current.delete(message.id);
                   }
                 }}
-                className="py-4 border-b border-border-primary flex flex-col gap-2 last:border-b-0"
+                className={`flex flex-col gap-2 last:border-b-0 ${message.sender === 'user' ? 'px-2 py-2 border border-border-secondary rounded bg-bg-secondary' : 'border-b border-border-primary py-4'}`}
               >
-                <div className="flex items-baseline gap-3 mb-2">
-                  <span className="font-serif text-[1.15rem] text-text-primary">
-                    {message.sender === 'user' ? 'Author' : 'Editor'}
+                <div className="flex items-baseline gap-2">
+                  <span className={`font-mono text-[0.6rem] uppercase tracking-[0.15em] text-text-primary`}>
+                    {message.sender === 'user' ? 'you' : 'jarvis'}
                   </span>
                   <span className="font-mono text-[0.65rem] text-text-tertiary">
                     {formatTime(message.timestamp)}
@@ -533,19 +601,33 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
                   </div>
                 ) : (
                   <>
-                    {segments.map((segment, index) => {
+                    {renderItems.map((item) => {
+                      if (item.renderType === 'browserRun') {
+                        return (
+                          <BrowserTraceSection
+                            key={item.key}
+                            run={item.run}
+                            onAutoScrollCancel={cancelAutoScroll}
+                            onAutoScrollReactivate={reactivateAutoScrollIfAtBottom}
+                          />
+                        );
+                      }
+
+                      const segment = item;
                       if (segment.type === 'thinking' && segment.text) {
                         return (
                           <ThinkingSection 
-                            key={`thinking-${index}`}
+                            key={item.key}
                             content={segment.text} 
                             isStreaming={segment.isThinkingInProgress} 
+                            onAutoScrollCancel={cancelAutoScroll}
+                            onAutoScrollReactivate={reactivateAutoScrollIfAtBottom}
                           />
                         );
                       }
                       if (segment.type === 'content' && segment.text) {
                         return (
-                          <div key={`content-${index}`} className="text-base text-text-primary leading-[1.8]">
+                          <div key={item.key} className="text-base text-text-primary leading-[1.8]">
                             <MarkdownRenderer content={segment.text} />
                           </div>
                         );
@@ -554,7 +636,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
                     })}
                       
                       {!message.isStreaming && !isLoading && (
-                        <div className="flex items-center justify-end gap-2 mt-2">
+                        <div className="flex items-center justify-end gap-2">
                           {message.sender === 'user' ? (
                             <>
                               <MessageActionButton

@@ -4,7 +4,7 @@ import * as path from 'path';
 import { startPythonService, stopPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
 import { setMainWindow } from './audioRecorder';
-import { loadConversations, saveConversations, deleteConversation, loadFolders, saveFolders, loadSelectedModel, saveSelectedModel, loadSelectedProvider, saveSelectedProvider } from './store';
+import { loadConversations, saveConversations, deleteConversation, loadFolders, saveFolders, loadSelectedModel, saveSelectedModel, loadSelectedProvider, saveSelectedProvider, loadOpenTabIds, saveOpenTabIds, loadCurrentConversationId, saveCurrentConversationId } from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
 import {
   startBrowserService,
@@ -12,6 +12,7 @@ import {
   runBrowserTask,
   type BrowserTaskResult,
 } from './browserService';
+import type { BrowserTraceEvent } from '../shared/browser';
 import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider } from './providers/registry';
 import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo } from './providers/types';
 
@@ -61,13 +62,13 @@ const CHAT_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'browser_task',
-      description: 'Use a real visible browser window to open websites, click, type, submit forms, and inspect live page content. Provide one plain-English browser task only. Do not send Playwright-style selector or method JSON.',
+      description: 'Use a real visible browser window to complete an interactive website objective end-to-end: open pages, click, type, submit forms, play simple web games, dismiss dialogs, and inspect live page content. Provide one complete plain-English browser task for the full user objective, not a tiny first step. Do not send Playwright-style selector or method JSON.',
       parameters: {
         type: 'object',
         properties: {
           task: {
             type: 'string',
-            description: 'One concise browser task in plain English, for example "open the pricing page and click Start free trial".'
+            description: 'One complete browser task in plain English. Include all requested interaction steps and the desired stopping condition, for example "open Wordle, click Play, close the tutorial, make guesses until solved or out of attempts, and report the result".'
           }
         },
         required: ['task'],
@@ -92,6 +93,7 @@ async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> 
       'You are Jarvis, a desktop assistant. Your name is Jarvis.',
       'Use the fetch_url tool first for public webpages when you only need to read page content, summarize it, or extract information such as headlines, links, prices, or article text.',
       'Use the browser_task tool only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
+      'When using browser_task, give it the whole interactive objective in one call, including navigation, clicks, typing, waiting, handling dialogs, and the final success condition. Do not split one user request into multiple browser_task calls.',
       'When web access is unnecessary, answer normally without calling a tool.',
       'After using a tool, answer the user with the result instead of repeating raw tool output verbatim.',
     ].join(' ')
@@ -401,6 +403,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       await buildSystemPrompt(request.conversationId),
       ...request.messages,
     ];
+    let browserTaskExecutedThisTurn = false;
 
     while (true) {
       const turnResult = await provider.streamChat(request.model, baseMessages, abortController, emitStreamChunk, { tools: CHAT_TOOLS });
@@ -447,6 +450,22 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
         }
 
         if (toolCall.function.name === 'browser_task') {
+          if (browserTaskExecutedThisTurn) {
+            toolResultMessages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id || toolCall.function.name,
+              tool_name: toolCall.function.name,
+              content: [
+                'Browser task skipped.',
+                'Error: A browser_task has already run during this user turn. Do not retry browser automation immediately.',
+                'Use the previous browser task result to answer the user with the observed outcome, failure, or next manual step.',
+              ].join('\n'),
+            });
+            continue;
+          }
+
+          browserTaskExecutedThisTurn = true;
+
           const args = parseToolArgumentsObject(toolCall.function.name, toolCall.function.arguments);
           const task = typeof args.task === 'string' ? args.task.trim() : '';
 
@@ -465,7 +484,19 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             model: request.model,
           });
 
-          const browserResult = await runBrowserTask(task, request.model, request.provider, abortController.signal);
+          const browserResult = await runBrowserTask(
+            task,
+            request.model,
+            request.provider,
+            abortController.signal,
+            undefined,
+            (traceEvent: BrowserTraceEvent) => {
+              sendToRenderer('browser-trace-event', {
+                ...traceEvent,
+                assistantMessageId: request.assistantMessageId,
+              });
+            },
+          );
           const browserContent = formatBrowserTaskResult(browserResult);
           logMainProcess('LLM', 'Browser task result returned to LLM', {
             task: task.slice(0, 200),
@@ -593,6 +624,42 @@ ipcMain.handle('store:load-provider', async () => {
 ipcMain.handle('store:save-provider', async (_event, provider: string) => {
   saveSelectedProvider(provider);
   return { success: true };
+});
+
+ipcMain.handle('store:load-open-tab-ids', async () => {
+  return loadOpenTabIds();
+});
+
+ipcMain.handle('store:save-open-tab-ids', async (_event, tabIds: string[]) => {
+  saveOpenTabIds(tabIds);
+  return { success: true };
+});
+
+ipcMain.handle('store:load-current-conversation-id', async () => {
+  return loadCurrentConversationId();
+});
+
+ipcMain.handle('store:save-current-conversation-id', async (_event, id: string | null) => {
+  saveCurrentConversationId(id);
+  return { success: true };
+});
+
+ipcMain.handle('generate-title', async (_event, message: string, model: string, providerId: string) => {
+  try {
+    const provider = getProvider(providerId);
+    if (!provider) {
+      throw new Error(`Unknown provider: ${providerId}`);
+    }
+    const result = await provider.sendChat(model, [
+      { role: 'system', content: 'Generate a very short title (3-6 words) for a conversation that starts with the following message. Return ONLY the title, nothing else. No quotes, no punctuation at the end.' },
+      { role: 'user', content: message },
+    ]);
+    return result.trim();
+  } catch (error) {
+    console.error('Failed to generate title:', error);
+    const words = message.split(' ').slice(0, 5);
+    return words.join(' ') + (words.length < message.split(' ').length ? '...' : '');
+  }
 });
 
 ipcMain.on('set-theme-background', (_event, isDark: boolean) => {

@@ -131,31 +131,17 @@ function DraggableConversationItem({
   return (
     <div
       ref={setNodeRef}
-      className={`group flex items-center gap-1 px-1 py-[0.4rem] text-[0.85rem] transition-all duration-150 ${
+      className={`group flex items-center gap-1 px-2 py-[0.4rem] text-[0.85rem] transition-all duration-150 cursor-grab active:cursor-grabbing ${
         isActive
           ? 'bg-bg-active text-text-primary'
           : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
       } ${isDragging ? 'opacity-40' : ''}`}
       onClick={() => onSelect(conversation.id)}
       onContextMenu={(e) => onContextMenu(e, conversation.id)}
+      {...attributes}
+      {...listeners}
     >
-      <button
-        type="button"
-        className="flex h-6 shrink-0 cursor-grab items-center justify-center rounded text-text-tertiary active:cursor-grabbing"
-        {...attributes}
-        {...listeners}
-        onClick={(e) => e.stopPropagation()}
-        title="Drag chat into a folder"
-        aria-label={`Drag ${conversation.title} into a folder`}
-      >
-        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6h.01M10 12h.01M10 18h.01M14 6h.01M14 12h.01M14 18h.01" />
-        </svg>
-      </button>
-      <svg className="h-3.5 w-3.5 shrink-0 text-text-tertiary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-      </svg>
-      <span className="min-w-0 flex-1 whitespace-nowrap overflow-hidden text-ellipsis leading-snug" title={conversation.title}>
+      <span className="min-w-0 flex-1 whitespace-nowrap overflow-hidden text-ellipsis leading-snug select-none" title={conversation.title}>
         {conversation.title}
       </span>
       <button
@@ -611,7 +597,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       onDragEnd={handleDragEnd}
       onDragOver={handleDragOver}
     >
-      <aside className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-sidebar transition-[width] duration-200 ${isOpen ? 'w-64' : 'w-0 border-r-0'}`}>
+      <aside className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-primary transition-[width] duration-200 ${isOpen ? 'w-64' : 'w-0 border-r-0'}`}>
         <div className="flex-1 overflow-y-auto px-2 py-2">
           <div className="p-2">
             <button

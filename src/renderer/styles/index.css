@@ -1,10 +1,94 @@
 @import "tailwindcss";
 
-@import 'highlight.js/styles/github-dark.css';
+@import 'highlight.js/styles/github.css';
+
+:where([data-theme="dark"]):where([data-resolved-theme="dark"]),
+:where([data-theme="dark"]),
+:where([data-resolved-theme="dark"]) {
+  .hljs {
+    color: #c9d1d9;
+    background: #161616;
+  }
+  .hljs-doctag,
+  .hljs-keyword,
+  .hljs-meta .hljs-keyword,
+  .hljs-template-tag,
+  .hljs-template-variable,
+  .hljs-type,
+  .hljs-variable.language_ {
+    color: #ff7b72;
+  }
+  .hljs-title,
+  .hljs-title.class_,
+  .hljs-title.class_.inherited__,
+  .hljs-title.function_ {
+    color: #d2a8ff;
+  }
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-literal,
+  .hljs-meta,
+  .hljs-number,
+  .hljs-operator,
+  .hljs-variable,
+  .hljs-selector-attr,
+  .hljs-selector-class,
+  .hljs-selector-id {
+    color: #79c0ff;
+  }
+  .hljs-regexp,
+  .hljs-string,
+  .hljs-meta .hljs-string {
+    color: #a5d6ff;
+  }
+  .hljs-built_in,
+  .hljs-symbol {
+    color: #ffa657;
+  }
+  .hljs-comment,
+  .hljs-code,
+  .hljs-formula {
+    color: #8b949e;
+  }
+  .hljs-name,
+  .hljs-quote,
+  .hljs-selector-tag,
+  .hljs-selector-pseudo {
+    color: #7ee787;
+  }
+  .hljs-subst {
+    color: #c9d1d9;
+  }
+  .hljs-section {
+    color: #1f6feb;
+    font-weight: bold;
+  }
+  .hljs-bullet {
+    color: #f2cc60;
+  }
+  .hljs-emphasis {
+    color: #c9d1d9;
+    font-style: italic;
+  }
+  .hljs-strong {
+    color: #c9d1d9;
+    font-weight: bold;
+  }
+  .hljs-addition {
+    color: #aff5b4;
+    background-color: #033a16;
+  }
+  .hljs-deletion {
+    color: #ffdcd7;
+    background-color: #67060c;
+  }
+}
 
 @theme {
   --font-playfair: 'Playfair Display', Georgia, serif;
-  --font-opensans: 'Helvetica', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-readable: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-opensans: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
   
   --color-bg-primary: #ffffff;
@@ -117,17 +201,17 @@ html {
 }
 
 body {
-  font-family: 'Helvetica', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
   line-height: 1.6;
   overflow: hidden;
-  font-weight: 300;
+  font-weight: 400;
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: 'Helvetica', Georgia, serif;
-  font-weight: 400;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 650;
 }
 
 ::-webkit-scrollbar {
@@ -192,4 +276,270 @@ h1, h2, h3, h4, h5, h6 {
 select option {
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
+}
+
+.marktext-content {
+  color: var(--color-text-primary);
+  font-family: var(--font-readable);
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.78;
+  letter-spacing: 0.003em;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-rendering: optimizeLegibility;
+  width: 100%;
+}
+
+.marktext-content > *:first-child {
+  margin-top: 0;
+}
+
+.marktext-content > *:last-child {
+  margin-bottom: 0;
+}
+
+.marktext-content p {
+  margin: 0 0 0.95rem;
+}
+
+.marktext-content h1,
+.marktext-content h2,
+.marktext-content h3,
+.marktext-content h4,
+.marktext-content h5,
+.marktext-content h6 {
+  color: var(--color-text-primary);
+  font-family: var(--font-readable);
+  font-weight: 700;
+  letter-spacing: -0.018em;
+  line-height: 1.24;
+  scroll-margin-top: 1.5rem;
+}
+
+.marktext-content h1 {
+  font-size: 1.7rem;
+  margin: 1.9rem 0 0.85rem;
+}
+
+.marktext-content h2 {
+  border-bottom: 1px solid var(--color-border-primary);
+  font-size: 1.38rem;
+  margin: 1.7rem 0 0.75rem;
+  padding-bottom: 0.35rem;
+}
+
+.marktext-content h3 {
+  font-size: 1.16rem;
+  margin: 1.4rem 0 0.55rem;
+}
+
+.marktext-content h4,
+.marktext-content h5,
+.marktext-content h6 {
+  font-size: 1rem;
+  margin: 1.2rem 0 0.45rem;
+}
+
+.marktext-content h5,
+.marktext-content h6 {
+  color: var(--color-text-secondary);
+}
+
+.marktext-content ul,
+.marktext-content ol {
+  margin: 0 0 1rem;
+  padding-left: 1.45rem;
+}
+
+.marktext-content ul {
+  list-style-type: disc;
+}
+
+.marktext-content ol {
+  list-style-type: decimal;
+}
+
+.marktext-content ul ul {
+  list-style-type: circle;
+}
+
+.marktext-content ul ul ul {
+  list-style-type: square;
+}
+
+.marktext-content ol ol {
+  list-style-type: lower-alpha;
+}
+
+.marktext-content ol ol ol {
+  list-style-type: lower-roman;
+}
+
+.marktext-content li {
+  margin: 0.28rem 0;
+  padding-left: 0.1rem;
+}
+
+.marktext-content li > p {
+  margin: 0.35rem 0;
+}
+
+.marktext-content li > p:first-child {
+  margin-top: 0;
+}
+
+.marktext-content li > p:last-child {
+  margin-bottom: 0;
+}
+
+.marktext-content li > ul,
+.marktext-content li > ol {
+  margin: 0.35rem 0 0.4rem;
+}
+
+.marktext-content input[type='checkbox'] {
+  accent-color: var(--color-accent-primary);
+  margin: 0 0.45rem 0 -1.2rem;
+  transform: translateY(0.08rem);
+}
+
+.marktext-content blockquote {
+  border-left: 3px solid var(--color-border-hover);
+  color: var(--color-text-secondary);
+  margin: 1.15rem 0;
+  padding: 0.2rem 0 0.2rem 1rem;
+}
+
+.marktext-content blockquote p:last-child {
+  margin-bottom: 0;
+}
+
+.marktext-content a {
+  color: var(--color-text-primary);
+  font-weight: 550;
+  text-decoration: underline;
+  text-decoration-color: var(--color-text-muted);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
+.marktext-content a:hover {
+  text-decoration-color: var(--color-text-primary);
+}
+
+.marktext-content strong {
+  font-weight: 700;
+}
+
+.marktext-content em {
+  font-style: italic;
+}
+
+.marktext-content hr {
+  border: 0;
+  border-top: 1px solid var(--color-border-secondary);
+  margin: 1.7rem 0;
+}
+
+.marktext-content code {
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border-primary);
+  border-radius: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  padding: 0.12rem 0.35rem;
+}
+
+.marktext-content pre {
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border-primary);
+  border-radius: 0.55rem;
+  line-height: 1.62;
+  margin: 1.1rem 0;
+  overflow-x: auto;
+  padding: 1rem;
+}
+
+.marktext-content pre code {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  display: block;
+  font-size: 0.88rem;
+  padding: 0;
+  white-space: pre;
+}
+
+.marktext-content .table-scroll {
+  margin: 1.15rem 0;
+  overflow-x: auto;
+}
+
+.marktext-content table {
+  border-collapse: collapse;
+  min-width: 100%;
+}
+
+.marktext-content thead {
+  background: var(--color-bg-secondary);
+}
+
+.marktext-content th,
+.marktext-content td {
+  border: 1px solid var(--color-border-secondary);
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.marktext-content th {
+  font-weight: 700;
+}
+
+.marktext-content tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--color-bg-secondary) 58%, transparent);
+}
+
+.marktext-content img {
+  border-radius: 0.55rem;
+  display: block;
+  height: auto;
+  margin: 1.15rem 0;
+  max-width: 100%;
+}
+
+.marktext-content .katex-display {
+  margin: 1.15rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2rem 0;
+}
+
+.trail-markdown-preview,
+.trail-markdown-preview > span {
+  display: inline;
+}
+
+.trail-markdown-preview strong {
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+.trail-markdown-preview em {
+  font-style: italic;
+}
+
+.trail-markdown-preview code {
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border-primary);
+  border-radius: 0.22rem;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 0.02rem 0.22rem;
+}
+
+.trail-markdown-preview del {
+  text-decoration-thickness: 1px;
 }

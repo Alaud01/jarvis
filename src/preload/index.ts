@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { BrowserTraceEvent } from '../shared/browser';
 
 type VoiceTranscriptPayload = {
   text: string;
@@ -54,6 +55,11 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
   },
+  onBrowserTraceEvent: (callback: (event: BrowserTraceEvent) => void) => {
+    const listener = (_event: any, event: BrowserTraceEvent) => callback(event);
+    ipcRenderer.on('browser-trace-event', listener);
+    return () => ipcRenderer.removeListener('browser-trace-event', listener);
+  },
   startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
   stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),
   getVoiceRecordingState: () => ipcRenderer.invoke('voice-recording-state'),
@@ -83,5 +89,10 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
   storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
+  storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),
+  storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
+  storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),
+  storeSaveCurrentConversationId: (id: string | null) => ipcRenderer.invoke('store:save-current-conversation-id', id),
+  generateTitle: (message: string, model: string, provider: string) => ipcRenderer.invoke('generate-title', message, model, provider),
   setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

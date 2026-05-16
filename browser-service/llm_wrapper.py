@@ -87,6 +87,57 @@ def extract_json_from_response(text: str) -> str | None:
     return None
 
 
+def repair_evaluate_expression_schema(value: Any) -> tuple[Any, bool]:
+    """
+    Repair the narrow browser-use schema mismatch seen from some models:
+    {"evaluate": {"expression": "..."}} should be {"evaluate": {"code": "..."}}.
+    """
+    if isinstance(value, list):
+        repaired_items = []
+        changed = False
+        for item in value:
+            repaired_item, item_changed = repair_evaluate_expression_schema(item)
+            repaired_items.append(repaired_item)
+            changed = changed or item_changed
+        return repaired_items, changed
+
+    if not isinstance(value, dict):
+        return value, False
+
+    repaired: dict[str, Any] = {}
+    changed = False
+    for key, child_value in value.items():
+        repaired_child, child_changed = repair_evaluate_expression_schema(child_value)
+        repaired[key] = repaired_child
+        changed = changed or child_changed
+
+    evaluate_value = repaired.get("evaluate")
+    if (
+        isinstance(evaluate_value, dict)
+        and "expression" in evaluate_value
+        and "code" not in evaluate_value
+    ):
+        evaluate_repair = dict(evaluate_value)
+        evaluate_repair["code"] = evaluate_repair.pop("expression")
+        repaired["evaluate"] = evaluate_repair
+        changed = True
+
+    return repaired, changed
+
+
+def repair_json_for_known_schema_mismatches(json_str: str) -> str | None:
+    try:
+        parsed = json.loads(json_str)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    repaired, changed = repair_evaluate_expression_schema(parsed)
+    if not changed:
+        return None
+
+    return json.dumps(repaired)
+
+
 class RobustChatOllama:
     """
     Wraps ChatOllama to add robustness for models that don't reliably
@@ -169,6 +220,18 @@ class RobustChatOllama:
         try:
             parsed = output_format.model_validate_json(json_str)
         except ValidationError as e:
+            repaired_json_str = repair_json_for_known_schema_mismatches(json_str)
+            if repaired_json_str is not None:
+                try:
+                    parsed = output_format.model_validate_json(repaired_json_str)
+                    print(
+                        f"[RobustChatOllama] Repaired known structured output schema mismatch "
+                        f"for model={self._inner.model}"
+                    )
+                    return ChatInvokeCompletion(completion=parsed, usage=None)
+                except ValidationError:
+                    pass
+
             from browser_use.llm.exceptions import ModelProviderError
             print(
                 f"[RobustChatOllama] Pydantic validation failed for extracted JSON. "

@@ -21,9 +21,8 @@ source "$VENV_DIR/bin/activate"
 
 echo ""
 echo "Installing dependencies..."
-pip install --upgrade pip
-pip install -r "$SCRIPT_DIR/requirements.txt"
-pip install playwright
+python3 -m pip install --upgrade pip
+python3 -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
 echo ""
 echo "Installing Playwright browsers..."

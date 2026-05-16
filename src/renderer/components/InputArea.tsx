@@ -9,6 +9,18 @@ interface VoiceTranscriptPayload {
   newChat: boolean;
 }
 
+interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+interface ProviderInfo {
+  id: string;
+  name: string;
+  available: boolean;
+}
+
 interface InputAreaProps {
   onSendMessage: (text: string) => void;
   onStopStreaming: () => void;
@@ -17,7 +29,14 @@ interface InputAreaProps {
   voiceTranscript?: VoiceTranscriptPayload | null;
   onVoiceTextUsed?: () => void;
   voiceShortcut?: string;
-  /** Increments when the user starts a new chat; focuses the composer without focusing on first app mount. */
+  models: ModelInfo[];
+  selectedModel: string | null;
+  onModelSelect: (model: string) => void;
+  isLoadingModels?: boolean;
+  providers: ProviderInfo[];
+  selectedProvider: string;
+  onProviderSelect: (providerId: string) => void;
+  onRefreshModels: () => void;
   composeFocusKey?: number;
 }
 
@@ -29,8 +48,17 @@ const InputArea: React.FC<InputAreaProps> = ({
   voiceTranscript,
   onVoiceTextUsed,
   voiceShortcut,
+  models,
+  selectedModel,
+  onModelSelect,
+  isLoadingModels = false,
+  providers,
+  selectedProvider,
+  onProviderSelect,
+  onRefreshModels,
   composeFocusKey = 0,
 }) => {
+  const filteredModels = models.filter(m => m.provider === selectedProvider);
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastComposeFocusKeyRef = useRef<number | null>(null);
@@ -135,7 +163,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   return (
     <div className="pb-6 bg-bg-primary shrink-0">
       <div className="max-w-200 mx-auto">
-        <div className="bg-transparent border border-border-primary p-3 transition-all duration-150 focus-within:border-text-primary">
+        <div className="bg-transparent border border-border-primary px-3 py-2 transition-all duration-150 focus-within:border-text-primary">
           <textarea
             ref={textareaRef}
             className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-y-auto"
@@ -147,12 +175,64 @@ const InputArea: React.FC<InputAreaProps> = ({
             disabled={isDisabled}
           />
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3 flex-wrap">
-              {voiceShortcut && (
-                <span className="font-mono text-[0.65rem] text-text-tertiary uppercase tracking-widest">
-                  {voiceShortcut} toggles voice
-                </span>
+            <div className="flex items-center gap-2 flex-wrap">
+              {providers.length > 1 && (
+                <div className="relative">
+                  <select
+                    value={selectedProvider}
+                    onChange={(e) => onProviderSelect(e.target.value)}
+                    className="appearance-none bg-transparent border border-border-secondary px-2 py-0.5 pr-5 font-mono text-[0.6rem] text-text-tertiary uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary focus:outline-none focus:border-text-primary"
+                  >
+                    {providers.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none">
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-text-tertiary">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </div>
+                </div>
               )}
+              <div className="relative inline-flex">
+                {filteredModels.length === 0 && !isLoadingModels ? (
+                  <button
+                    onClick={onRefreshModels}
+                    className="w-28 truncate bg-transparent border border-border-secondary px-2 py-0.5 font-mono text-[0.6rem] text-text-tertiary uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary focus:outline-none focus:border-text-primary"
+                    title="No models found - click to retry"
+                  >
+                    No models - retry
+                  </button>
+                ) : (
+                  <>
+                    <select
+                      value={selectedModel || ''}
+                      onChange={(e) => onModelSelect(e.target.value)}
+                      disabled={isLoadingModels}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
+                    >
+                      {isLoadingModels && (
+                        <option value="" disabled>Loading...</option>
+                      )}
+                      {!isLoadingModels && filteredModels.length > 0 && (
+                        <option value="" disabled>Select model</option>
+                      )}
+                      {filteredModels.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.name}
+                        </option>
+                      ))}
+                    </select>
+                    <span
+                      className={`w-40 truncate font-mono text-[0.6rem] uppercase tracking-widest transition-all duration-[150ms] hover:border-text-primary hover:text-text-primary pointer-events-none select-none ${isLoadingModels ? 'text-text-tertiary opacity-50' : selectedModel ? 'text-text-secondary' : 'text-text-tertiary'}`}
+                    >
+                      {isLoadingModels ? 'Loading...' : selectedModel ? filteredModels.find(m => m.id === selectedModel)?.name ?? selectedModel : 'Select model'}
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <button

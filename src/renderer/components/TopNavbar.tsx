@@ -10,6 +10,7 @@ interface TopNavbarProps {
   activeTabId: string | null;
   onTabSelect: (id: string) => void;
   onTabClose: (id: string, e: React.MouseEvent) => void;
+  onMenuClick: () => void;
 }
 
 const TopNavbar: React.FC<TopNavbarProps> = ({
@@ -17,10 +18,22 @@ const TopNavbar: React.FC<TopNavbarProps> = ({
   activeTabId,
   onTabSelect,
   onTabClose,
+  onMenuClick,
 }) => {
   return (
     <div className="h-10 bg-bg-navbar border-b border-border-primary flex items-end shrink-0 gap-1 [-webkit-app-region:drag]">
       <div className="w-[72px] h-8 shrink-0" />
+      <button
+        className="h-8 w-8 shrink-0 flex items-center justify-center cursor-pointer transition-all duration-[150ms] text-text-primary [-webkit-app-region:no-drag]"
+        onClick={onMenuClick}
+        title="Toggle sidebar"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="3" y1="12" x2="21" y2="12" />
+          <line x1="3" y1="6" x2="21" y2="6" />
+          <line x1="3" y1="18" x2="21" y2="18" />
+        </svg>
+      </button>
       {tabs.map((tab) => (
         <div
           key={tab.id}

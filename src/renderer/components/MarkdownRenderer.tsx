@@ -100,65 +100,48 @@ const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props 
 
 const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
   return (
-    <div className="markdown-content text-text-primary leading-relaxed">
-      <style>{`
-        .markdown-content ul, .markdown-content ol { padding-left: 1.5rem; margin-top: 0; margin-bottom: 1rem; }
-        .markdown-content ul { list-style-type: disc; }
-        .markdown-content ol { list-style-type: decimal; }
-        .markdown-content li { margin-top: 0.25rem; }
-        .markdown-content li > p { margin-top: 1rem; margin-bottom: 0; }
-        .markdown-content li > p:first-child { margin-top: 0; }
-        .markdown-content li > ul, .markdown-content li > ol { margin-top: 0.25rem; margin-bottom: 0; }
-        .markdown-content ul ul { list-style-type: circle; }
-        .markdown-content ul ul ul { list-style-type: lower-roman; }
-        .markdown-content ol ol { list-style-type: lower-alpha; }
-        .markdown-content ol ol ol { list-style-type: lower-roman; }
-      `}</style>
+    <div className="marktext-content markdown-content text-text-primary">
       <ReactMarkdown
         remarkPlugins={[remarkMath, remarkGfm]}
         rehypePlugins={[rehypeKatex]}
         components={{
           code: CodeBlock,
-          h1: ({ children }) => <h1 className="text-2xl font-serif font-bold mt-6 mb-4">{children}</h1>,
-          h2: ({ children }) => <h2 className="text-xl font-serif font-bold mt-5 mb-3">{children}</h2>,
-          h3: ({ children }) => <h3 className="text-lg font-serif font-bold mt-4 mb-2">{children}</h3>,
-          p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
-          ul: ({ children }) => <ul className="mb-3">{children}</ul>,
-          ol: ({ children }) => <ol className="mb-3">{children}</ol>,
+          h1: ({ children }) => <h1>{children}</h1>,
+          h2: ({ children }) => <h2>{children}</h2>,
+          h3: ({ children }) => <h3>{children}</h3>,
+          h4: ({ children }) => <h4>{children}</h4>,
+          h5: ({ children }) => <h5>{children}</h5>,
+          h6: ({ children }) => <h6>{children}</h6>,
+          p: ({ children }) => <p>{children}</p>,
+          ul: ({ children }) => <ul>{children}</ul>,
+          ol: ({ children }) => <ol>{children}</ol>,
           li: ({ children }) => <li>{children}</li>,
           blockquote: ({ children }) => (
-            <blockquote className="border-l-4 border-text-muted pl-4 italic my-4 text-text-secondary">
+            <blockquote>
               {children}
             </blockquote>
           ),
           a: ({ href, children }) => (
-            <a href={href} className="text-text-primary underline hover:opacity-80" target="_blank" rel="noopener noreferrer">
+            <a href={href} target="_blank" rel="noopener noreferrer">
               {children}
             </a>
           ),
-          strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-          em: ({ children }) => <em className="italic">{children}</em>,
-          hr: () => <hr className="my-6 border-t border-border-secondary" />,
+          strong: ({ children }) => <strong>{children}</strong>,
+          em: ({ children }) => <em>{children}</em>,
+          hr: () => <hr />,
           table: ({ children }) => (
-            <div className="my-4 overflow-x-auto">
-              <table className="min-w-full border-collapse border border-border-secondary">
+            <div className="table-scroll">
+              <table>
                 {children}
               </table>
             </div>
           ),
-          thead: ({ children }) => <thead className="bg-bg-secondary">{children}</thead>,
+          thead: ({ children }) => <thead>{children}</thead>,
           tbody: ({ children }) => <tbody>{children}</tbody>,
-          tr: ({ children }) => <tr className="border-b border-border-secondary">{children}</tr>,
-          th: ({ children }) => (
-            <th className="border border-border-secondary px-4 py-2 text-left font-bold font-serif">
-              {children}
-            </th>
-          ),
-          td: ({ children }) => (
-            <td className="border border-border-secondary px-4 py-2">
-              {children}
-            </td>
-          ),
+          tr: ({ children }) => <tr>{children}</tr>,
+          th: ({ children }) => <th>{children}</th>,
+          td: ({ children }) => <td>{children}</td>,
+          img: ({ src, alt }) => <img src={src} alt={alt ?? ''} loading="lazy" />,
         }}
       >
         {content}

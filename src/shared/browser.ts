@@ -2,6 +2,16 @@ export type BrowserToolMode = 'dom' | 'hybrid' | 'cua';
 
 export type BrowserScreenshotKind = 'final' | 'error';
 
+export type BrowserToolRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type BrowserTraceEventName =
+  | 'started'
+  | 'step'
+  | 'step_result'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
 export interface BrowserScreenshotArtifact {
   id: string;
   kind: BrowserScreenshotKind;
@@ -11,11 +21,34 @@ export interface BrowserScreenshotArtifact {
   label: string;
 }
 
+export interface BrowserTraceAction {
+  toolName: string;
+  input: Record<string, unknown>;
+}
+
+export interface BrowserTraceResult {
+  isDone?: boolean;
+  success?: boolean | null;
+  error?: string;
+  extractedContent?: string;
+  longTermMemory?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface BrowserLLMTraceStep {
   stepIndex: number;
   timestamp: string;
   url?: string;
   pageTitle?: string;
+  thinking?: string;
+  evaluationPreviousGoal?: string;
+  memory?: string;
+  nextGoal?: string;
+  actions?: BrowserTraceAction[];
+  results?: BrowserTraceResult[];
+  durationMs?: number;
+  planUpdate?: string[];
+  currentPlanItem?: number;
   reasoning?: string;
   finishReason?: string;
   toolCalls?: {
@@ -27,8 +60,12 @@ export interface BrowserLLMTraceStep {
 
 export interface BrowserLLMTrace {
   model: string;
-  mode: BrowserToolMode;
-  systemPrompt: string;
+  mode?: BrowserToolMode;
+  provider?: string;
+  plannerModel?: string;
+  useVision?: boolean;
+  llmScreenshotSize?: [number, number] | null;
+  systemPrompt?: string;
   instruction: string;
   startedAt: string;
   finishedAt?: string;
@@ -36,9 +73,28 @@ export interface BrowserLLMTrace {
   error?: string;
 }
 
+export interface BrowserTraceEvent {
+  assistantMessageId?: string;
+  runId: string;
+  event: BrowserTraceEventName;
+  timestamp: string;
+  status: BrowserToolRunStatus;
+  instruction?: string;
+  model?: string;
+  provider?: string;
+  plannerModel?: string;
+  useVision?: boolean;
+  llmScreenshotSize?: [number, number] | null;
+  step?: BrowserLLMTraceStep;
+  summary?: string;
+  error?: string;
+  steps?: number;
+  elapsedMs?: number;
+}
+
 export interface BrowserToolRun {
   id: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: BrowserToolRunStatus;
   instruction: string;
   startUrl?: string;
   summary?: string;
