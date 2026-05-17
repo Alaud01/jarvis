@@ -33,20 +33,20 @@ jarvis/
 
 ```bash
 cd jarvis
-npm install
+pnpm install
 ```
 
 ## Development
 
 ```bash
-npm run dev    # Start Vite dev server
-npm start      # Launch Electron
+pnpm dev       # Start Vite dev server
+pnpm start     # Launch Electron
 ```
 
 ## Build
 
 ```bash
-npm run build
+pnpm build
 ```
 
 ## Architecture

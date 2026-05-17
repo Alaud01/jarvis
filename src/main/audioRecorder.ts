@@ -4,6 +4,7 @@ import * as path from 'path';
 const SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
 const BIT_DEPTH = 16;
+const AUDIO_STOP_DRAIN_MS = 150;
 
 let mainWindow: BrowserWindow | null = null;
 let audioChunks: Int16Array[] = [];
@@ -162,13 +163,17 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
 }
 
 export async function stopRecording(): Promise<Buffer> {
-  isRecording = false;
-  
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await mainWindow.webContents.executeJavaScript(`
         (function() {
           try {
+            if (window.__audioProcessor) {
+              window.__audioProcessor.disconnect();
+            }
+            if (window.__audioSource) {
+              window.__audioSource.disconnect();
+            }
             if (window.__audioStream) {
               window.__audioStream.getTracks().forEach(track => track.stop());
               window.__audioStream = null;
@@ -189,7 +194,8 @@ export async function stopRecording(): Promise<Buffer> {
     }
   }
   
-  await new Promise(resolve => setTimeout(resolve, 100));
+  await new Promise(resolve => setTimeout(resolve, AUDIO_STOP_DRAIN_MS));
+  isRecording = false;
   
   const totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const combinedData = new Int16Array(totalLength);

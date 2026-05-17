@@ -135,7 +135,7 @@ async function stopAndProcess(): Promise<void> {
     const result = await processVoiceFlow(audioBuffer);
 
     if (result.success && result.text) {
-      showOverlay('processing', result.text);
+      showOverlay('complete', result.text);
       await new Promise(resolve => setTimeout(resolve, 300));
       const targetApp = preRecordingProjectFocused ? null : await resolveTargetApp();
       const targetIsProjectApp = preRecordingProjectFocused || isProjectApp(targetApp);

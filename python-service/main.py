@@ -24,17 +24,10 @@ VAD_MIN_SPEECH_MS = 250
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
 OLLAMA_TIMEOUT_SECONDS = 3
 TARGET_SAMPLE_RATE = 16000
-TRANSCRIBE_CHUNK_SECONDS = 5
-TRANSCRIBE_CHUNK_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_CHUNK_SECONDS
-TRANSCRIBE_CHUNK_PADDING_MS = 250
-TRANSCRIBE_CHUNK_PADDING_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_CHUNK_PADDING_MS // 1000
-COREML_PROVIDER_OPTIONS = {
-    "ModelFormat": "MLProgram",
-    "MLComputeUnits": "ALL",
-    "RequireStaticInputShapes": "1",
-    "EnableOnSubgraphs": "0",
-}
-
+TRANSCRIBE_SEGMENT_PADDING_MS = 250
+TRANSCRIBE_SEGMENT_PADDING_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_SEGMENT_PADDING_MS // 1000
+TRANSCRIBE_SEGMENT_GAP_MS = 250
+TRANSCRIBE_SEGMENT_GAP_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_SEGMENT_GAP_MS // 1000
 asr_model = None
 vad_model = None
 
@@ -42,7 +35,7 @@ vad_model = None
 def load_models():
     global asr_model, vad_model
     
-    print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX (CoreML/GPU)...")
+    print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX...")
     sess_opts = rt.SessionOptions()
     sess_opts.enable_mem_pattern = False
     sess_opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
@@ -51,11 +44,7 @@ def load_models():
     available_providers = set(rt.get_available_providers())
     asr_providers = ["CPUExecutionProvider"]
     if "CoreMLExecutionProvider" in available_providers:
-        asr_providers = [
-            ("CoreMLExecutionProvider", COREML_PROVIDER_OPTIONS),
-            "CPUExecutionProvider",
-        ]
-        print("[VoiceService] CoreMLExecutionProvider enabled with static chunk shapes")
+        print("[VoiceService] CoreMLExecutionProvider available, but ASR uses CPU for dynamic utterance lengths")
     else:
         print("[VoiceService] CoreMLExecutionProvider unavailable, using CPUExecutionProvider")
     
@@ -101,7 +90,7 @@ def detect_speech_segments(wav: np.ndarray) -> tuple[list[tuple[int, int]], floa
     if wav.size == 0:
         return [], 0.0
 
-    vad_input = (np.clip(wav, -1.0, 1.0) * 32767.0).astype(np.int16)
+    vad_input = np.ascontiguousarray(np.clip(wav, -1.0, 1.0), dtype=np.float32)
     speech_timestamps = get_speech_timestamps(
         vad_input,
         vad_model,
@@ -127,34 +116,24 @@ def detect_speech_segments(wav: np.ndarray) -> tuple[list[tuple[int, int]], floa
     return speech_segments, speech_duration_ms
 
 
-def split_range_to_chunks(start: int, end: int) -> list[tuple[int, int]]:
-    """Split a contiguous speech range into fixed-size chunk windows."""
-    chunk_ranges: list[tuple[int, int]] = []
-    cursor = start
-    while cursor < end:
-        next_cursor = min(cursor + TRANSCRIBE_CHUNK_SAMPLES, end)
-        chunk_ranges.append((cursor, next_cursor))
-        cursor = next_cursor
-    return chunk_ranges
-
-
-def build_transcription_ranges(
+def build_transcription_audio(
+    wav: np.ndarray,
     speech_segments: list[tuple[int, int]],
     total_samples: int,
-) -> list[tuple[int, int]]:
-    """Merge nearby speech spans, then cap each transcription window at 5 seconds."""
+) -> np.ndarray:
+    """Build one compact speech buffer for ASR without chunking boundaries."""
     if not speech_segments:
-        return []
+        return np.empty(0, dtype=np.float32)
 
     padded_segments: list[tuple[int, int]] = []
     for start, end in speech_segments:
-        padded_start = max(0, start - TRANSCRIBE_CHUNK_PADDING_SAMPLES)
-        padded_end = min(total_samples, end + TRANSCRIBE_CHUNK_PADDING_SAMPLES)
+        padded_start = max(0, start - TRANSCRIBE_SEGMENT_PADDING_SAMPLES)
+        padded_end = min(total_samples, end + TRANSCRIBE_SEGMENT_PADDING_SAMPLES)
         if padded_end > padded_start:
             padded_segments.append((padded_start, padded_end))
 
     if not padded_segments:
-        return []
+        return np.empty(0, dtype=np.float32)
 
     merged_segments: list[list[int]] = [[*padded_segments[0]]]
     for start, end in padded_segments[1:]:
@@ -164,45 +143,28 @@ def build_transcription_ranges(
         else:
             merged_segments.append([start, end])
 
-    chunk_ranges: list[tuple[int, int]] = []
-    current_start, current_end = merged_segments[0]
-    for start, end in merged_segments[1:]:
-        if end - current_start <= TRANSCRIBE_CHUNK_SAMPLES:
-            current_end = end
-            continue
-        chunk_ranges.extend(split_range_to_chunks(current_start, current_end))
-        current_start, current_end = start, end
+    speech_parts: list[np.ndarray] = []
+    gap = np.zeros(TRANSCRIBE_SEGMENT_GAP_SAMPLES, dtype=np.float32)
+    for index, (start, end) in enumerate(merged_segments):
+        if index > 0:
+            speech_parts.append(gap)
+        speech_parts.append(wav[start:end])
 
-    chunk_ranges.extend(split_range_to_chunks(current_start, current_end))
-    return chunk_ranges
+    return np.ascontiguousarray(np.concatenate(speech_parts), dtype=np.float32)
 
 
 def transcribe_audio(wav: np.ndarray, speech_segments: list[tuple[int, int]]) -> str:
-    """Transcribe speech sequentially using fixed-size chunk buffers."""
+    """Transcribe detected speech as one compact utterance."""
     global asr_model
 
-    chunk_ranges = build_transcription_ranges(speech_segments, wav.shape[0])
-    if not chunk_ranges:
+    transcription_audio = build_transcription_audio(wav, speech_segments, wav.shape[0])
+    if transcription_audio.size == 0:
         return ""
 
-    chunk_buffer = np.zeros(TRANSCRIBE_CHUNK_SAMPLES, dtype=np.float32)
-    transcripts: list[str] = []
+    duration_seconds = transcription_audio.shape[0] / TARGET_SAMPLE_RATE
+    print(f"[VoiceService] Transcribing compact utterance ({duration_seconds:.2f}s of audio)")
 
-    for index, (start, end) in enumerate(chunk_ranges, start=1):
-        chunk_buffer.fill(0.0)
-        chunk_view = wav[start:end]
-        copy_samples = min(chunk_view.shape[0], TRANSCRIBE_CHUNK_SAMPLES)
-        # Pad shorter chunks with trailing silence so CoreML sees stable input shapes.
-        chunk_buffer[:copy_samples] = chunk_view[:copy_samples]
-        chunk_text = asr_model.recognize(chunk_buffer, sample_rate=TARGET_SAMPLE_RATE).strip()
-        if chunk_text:
-            transcripts.append(chunk_text)
-        print(
-            f"[VoiceService] Transcribed chunk {index}/{len(chunk_ranges)} "
-            f"({copy_samples / TARGET_SAMPLE_RATE:.2f}s of audio)"
-        )
-
-    return " ".join(transcripts).strip()
+    return asr_model.recognize(transcription_audio, sample_rate=TARGET_SAMPLE_RATE).strip()
 
 
 def refine_with_gemma(raw_text: str) -> str:

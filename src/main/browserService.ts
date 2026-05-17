@@ -11,6 +11,10 @@ const BROWSER_SERVICE_HOST = '127.0.0.1';
 const BROWSER_TASK_TIMEOUT_MS = 12 * 60_000;
 const HEALTH_CHECK_TIMEOUT_MS = 3000;
 const BROWSER_SETUP_TIMEOUT_MS = 15 * 60_000;
+const BROWSER_SERVICE_IDLE_TIMEOUT_MS = Number.parseInt(
+  process.env.BROWSER_SERVICE_IDLE_TIMEOUT_MS || `${5 * 60_000}`,
+  10,
+);
 const BROWSER_SETUP_STATE_VERSION = 1;
 const BROWSER_SETUP_STAMP_FILE = 'setup-state.json';
 const BROWSER_TRACE_PREFIX = '__JARVIS_BROWSER_TRACE__ ';
@@ -19,6 +23,7 @@ let browserProcess: ChildProcess | null = null;
 let restartInProgress = false;
 let browserStdoutBuffer = '';
 let activeTraceCallback: ((event: BrowserTraceEvent) => void) | null = null;
+let browserIdleTimer: NodeJS.Timeout | null = null;
 
 export interface BrowserTaskResult {
   success: boolean;
@@ -283,6 +288,29 @@ function spawnBrowserProcess(serviceDir: string, pythonExe: string): ChildProces
   });
 
   return proc;
+}
+
+function clearBrowserIdleTimer(): void {
+  if (browserIdleTimer) {
+    clearTimeout(browserIdleTimer);
+    browserIdleTimer = null;
+  }
+}
+
+function scheduleBrowserServiceIdleStop(): void {
+  clearBrowserIdleTimer();
+
+  if (!Number.isFinite(BROWSER_SERVICE_IDLE_TIMEOUT_MS) || BROWSER_SERVICE_IDLE_TIMEOUT_MS <= 0) {
+    return;
+  }
+
+  browserIdleTimer = setTimeout(() => {
+    browserIdleTimer = null;
+    void stopBrowserService().catch((error) => {
+      console.error('[BrowserService] Failed to stop idle browser service:', error);
+    });
+  }, BROWSER_SERVICE_IDLE_TIMEOUT_MS);
+  browserIdleTimer.unref?.();
 }
 
 function runSetupCommand(command: string, args: string[], cwd: string, timeoutMs = BROWSER_SETUP_TIMEOUT_MS): Promise<void> {
@@ -556,6 +584,8 @@ async function killPortOccupier(): Promise<void> {
 }
 
 export async function startBrowserService(): Promise<boolean> {
+  clearBrowserIdleTimer();
+
   if (browserProcess) {
     console.log('[BrowserService] Already running');
     return true;
@@ -587,6 +617,8 @@ export async function startBrowserService(): Promise<boolean> {
 }
 
 export async function stopBrowserService(): Promise<void> {
+  clearBrowserIdleTimer();
+
   if (!browserProcess) {
     return;
   }
@@ -762,5 +794,6 @@ export async function runBrowserTask(
     if (activeTraceCallback === activeForThisRun) {
       activeTraceCallback = previousTraceCallback;
     }
+    scheduleBrowserServiceIdleStop();
   }
 }

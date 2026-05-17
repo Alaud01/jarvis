@@ -154,7 +154,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
   }, [assistantEntries]);
 
   return (
-    <div className="flex flex-col justify-center gap-0.5">
+    <div className="flex min-h-full flex-col justify-center gap-0.5">
       {messages.map((message) => {
         if (message.sender === 'assistant') {
           const entry = entriesByMessageId.get(message.id);
@@ -245,13 +245,20 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
       {visibleEntries.length > 0 ? (
         <div className="flex min-w-0 flex-col gap-3">
           {visibleEntries.map((entry) => (
-            <div key={entry.messageId} className="flex min-w-0 flex-col gap-0.5">
+            <div
+              key={entry.messageId}
+              className={`flex min-w-0 flex-col gap-0.5 ${
+                entry.sender === 'user'
+                  ? 'rounded border border-border-secondary bg-bg-secondary px-1 py-1'
+                  : ''
+              }`}
+            >
               <button
                 type="button"
                 className="w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1 text-left font-mono text-[0.62rem] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
                 onClick={() => onScrollToMessage(entry.messageId)}
               >
-                <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                <span className={`block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap`}>
                   {entry.sender === 'user' ? 'You' : 'Jarvis'} {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
                 </span>
               </button>

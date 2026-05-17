@@ -3,18 +3,26 @@
   "version": "1.0.0",
   "description": "Mac menu bar assistant powered by Ollama",
   "main": "dist/main/index.js",
+  "packageManager": "pnpm@10.28.2",
   "scripts": {
     "build:native": "bash scripts/build-native.sh",
-    "compile": "npm run build:native && tsc -p tsconfig.node.json",
+    "compile": "pnpm build:native && tsc -p tsconfig.node.json",
     "build:renderer": "vite build",
     "dev": "vite",
-    "build": "npm run compile && npm run build:renderer && electron-builder",
-    "start": "npm run compile && npm run build:renderer && electron .",
-    "dev:all": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "build": "pnpm compile && pnpm build:renderer && electron-builder",
+    "start": "pnpm compile && pnpm build:renderer && electron .",
+    "dev:all": "concurrently \"pnpm dev:vite\" \"pnpm dev:electron\"",
     "dev:vite": "vite",
-    "dev:electron": "npm run build:native && tsc -p tsconfig.node.json && wait-on http://localhost:5173 && electron .",
+    "dev:electron": "pnpm build:native && tsc -p tsconfig.node.json && wait-on http://localhost:5173 && electron .",
     "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload",
     "start:browser": "cd browser-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8001 --reload"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "electron-winstaller",
+      "esbuild"
+    ]
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -51,6 +59,12 @@
   },
   "build": {
     "appId": "com.jarvis.app",
+    "files": [
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "entitlements": "entitlements.mac.plist",

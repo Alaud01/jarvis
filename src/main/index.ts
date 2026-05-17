@@ -4,12 +4,12 @@ import { randomUUID } from 'crypto';
 import * as path from 'path';
 import { startPythonService, stopPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
+import { setOverlayThemeBackground } from './overlayWindow';
 import { setMainWindow } from './audioRecorder';
 import { loadConversations, saveConversations, deleteConversation, loadFolders, saveFolders, loadSelectedModel, saveSelectedModel, loadSelectedProvider, saveSelectedProvider, loadOpenTabIds, saveOpenTabIds, loadCurrentConversationId, saveCurrentConversationId } from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
-import { braveSearch, toSearchSource, type BraveSearchToolArgs, type BraveSearchToolResult } from './braveSearchService';
+import { tavilySearch, toSearchSource, type TavilySearchToolArgs, type TavilySearchToolResult } from './tavilySearchService';
 import {
-  startBrowserService,
   stopBrowserService,
   runBrowserTask,
   type BrowserTaskResult,
@@ -27,7 +27,7 @@ let currentAbortController: AbortController | null = null;
 let isQuitting = false;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
-const MAX_BRAVE_SEARCH_CALLS_PER_TURN = 2;
+const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 2;
 const MAX_FETCH_URL_CALLS_PER_TURN = 2;
 
 interface SendMessageStreamRequest {
@@ -42,8 +42,8 @@ const CHAT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
-      name: 'brave_search',
-      description: 'Search the live public web with Brave Search and return ranked source results with URLs and snippets. Use this for current events, recent facts, discovery of relevant public sources, or when the user asks to search the web. Prefer answering from these results when snippets are enough; only use fetch_url on one or two high-value primary sources if you need full page text.',
+      name: 'tavily_search',
+      description: 'Search the live public web with Tavily and return ranked source results with URLs and snippets. Use this for current events, recent facts, discovery of relevant public sources, or when the user asks to search the web. Prefer answering from these results when snippets are enough; only use fetch_url on one or two high-value primary sources if you need full page text.',
       parameters: {
         type: 'object',
         properties: {
@@ -57,15 +57,19 @@ const CHAT_TOOLS: ToolDefinition[] = [
           },
           country: {
             type: 'string',
-            description: 'Optional Brave country code such as "US", "GB", or "CA".'
+            description: 'Optional country name to boost results from, such as "united states", "united kingdom", or "canada".'
           },
-          searchLang: {
+          searchDepth: {
             type: 'string',
-            description: 'Optional search language such as "en".'
+            description: 'Optional Tavily search depth: "basic", "advanced", "fast", or "ultra-fast".'
           },
-          freshness: {
+          topic: {
             type: 'string',
-            description: 'Optional freshness filter supported by Brave, such as "pd", "pw", "pm", or "py".'
+            description: 'Optional search topic: "general", "news", or "finance".'
+          },
+          timeRange: {
+            type: 'string',
+            description: 'Optional time range filter: "day", "week", "month", "year", or "d", "w", "m", "y".'
           }
         },
         required: ['query'],
@@ -77,7 +81,7 @@ const CHAT_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'fetch_url',
-      description: 'Fetch one public http or https URL and return a readable text version of the response. Use sparingly, preferably for official or primary sources, when Brave snippets are not enough. Avoid repeated fetches, paywalled pages, Medium, LinkedIn, social networks, CAPTCHA/challenge pages, and sites likely to block automation.',
+      description: 'Fetch one public http or https URL and return a readable text version of the response. Use sparingly, preferably for official or primary sources, when Tavily snippets are not enough. Avoid repeated fetches, paywalled pages, Medium, LinkedIn, social networks, CAPTCHA/challenge pages, and sites likely to block automation.',
       parameters: {
         type: 'object',
         properties: {
@@ -132,12 +136,12 @@ async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> 
     role: 'system',
     content: [
       'You are Jarvis, a desktop assistant. Your name is Jarvis.',
-      'Use the brave_search tool for current information, recent facts, source discovery, or explicit web search requests.',
-      'After brave_search, answer from search snippets and source metadata when they are enough.',
+      'Use the tavily_search tool for current information, recent facts, source discovery, or explicit web search requests.',
+      'After tavily_search, answer from search snippets and source metadata when they are enough.',
       'Use fetch_url only when the full page is necessary for accuracy, and fetch at most one or two high-value primary sources.',
       'Do not fetch Medium, LinkedIn, social networks, obvious paywalled pages, or pages likely to show CAPTCHA/anti-bot checks unless the user explicitly asks.',
       'If fetch_url reports a 403, 429, CAPTCHA, verification, or anti-bot challenge, do not retry that URL; use another source or answer from search results.',
-      'When you use brave_search, include relevant Markdown links to the sources you relied on.',
+      'When you use tavily_search, include relevant Markdown links to the sources you relied on.',
       'Use the fetch_url tool first for public webpages when you only need to read page content, summarize it, or extract information such as headlines, links, prices, or article text.',
       'Use the browser_task tool only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
       'When using browser_task, give it the whole interactive objective in one call, including navigation, clicks, typing, waiting, handling dialogs, and the final success condition. Do not split one user request into multiple browser_task calls.',
@@ -183,20 +187,21 @@ function parseFetchToolArgs(rawArguments: Record<string, unknown> | string): Fet
   };
 }
 
-function parseBraveSearchToolArgs(rawArguments: Record<string, unknown> | string): BraveSearchToolArgs {
-  const args = parseToolArgumentsObject('brave_search', rawArguments);
+function parseTavilySearchToolArgs(rawArguments: Record<string, unknown> | string): TavilySearchToolArgs {
+  const args = parseToolArgumentsObject('tavily_search', rawArguments);
   const query = typeof args.query === 'string' ? args.query.trim() : '';
 
   if (!query) {
-    throw new Error('brave_search requires a non-empty "query" string.');
+    throw new Error('tavily_search requires a non-empty "query" string.');
   }
 
   return {
     query,
     count: typeof args.count === 'number' && Number.isFinite(args.count) ? args.count : undefined,
     country: typeof args.country === 'string' ? args.country : undefined,
-    searchLang: typeof args.searchLang === 'string' ? args.searchLang : undefined,
-    freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
+    searchDepth: typeof args.searchDepth === 'string' ? args.searchDepth : undefined,
+    topic: typeof args.topic === 'string' ? args.topic : undefined,
+    timeRange: typeof args.timeRange === 'string' ? args.timeRange : undefined,
   };
 }
 
@@ -269,15 +274,22 @@ function formatFetchToolResult(result: FetchToolResult): string {
   return lines.join('\n');
 }
 
-function formatBraveSearchToolResult(result: BraveSearchToolResult): string {
+function formatTavilySearchToolResult(result: TavilySearchToolResult): string {
   const lines = [
-    result.success ? 'Brave search completed.' : 'Brave search failed.',
+    result.success ? 'Tavily search completed.' : 'Tavily search failed.',
     `Query: ${result.query}`,
     `Searched at: ${result.searchedAt}`,
   ];
 
   if (result.error) {
     lines.push(`Error: ${result.error}`);
+  }
+
+  if (result.answer) {
+    lines.push(`Answer: ${result.answer}`);
+  }
+  if (result.responseTime !== undefined) {
+    lines.push(`Response time: ${result.responseTime}`);
   }
 
   if (result.results?.length) {
@@ -288,14 +300,8 @@ function formatBraveSearchToolResult(result: BraveSearchToolResult): string {
       if (item.description) {
         lines.push(`   Snippet: ${item.description}`);
       }
-      if (item.extraSnippets?.length) {
-        lines.push(`   Extra snippets: ${item.extraSnippets.slice(0, 3).join(' | ')}`);
-      }
-      if (item.age) {
-        lines.push(`   Age: ${item.age}`);
-      }
-      if (item.language) {
-        lines.push(`   Language: ${item.language}`);
+      if (item.score !== undefined) {
+        lines.push(`   Score: ${item.score}`);
       }
     });
   } else if (result.success) {
@@ -305,7 +311,7 @@ function formatBraveSearchToolResult(result: BraveSearchToolResult): string {
   return lines.join('\n');
 }
 
-function createSearchSourceGroup(result: BraveSearchToolResult): SearchSourceGroup | null {
+function createSearchSourceGroup(result: TavilySearchToolResult): SearchSourceGroup | null {
   if (!result.success || !result.results?.length) {
     return null;
   }
@@ -522,7 +528,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       ...request.messages,
     ];
     let browserTaskExecutedThisTurn = false;
-    let braveSearchCallsThisTurn = 0;
+    let tavilySearchCallsThisTurn = 0;
     let fetchUrlCallsThisTurn = 0;
 
     while (true) {
@@ -539,38 +545,38 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       const toolResultMessages: ChatMessage[] = [];
 
       for (const toolCall of toolCalls) {
-        if (toolCall.function.name === 'brave_search') {
-          if (braveSearchCallsThisTurn >= MAX_BRAVE_SEARCH_CALLS_PER_TURN) {
+        if (toolCall.function.name === 'tavily_search') {
+          if (tavilySearchCallsThisTurn >= MAX_TAVILY_SEARCH_CALLS_PER_TURN) {
             toolResultMessages.push({
               role: 'tool',
               tool_call_id: toolCall.id || toolCall.function.name,
               tool_name: toolCall.function.name,
               content: [
-                'Brave search skipped.',
-                `Error: Search limit reached for this user turn (${MAX_BRAVE_SEARCH_CALLS_PER_TURN}).`,
+                'Tavily search skipped.',
+                `Error: Search limit reached for this user turn (${MAX_TAVILY_SEARCH_CALLS_PER_TURN}).`,
                 'Use the existing search results to answer directly, or ask the user whether to run more searches.',
               ].join('\n'),
             });
             continue;
           }
 
-          let args: BraveSearchToolArgs;
+          let args: TavilySearchToolArgs;
           try {
-            args = parseBraveSearchToolArgs(toolCall.function.arguments);
+            args = parseTavilySearchToolArgs(toolCall.function.arguments);
           } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'Invalid brave_search arguments.';
+            const errorMessage = error instanceof Error ? error.message : 'Invalid tavily_search arguments.';
             toolResultMessages.push({
               role: 'tool',
               tool_call_id: toolCall.id || toolCall.function.name,
               tool_name: toolCall.function.name,
-              content: `Brave search failed.\nError: ${errorMessage}`,
+              content: `Tavily search failed.\nError: ${errorMessage}`,
             });
             continue;
           }
 
-          braveSearchCallsThisTurn += 1;
-          const searchResult = await braveSearch(args);
-          const searchContent = formatBraveSearchToolResult(searchResult);
+          tavilySearchCallsThisTurn += 1;
+          const searchResult = await tavilySearch(args);
+          const searchContent = formatTavilySearchToolResult(searchResult);
           const sourceGroup = createSearchSourceGroup(searchResult);
           if (sourceGroup) {
             const payload: SearchSourcesEvent = {
@@ -579,7 +585,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             };
             sendToRenderer('search-sources-event', payload);
           }
-          logMainProcess('LLM', 'Brave search result returned to LLM', {
+          logMainProcess('LLM', 'Tavily search result returned to LLM', {
             query: args.query,
             success: searchResult.success,
             resultCount: searchResult.results?.length,
@@ -857,6 +863,7 @@ ipcMain.handle('generate-title', async (_event, message: string, model: string, 
 });
 
 ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
+  setOverlayThemeBackground(isDark);
   const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
   if (win) {
     win.setBackgroundColor(isDark ? '#0a0a0a' : '#ffffff');
@@ -892,19 +899,7 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('[Main] Error initializing voice flow:', error);
   }
-
-  console.log('[Main] Starting browser automation service...');
-
-  try {
-    const browserStarted = await startBrowserService();
-    if (!browserStarted) {
-      console.error('[Main] Failed to start browser service - browser automation will not work');
-    } else {
-      console.log('[Main] Browser automation service started successfully');
-    }
-  } catch (error) {
-    console.error('[Main] Error starting browser service:', error);
-  }
+  console.log('[Main] Browser automation service will start on first browser task');
 });
 
 app.on('window-all-closed', () => {
