@@ -1,5 +1,6 @@
 import Store from 'electron-store';
 import type { BrowserToolRun } from '../shared/browser';
+import type { SearchSourceGroup } from '../shared/search';
 
 export interface SerializedMessage {
   id: string;
@@ -7,6 +8,7 @@ export interface SerializedMessage {
   sender: 'user' | 'assistant';
   timestamp: string;
   browserRuns?: BrowserToolRun[];
+  searchSources?: SearchSourceGroup[];
 }
 
 export interface SerializedConversation {

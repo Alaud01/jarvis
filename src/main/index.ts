@@ -1,3 +1,4 @@
+import dotenv from 'dotenv';
 import { app, BrowserWindow, Tray, nativeImage, Menu, ipcMain } from 'electron';
 import { randomUUID } from 'crypto';
 import * as path from 'path';
@@ -6,6 +7,7 @@ import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './v
 import { setMainWindow } from './audioRecorder';
 import { loadConversations, saveConversations, deleteConversation, loadFolders, saveFolders, loadSelectedModel, saveSelectedModel, loadSelectedProvider, saveSelectedProvider, loadOpenTabIds, saveOpenTabIds, loadCurrentConversationId, saveCurrentConversationId } from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
+import { braveSearch, toSearchSource, type BraveSearchToolArgs, type BraveSearchToolResult } from './braveSearchService';
 import {
   startBrowserService,
   stopBrowserService,
@@ -13,8 +15,11 @@ import {
   type BrowserTaskResult,
 } from './browserService';
 import type { BrowserTraceEvent } from '../shared/browser';
+import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider } from './providers/registry';
 import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo } from './providers/types';
+
+dotenv.config({ quiet: true });
 
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
@@ -22,6 +27,8 @@ let currentAbortController: AbortController | null = null;
 let isQuitting = false;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+const MAX_BRAVE_SEARCH_CALLS_PER_TURN = 2;
+const MAX_FETCH_URL_CALLS_PER_TURN = 2;
 
 interface SendMessageStreamRequest {
   conversationId: string;
@@ -35,8 +42,42 @@ const CHAT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'brave_search',
+      description: 'Search the live public web with Brave Search and return ranked source results with URLs and snippets. Use this for current events, recent facts, discovery of relevant public sources, or when the user asks to search the web. Prefer answering from these results when snippets are enough; only use fetch_url on one or two high-value primary sources if you need full page text.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The web search query.'
+          },
+          count: {
+            type: 'number',
+            description: 'Optional number of results to return, from 1 to 20.'
+          },
+          country: {
+            type: 'string',
+            description: 'Optional Brave country code such as "US", "GB", or "CA".'
+          },
+          searchLang: {
+            type: 'string',
+            description: 'Optional search language such as "en".'
+          },
+          freshness: {
+            type: 'string',
+            description: 'Optional freshness filter supported by Brave, such as "pd", "pw", "pm", or "py".'
+          }
+        },
+        required: ['query'],
+        additionalProperties: false,
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'fetch_url',
-      description: 'Fetch a public http or https URL and return a readable text version of the response. Prefer this over browser_agent when you only need to read, summarize, or extract information from a page without clicking, typing, logging in, or preserving browser state.',
+      description: 'Fetch one public http or https URL and return a readable text version of the response. Use sparingly, preferably for official or primary sources, when Brave snippets are not enough. Avoid repeated fetches, paywalled pages, Medium, LinkedIn, social networks, CAPTCHA/challenge pages, and sites likely to block automation.',
       parameters: {
         type: 'object',
         properties: {
@@ -91,6 +132,12 @@ async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> 
     role: 'system',
     content: [
       'You are Jarvis, a desktop assistant. Your name is Jarvis.',
+      'Use the brave_search tool for current information, recent facts, source discovery, or explicit web search requests.',
+      'After brave_search, answer from search snippets and source metadata when they are enough.',
+      'Use fetch_url only when the full page is necessary for accuracy, and fetch at most one or two high-value primary sources.',
+      'Do not fetch Medium, LinkedIn, social networks, obvious paywalled pages, or pages likely to show CAPTCHA/anti-bot checks unless the user explicitly asks.',
+      'If fetch_url reports a 403, 429, CAPTCHA, verification, or anti-bot challenge, do not retry that URL; use another source or answer from search results.',
+      'When you use brave_search, include relevant Markdown links to the sources you relied on.',
       'Use the fetch_url tool first for public webpages when you only need to read page content, summarize it, or extract information such as headlines, links, prices, or article text.',
       'Use the browser_task tool only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
       'When using browser_task, give it the whole interactive objective in one call, including navigation, clicks, typing, waiting, handling dialogs, and the final success condition. Do not split one user request into multiple browser_task calls.',
@@ -133,6 +180,23 @@ function parseFetchToolArgs(rawArguments: Record<string, unknown> | string): Fet
     url,
     maxChars: typeof args.maxChars === 'number' && Number.isFinite(args.maxChars) ? args.maxChars : undefined,
     rawHtml: typeof args.rawHtml === 'boolean' ? args.rawHtml : undefined,
+  };
+}
+
+function parseBraveSearchToolArgs(rawArguments: Record<string, unknown> | string): BraveSearchToolArgs {
+  const args = parseToolArgumentsObject('brave_search', rawArguments);
+  const query = typeof args.query === 'string' ? args.query.trim() : '';
+
+  if (!query) {
+    throw new Error('brave_search requires a non-empty "query" string.');
+  }
+
+  return {
+    query,
+    count: typeof args.count === 'number' && Number.isFinite(args.count) ? args.count : undefined,
+    country: typeof args.country === 'string' ? args.country : undefined,
+    searchLang: typeof args.searchLang === 'string' ? args.searchLang : undefined,
+    freshness: typeof args.freshness === 'string' ? args.freshness : undefined,
   };
 }
 
@@ -203,6 +267,60 @@ function formatFetchToolResult(result: FetchToolResult): string {
   }
 
   return lines.join('\n');
+}
+
+function formatBraveSearchToolResult(result: BraveSearchToolResult): string {
+  const lines = [
+    result.success ? 'Brave search completed.' : 'Brave search failed.',
+    `Query: ${result.query}`,
+    `Searched at: ${result.searchedAt}`,
+  ];
+
+  if (result.error) {
+    lines.push(`Error: ${result.error}`);
+  }
+
+  if (result.results?.length) {
+    lines.push('Results:');
+    result.results.forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.title}`);
+      lines.push(`   URL: ${item.url}`);
+      if (item.description) {
+        lines.push(`   Snippet: ${item.description}`);
+      }
+      if (item.extraSnippets?.length) {
+        lines.push(`   Extra snippets: ${item.extraSnippets.slice(0, 3).join(' | ')}`);
+      }
+      if (item.age) {
+        lines.push(`   Age: ${item.age}`);
+      }
+      if (item.language) {
+        lines.push(`   Language: ${item.language}`);
+      }
+    });
+  } else if (result.success) {
+    lines.push('Results: none');
+  }
+
+  return lines.join('\n');
+}
+
+function createSearchSourceGroup(result: BraveSearchToolResult): SearchSourceGroup | null {
+  if (!result.success || !result.results?.length) {
+    return null;
+  }
+
+  const sources = result.results.slice(0, 5).map(toSearchSource);
+  if (!sources.length) {
+    return null;
+  }
+
+  return {
+    id: randomUUID(),
+    query: result.query,
+    searchedAt: result.searchedAt,
+    sources,
+  };
 }
 
 function formatToolResultForSynthesis(toolMessage: ChatMessage, index: number): string {
@@ -404,6 +522,8 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       ...request.messages,
     ];
     let browserTaskExecutedThisTurn = false;
+    let braveSearchCallsThisTurn = 0;
+    let fetchUrlCallsThisTurn = 0;
 
     while (true) {
       const turnResult = await provider.streamChat(request.model, baseMessages, abortController, emitStreamChunk, { tools: CHAT_TOOLS });
@@ -419,7 +539,76 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       const toolResultMessages: ChatMessage[] = [];
 
       for (const toolCall of toolCalls) {
+        if (toolCall.function.name === 'brave_search') {
+          if (braveSearchCallsThisTurn >= MAX_BRAVE_SEARCH_CALLS_PER_TURN) {
+            toolResultMessages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id || toolCall.function.name,
+              tool_name: toolCall.function.name,
+              content: [
+                'Brave search skipped.',
+                `Error: Search limit reached for this user turn (${MAX_BRAVE_SEARCH_CALLS_PER_TURN}).`,
+                'Use the existing search results to answer directly, or ask the user whether to run more searches.',
+              ].join('\n'),
+            });
+            continue;
+          }
+
+          let args: BraveSearchToolArgs;
+          try {
+            args = parseBraveSearchToolArgs(toolCall.function.arguments);
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Invalid brave_search arguments.';
+            toolResultMessages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id || toolCall.function.name,
+              tool_name: toolCall.function.name,
+              content: `Brave search failed.\nError: ${errorMessage}`,
+            });
+            continue;
+          }
+
+          braveSearchCallsThisTurn += 1;
+          const searchResult = await braveSearch(args);
+          const searchContent = formatBraveSearchToolResult(searchResult);
+          const sourceGroup = createSearchSourceGroup(searchResult);
+          if (sourceGroup) {
+            const payload: SearchSourcesEvent = {
+              assistantMessageId: request.assistantMessageId,
+              group: sourceGroup,
+            };
+            sendToRenderer('search-sources-event', payload);
+          }
+          logMainProcess('LLM', 'Brave search result returned to LLM', {
+            query: args.query,
+            success: searchResult.success,
+            resultCount: searchResult.results?.length,
+            error: searchResult.error?.slice(0, 300),
+          });
+          toolResultMessages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id || toolCall.function.name,
+            tool_name: toolCall.function.name,
+            content: searchContent,
+          });
+          continue;
+        }
+
         if (toolCall.function.name === 'fetch_url') {
+          if (fetchUrlCallsThisTurn >= MAX_FETCH_URL_CALLS_PER_TURN) {
+            toolResultMessages.push({
+              role: 'tool',
+              tool_call_id: toolCall.id || toolCall.function.name,
+              tool_name: toolCall.function.name,
+              content: [
+                'Fetch skipped.',
+                `Error: Fetch limit reached for this user turn (${MAX_FETCH_URL_CALLS_PER_TURN}).`,
+                'Use the search snippets, previous fetch results, or cited source URLs to answer directly.',
+              ].join('\n'),
+            });
+            continue;
+          }
+
           let args: FetchToolArgs;
           try {
             args = parseFetchToolArgs(toolCall.function.arguments);
@@ -434,11 +623,16 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             continue;
           }
 
+          fetchUrlCallsThisTurn += 1;
           const fetchResult = await fetchUrlContent(args);
           const fetchContent = formatFetchToolResult(fetchResult);
           logMainProcess('LLM', 'Fetch tool result returned to LLM', {
             url: args.url,
-            content: fetchContent,
+            success: fetchResult.success,
+            status: fetchResult.status,
+            contentLength: fetchResult.content?.length ?? 0,
+            error: fetchResult.error?.slice(0, 300),
+            preview: fetchContent.slice(0, 600),
           });
           toolResultMessages.push({
             role: 'tool',

@@ -267,6 +267,7 @@ h1, h2, h3, h4, h5, h6 {
 
 .message-scroll-container {
   overflow-anchor: auto;
+  overflow-x: hidden;
 }
 
 .thinking-scroll-container {
@@ -519,6 +520,76 @@ select option {
 .trail-markdown-preview,
 .trail-markdown-preview > span {
   display: inline;
+}
+
+.message-trail-bars-exit {
+  animation: messageTrailBarsExit 150ms ease-in forwards;
+}
+
+.message-trail-panel-enter {
+  animation: messageTrailPanelEnter 190ms ease-out 135ms both;
+}
+
+.message-trail-bars-enter {
+  animation: messageTrailBarsEnter 180ms ease-out 35ms both;
+}
+
+.message-trail-panel-exit {
+  animation: messageTrailPanelExit 170ms ease-in both;
+}
+
+@keyframes messageTrailBarsExit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(3rem);
+  }
+}
+
+@keyframes messageTrailBarsEnter {
+  from {
+    opacity: 0;
+    transform: translateX(3rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes messageTrailPanelEnter {
+  from {
+    opacity: 0;
+    transform: translateX(1.75rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes messageTrailPanelExit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(1.75rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-trail-bars-exit,
+  .message-trail-bars-enter,
+  .message-trail-panel-enter,
+  .message-trail-panel-exit {
+    animation-duration: 1ms;
+    animation-delay: 0ms;
+  }
 }
 
 .trail-markdown-preview strong {

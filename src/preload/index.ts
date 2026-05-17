@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { BrowserTraceEvent } from '../shared/browser';
+import type { SearchSourcesEvent } from '../shared/search';
 
 type VoiceTranscriptPayload = {
   text: string;
@@ -59,6 +60,11 @@ contextBridge.exposeInMainWorld('assistant', {
     const listener = (_event: any, event: BrowserTraceEvent) => callback(event);
     ipcRenderer.on('browser-trace-event', listener);
     return () => ipcRenderer.removeListener('browser-trace-event', listener);
+  },
+  onSearchSources: (callback: (event: SearchSourcesEvent) => void) => {
+    const listener = (_event: any, event: SearchSourcesEvent) => callback(event);
+    ipcRenderer.on('search-sources-event', listener);
+    return () => ipcRenderer.removeListener('search-sources-event', listener);
   },
   startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
   stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),

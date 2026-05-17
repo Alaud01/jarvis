@@ -4,6 +4,7 @@ import ThinkingSection from './ThinkingSection';
 import BrowserTraceSection from './BrowserTraceSection';
 import TypingIndicator from './TypingIndicator';
 import type { BrowserToolRun } from '../../shared/browser';
+import type { SearchSource, SearchSourceGroup } from '../../shared/search';
 
 interface Message {
   id: string;
@@ -12,6 +13,7 @@ interface Message {
   timestamp: Date;
   isStreaming?: boolean;
   browserRuns?: BrowserToolRun[];
+  searchSources?: SearchSourceGroup[];
 }
 
 interface MessageListProps {
@@ -333,6 +335,67 @@ const MessageActionButton: React.FC<MessageActionButtonProps> = ({ onClick, labe
   </button>
 );
 
+const getSourceInitial = (source: SearchSource): string => {
+  const label = source.profileName || source.domain || source.title;
+  return label.trim().charAt(0).toUpperCase() || '?';
+};
+
+const SearchSourceChip: React.FC<{ source: SearchSource }> = ({ source }) => {
+  const [imageFailed, setImageFailed] = useState(false);
+  const label = source.profileName || source.domain;
+  const tooltip = [source.title, source.domain, source.age].filter(Boolean).join(' | ');
+  const showFavicon = source.faviconUrl && !imageFailed;
+
+  return (
+    <a
+      href={source.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={tooltip}
+      className="inline-flex min-w-0 max-w-[180px] items-center gap-1.5 border border-border-secondary px-2 py-1 text-text-secondary hover:border-text-primary hover:text-text-primary"
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden border border-border-secondary bg-bg-secondary text-[0.55rem] font-mono uppercase text-text-muted">
+        {showFavicon ? (
+          <img
+            src={source.faviconUrl}
+            alt=""
+            className="h-4 w-4 object-cover"
+            loading="lazy"
+            onError={() => setImageFailed(true)}
+          />
+        ) : (
+          getSourceInitial(source)
+        )}
+      </span>
+      <span className="min-w-0 truncate font-mono text-[0.65rem]">
+        {label}
+      </span>
+    </a>
+  );
+};
+
+const SearchSourcesBar: React.FC<{ groups?: SearchSourceGroup[] }> = ({ groups }) => {
+  const sources = (groups ?? []).flatMap(group => group.sources);
+  const uniqueSources = sources.filter((source, index) => (
+    sources.findIndex(candidate => candidate.url === source.url) === index
+  ));
+
+  if (!uniqueSources.length) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-1">
+      <span className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-text-tertiary">
+        Sources
+      </span>
+      {uniqueSources.map(source => (
+        <SearchSourceChip key={source.url} source={source} />
+      ))}
+    </div>
+  );
+};
+
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
 const STREAMING_STICKY_BOTTOM_THRESHOLD = 50;
 
@@ -536,6 +599,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
             return (
               <div 
                 key={message.id} 
+                data-message-id={message.id}
                 ref={(el) => {
                   if (el) {
                     messageRefsRef.current.set(message.id, el);
@@ -634,6 +698,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
                         }
                         return null;
                     })}
+
+                      {message.sender === 'assistant' && (
+                        <SearchSourcesBar groups={message.searchSources} />
+                      )}
                       
                       {!message.isStreaming && !isLoading && (
                         <div className="flex items-center justify-end gap-2">

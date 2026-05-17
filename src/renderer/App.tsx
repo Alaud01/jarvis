@@ -8,6 +8,7 @@ import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
 import type { BrowserLLMTraceStep, BrowserToolRun, BrowserTraceEvent } from '../shared/browser';
+import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 
 interface Message {
   id: string;
@@ -16,6 +17,7 @@ interface Message {
   timestamp: Date;
   isStreaming?: boolean;
   browserRuns?: BrowserToolRun[];
+  searchSources?: SearchSourceGroup[];
 }
 
 interface Conversation {
@@ -38,6 +40,7 @@ interface SerializedMessage {
   sender: 'user' | 'assistant';
   timestamp: string;
   browserRuns?: BrowserToolRun[];
+  searchSources?: SearchSourceGroup[];
 }
 
 interface SerializedConversation {
@@ -54,6 +57,12 @@ interface SerializedFolder {
   timestamp: string;
 }
 
+const SCROLL_BUTTON_BOTTOM_THRESHOLD = 8;
+
+const isScrollContainerAtBottom = (container: HTMLElement) => (
+  container.scrollHeight - container.scrollTop - container.clientHeight <= SCROLL_BUTTON_BOTTOM_THRESHOLD
+);
+
 function serializeConversation(c: Conversation): SerializedConversation {
   return {
     id: c.id,
@@ -65,6 +74,7 @@ function serializeConversation(c: Conversation): SerializedConversation {
       sender: m.sender,
       timestamp: m.timestamp.toISOString(),
       browserRuns: m.browserRuns,
+      searchSources: m.searchSources,
     })),
     folderId: c.folderId,
   };
@@ -81,6 +91,7 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       sender: m.sender,
       timestamp: new Date(m.timestamp),
       browserRuns: m.browserRuns,
+      searchSources: m.searchSources,
     })),
     folderId: c.folderId ?? null,
   };
@@ -259,6 +270,7 @@ declare global {
       onDone: (callback: () => void) => () => void;
       onError: (callback: (error: string) => void) => () => void;
       onBrowserTraceEvent: (callback: (event: BrowserTraceEvent) => void) => () => void;
+      onSearchSources: (callback: (event: SearchSourcesEvent) => void) => () => void;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
@@ -678,12 +690,36 @@ const App: React.FC = () => {
       );
     };
 
+    const handleSearchSources = (event: SearchSourcesEvent) => {
+      setConversations(prev =>
+        prev.map(c => ({
+          ...c,
+          messages: c.messages.map(m => {
+            if (m.id !== event.assistantMessageId) {
+              return m;
+            }
+
+            const currentGroups = m.searchSources ?? [];
+            if (currentGroups.some(group => group.id === event.group.id)) {
+              return m;
+            }
+
+            return {
+              ...m,
+              searchSources: [...currentGroups, event.group],
+            };
+          }),
+        }))
+      );
+    };
+
     const chunkCleanup = window.assistant.onChunk(handleChunk);
     const doneCleanup = window.assistant.onDone(handleDone);
     const errorCleanup = window.assistant.onError(handleError);
     const browserTraceCleanup = window.assistant.onBrowserTraceEvent(handleBrowserTraceEvent);
+    const searchSourcesCleanup = window.assistant.onSearchSources(handleSearchSources);
 
-    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, browserTraceCleanup];
+    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, browserTraceCleanup, searchSourcesCleanup];
 
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
@@ -694,14 +730,35 @@ const App: React.FC = () => {
   const messages = currentConversation?.messages || [];
 
   useEffect(() => {
-    const checkScrollButton = () => {
+    const container = chatScrollContainerRef.current;
+
+    const updateScrollButton = () => {
       const isStreaming = messages.some(m => m.isStreaming);
+      if (!isStreaming || !container) {
+        setShowScrollButton(false);
+        return;
+      }
+
+      const atBottom = isScrollContainerAtBottom(container);
+      if (atBottom) {
+        messageListRef.current?.enableAutoScroll();
+      }
+
       const autoScrollEnabled = messageListRef.current?.isAutoScrollEnabled() ?? true;
-      setShowScrollButton(isStreaming && !autoScrollEnabled);
+      setShowScrollButton(!atBottom && !autoScrollEnabled);
     };
 
-    const intervalId = setInterval(checkScrollButton, 100);
-    return () => clearInterval(intervalId);
+    updateScrollButton();
+    const animationFrameId = requestAnimationFrame(updateScrollButton);
+
+    container?.addEventListener('scroll', updateScrollButton, { passive: true });
+    window.addEventListener('resize', updateScrollButton);
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      container?.removeEventListener('scroll', updateScrollButton);
+      window.removeEventListener('resize', updateScrollButton);
+    };
   }, [messages]);
 
   const generateTitleFallback = (text: string): string => {
@@ -819,6 +876,10 @@ const App: React.FC = () => {
       if (e.metaKey && e.shiftKey && e.key === 'o') {
         e.preventDefault();
         handleNewChat();
+      }
+      if (e.metaKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setSidebarOpen(prev => !prev);
       }
       if (e.metaKey && e.shiftKey && e.key === 'Backspace') {
         e.preventDefault();
@@ -1251,7 +1312,11 @@ const App: React.FC = () => {
                 onResubmitMessage={handleResubmitMessage}
                 onRegenerateResponse={handleRegenerateResponse}
               />
-              <MessageTrail messages={messages} onScrollToMessage={handleScrollToMessage} />
+              <MessageTrail
+                messages={messages}
+                scrollContainerRef={chatScrollContainerRef}
+                onScrollToMessage={handleScrollToMessage}
+              />
               {showScrollButton && <ScrollToBottomButton onClick={handleScrollToBottom} />}
             </div>
             
