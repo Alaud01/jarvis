@@ -150,4 +150,4 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
   );
 };
 
-export default MarkdownRenderer;
+export default React.memo(MarkdownRenderer);

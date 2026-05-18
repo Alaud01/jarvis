@@ -434,7 +434,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
       tabIndex={0}
       role="navigation"
       aria-label="Message headers"
-      className="relative w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
+      className="relative z-[200] w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
       onMouseEnter={expandTrail}
       onMouseLeave={collapseTrail}
       onFocusCapture={expandTrail}
@@ -458,7 +458,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
             />
           </div>
           <div
-            className={`fixed right-3 top-12 bottom-4 z-[100] w-[280px] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
+            className={`fixed right-3 top-12 bottom-4 z-[200] w-[280px] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
               isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
             }`}
           >

@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import tempfile
 import time
 from math import gcd
@@ -11,7 +10,7 @@ from urllib import request as urllib_request
 import numpy as np
 import soundfile as sf
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.responses import JSONResponse
 import onnx_asr
 import onnxruntime as rt
@@ -23,11 +22,17 @@ VAD_MIN_SILENCE_MS = 700
 VAD_MIN_SPEECH_MS = 250
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
 OLLAMA_TIMEOUT_SECONDS = 3
+OLLAMA_REFINEMENT_KEEP_ALIVE = 0
 TARGET_SAMPLE_RATE = 16000
 TRANSCRIBE_SEGMENT_PADDING_MS = 250
 TRANSCRIBE_SEGMENT_PADDING_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_SEGMENT_PADDING_MS // 1000
 TRANSCRIBE_SEGMENT_GAP_MS = 250
 TRANSCRIBE_SEGMENT_GAP_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_SEGMENT_GAP_MS // 1000
+MAX_UPLOAD_BYTES = int(os.environ.get("VOICE_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+MAX_RECORDING_SECONDS = float(os.environ.get("VOICE_MAX_RECORDING_SECONDS", "300"))
+MAX_COMPACT_TRANSCRIPTION_SECONDS = float(os.environ.get("VOICE_MAX_COMPACT_TRANSCRIPTION_SECONDS", "45"))
+MAX_COMPACT_TRANSCRIPTION_SAMPLES = int(TARGET_SAMPLE_RATE * MAX_COMPACT_TRANSCRIPTION_SECONDS)
+UPLOAD_COPY_CHUNK_BYTES = 1024 * 1024
 asr_model = None
 vad_model = None
 
@@ -64,8 +69,62 @@ def load_models():
     print("[VoiceService] Silero VAD ONNX loaded successfully")
 
 
+def copy_upload_to_temp(file: UploadFile, suffix: str) -> tuple[str, int]:
+    """Copy an upload to disk while enforcing a hard byte limit."""
+    total_bytes = 0
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            temp_path = tmp.name
+            while True:
+                chunk = file.file.read(UPLOAD_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"Audio upload too large ({total_bytes} bytes, max: {MAX_UPLOAD_BYTES} bytes)",
+                    )
+
+                tmp.write(chunk)
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
+
+    return temp_path, total_bytes
+
+
+def ensure_audio_within_limits(audio_path: str) -> None:
+    info = sf.info(audio_path)
+    duration_seconds = info.duration
+    if duration_seconds > MAX_RECORDING_SECONDS:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                f"Recording too long ({duration_seconds:.1f}s, "
+                f"max: {MAX_RECORDING_SECONDS:.1f}s)"
+            ),
+        )
+
+
+def clip_in_place(wav: np.ndarray) -> np.ndarray:
+    if wav.size == 0:
+        return wav
+
+    if np.nanmin(wav) < -1.0 or np.nanmax(wav) > 1.0:
+        np.clip(wav, -1.0, 1.0, out=wav)
+
+    return wav
+
+
 def load_audio(audio_path: str) -> np.ndarray:
     """Load audio and keep all preprocessing on CPU."""
+    ensure_audio_within_limits(audio_path)
+
     wav, sr = sf.read(audio_path, dtype="float32")
     if wav.ndim > 1:
         wav = wav.mean(axis=1, dtype=np.float32)
@@ -79,8 +138,11 @@ def load_audio(audio_path: str) -> np.ndarray:
         wav = resample_poly(wav, TARGET_SAMPLE_RATE // rate_gcd, sr // rate_gcd)
         wav = wav.astype(np.float32, copy=False)
 
-    wav = np.clip(wav, -1.0, 1.0)
-    return np.ascontiguousarray(wav)
+    wav = clip_in_place(wav)
+    if not wav.flags.c_contiguous:
+        wav = np.ascontiguousarray(wav)
+
+    return wav
 
 
 def detect_speech_segments(wav: np.ndarray) -> tuple[list[tuple[int, int]], float]:
@@ -90,9 +152,8 @@ def detect_speech_segments(wav: np.ndarray) -> tuple[list[tuple[int, int]], floa
     if wav.size == 0:
         return [], 0.0
 
-    vad_input = np.ascontiguousarray(np.clip(wav, -1.0, 1.0), dtype=np.float32)
     speech_timestamps = get_speech_timestamps(
-        vad_input,
+        wav,
         vad_model,
         threshold=VAD_THRESHOLD,
         min_silence_duration_ms=VAD_MIN_SILENCE_MS,
@@ -122,9 +183,13 @@ def build_transcription_audio(
     total_samples: int,
 ) -> np.ndarray:
     """Build one compact speech buffer for ASR without chunking boundaries."""
-    if not speech_segments:
-        return np.empty(0, dtype=np.float32)
+    return build_transcription_chunk(wav, merge_padded_speech_segments(speech_segments, total_samples))
 
+
+def merge_padded_speech_segments(
+    speech_segments: list[tuple[int, int]],
+    total_samples: int,
+) -> list[tuple[int, int]]:
     padded_segments: list[tuple[int, int]] = []
     for start, end in speech_segments:
         padded_start = max(0, start - TRANSCRIBE_SEGMENT_PADDING_SAMPLES)
@@ -133,7 +198,7 @@ def build_transcription_audio(
             padded_segments.append((padded_start, padded_end))
 
     if not padded_segments:
-        return np.empty(0, dtype=np.float32)
+        return []
 
     merged_segments: list[list[int]] = [[*padded_segments[0]]]
     for start, end in padded_segments[1:]:
@@ -143,28 +208,114 @@ def build_transcription_audio(
         else:
             merged_segments.append([start, end])
 
-    speech_parts: list[np.ndarray] = []
-    gap = np.zeros(TRANSCRIBE_SEGMENT_GAP_SAMPLES, dtype=np.float32)
-    for index, (start, end) in enumerate(merged_segments):
-        if index > 0:
-            speech_parts.append(gap)
-        speech_parts.append(wav[start:end])
+    return [(start, end) for start, end in merged_segments]
 
-    return np.ascontiguousarray(np.concatenate(speech_parts), dtype=np.float32)
+
+def compact_sample_count(segments: list[tuple[int, int]]) -> int:
+    if not segments:
+        return 0
+
+    speech_samples = sum(end - start for start, end in segments)
+    gap_samples = TRANSCRIBE_SEGMENT_GAP_SAMPLES * (len(segments) - 1)
+    return speech_samples + gap_samples
+
+
+def build_transcription_chunk(wav: np.ndarray, segments: list[tuple[int, int]]) -> np.ndarray:
+    if not segments:
+        return np.empty(0, dtype=np.float32)
+
+    if len(segments) == 1:
+        start, end = segments[0]
+        chunk = wav[start:end]
+        if chunk.dtype == np.float32 and chunk.flags.c_contiguous:
+            return chunk
+        return np.ascontiguousarray(chunk, dtype=np.float32)
+
+    chunk_samples = compact_sample_count(segments)
+    chunk = np.empty(chunk_samples, dtype=np.float32)
+    offset = 0
+    for index, (start, end) in enumerate(segments):
+        if index > 0:
+            gap_end = offset + TRANSCRIBE_SEGMENT_GAP_SAMPLES
+            chunk[offset:gap_end].fill(0)
+            offset = gap_end
+
+        segment = wav[start:end]
+        segment_end = offset + segment.shape[0]
+        chunk[offset:segment_end] = segment
+        offset = segment_end
+
+    return chunk
+
+
+def iter_transcription_chunks(
+    wav: np.ndarray,
+    speech_segments: list[tuple[int, int]],
+) -> tuple[list[np.ndarray], float]:
+    """Return bounded ASR chunks and their compact duration in seconds."""
+    merged_segments = merge_padded_speech_segments(speech_segments, wav.shape[0])
+    if not merged_segments:
+        return [], 0.0
+
+    total_compact_samples = compact_sample_count(merged_segments)
+    if total_compact_samples <= MAX_COMPACT_TRANSCRIPTION_SAMPLES:
+        return [build_transcription_chunk(wav, merged_segments)], total_compact_samples / TARGET_SAMPLE_RATE
+
+    chunks: list[np.ndarray] = []
+    current_segments: list[tuple[int, int]] = []
+    current_samples = 0
+
+    for segment in merged_segments:
+        segment_samples = segment[1] - segment[0]
+        additional_samples = segment_samples
+        if current_segments:
+            additional_samples += TRANSCRIBE_SEGMENT_GAP_SAMPLES
+
+        if current_segments and current_samples + additional_samples > MAX_COMPACT_TRANSCRIPTION_SAMPLES:
+            chunks.append(build_transcription_chunk(wav, current_segments))
+            current_segments = []
+            current_samples = 0
+            additional_samples = segment_samples
+
+        current_segments.append(segment)
+        current_samples += additional_samples
+
+    if current_segments:
+        chunks.append(build_transcription_chunk(wav, current_segments))
+
+    return chunks, total_compact_samples / TARGET_SAMPLE_RATE
 
 
 def transcribe_audio(wav: np.ndarray, speech_segments: list[tuple[int, int]]) -> str:
-    """Transcribe detected speech as one compact utterance."""
+    """Transcribe detected speech, chunking very long recordings to bound peak memory."""
     global asr_model
 
-    transcription_audio = build_transcription_audio(wav, speech_segments, wav.shape[0])
-    if transcription_audio.size == 0:
+    transcription_chunks, duration_seconds = iter_transcription_chunks(wav, speech_segments)
+    if not transcription_chunks:
         return ""
 
-    duration_seconds = transcription_audio.shape[0] / TARGET_SAMPLE_RATE
-    print(f"[VoiceService] Transcribing compact utterance ({duration_seconds:.2f}s of audio)")
+    if len(transcription_chunks) == 1:
+        print(f"[VoiceService] Transcribing compact utterance ({duration_seconds:.2f}s of audio)")
+    else:
+        print(
+            f"[VoiceService] Transcribing {len(transcription_chunks)} chunks "
+            f"({duration_seconds:.2f}s compact audio)"
+        )
 
-    return asr_model.recognize(transcription_audio, sample_rate=TARGET_SAMPLE_RATE).strip()
+    transcripts: list[str] = []
+    for index, transcription_audio in enumerate(transcription_chunks):
+        if len(transcription_chunks) > 1:
+            chunk_seconds = transcription_audio.shape[0] / TARGET_SAMPLE_RATE
+            print(
+                f"[VoiceService] Transcribing chunk {index + 1}/{len(transcription_chunks)} "
+                f"({chunk_seconds:.2f}s)"
+            )
+
+        transcript = asr_model.recognize(transcription_audio, sample_rate=TARGET_SAMPLE_RATE).strip()
+        if transcript:
+            transcripts.append(transcript)
+
+    return " ".join(transcripts).strip()
 
 
 def refine_with_gemma(raw_text: str) -> str:
@@ -189,6 +340,7 @@ def refine_with_gemma(raw_text: str) -> str:
             ],
             "stream": False,
             "think": False,
+            "keep_alive": OLLAMA_REFINEMENT_KEEP_ALIVE,
             "options": {
                 "num_ctx": 2048,
             },
@@ -257,11 +409,9 @@ async def process_flow(file: UploadFile = File(...)):
     
     try:
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            temp_path = tmp.name
-            shutil.copyfileobj(file.file, tmp)
+        temp_path, upload_bytes = copy_upload_to_temp(file, suffix)
         
-        print(f"[VoiceService] Processing audio file: {temp_path}")
+        print(f"[VoiceService] Processing audio file: {temp_path} ({upload_bytes} bytes)")
         wav = load_audio(temp_path)
         speech_segments, speech_duration = detect_speech_segments(wav)
         
@@ -303,14 +453,15 @@ async def process_flow(file: UploadFile = File(...)):
         )
         
     except Exception as e:
+        status_code = e.status_code if isinstance(e, HTTPException) else 500
         print(f"[VoiceService] Error processing audio: {e}")
         return JSONResponse(
             content={
                 "text": "",
-                "error": str(e),
+                "error": e.detail if isinstance(e, HTTPException) else str(e),
                 "success": False
             },
-            status_code=500
+            status_code=status_code
         )
     finally:
         if temp_path and os.path.exists(temp_path):
@@ -324,9 +475,7 @@ async def transcribe_only(file: UploadFile = File(...)):
     
     try:
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            temp_path = tmp.name
-            shutil.copyfileobj(file.file, tmp)
+        temp_path, _upload_bytes = copy_upload_to_temp(file, suffix)
         
         wav = load_audio(temp_path)
         speech_segments, speech_duration = detect_speech_segments(wav)
@@ -349,9 +498,14 @@ async def transcribe_only(file: UploadFile = File(...)):
         )
         
     except Exception as e:
+        status_code = e.status_code if isinstance(e, HTTPException) else 500
         return JSONResponse(
-            content={"text": "", "error": str(e), "success": False},
-            status_code=500
+            content={
+                "text": "",
+                "error": e.detail if isinstance(e, HTTPException) else str(e),
+                "success": False,
+            },
+            status_code=status_code
         )
     finally:
         if temp_path and os.path.exists(temp_path):

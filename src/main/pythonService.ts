@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
+import type { RecordedAudio } from './audioRecorder';
 
 const PYTHON_SERVICE_PORT = 8000;
 const PYTHON_SERVICE_HOST = '127.0.0.1';
@@ -147,7 +148,59 @@ export function isPythonServiceReady(): boolean {
   return isServiceReady;
 }
 
-export async function processVoiceFlow(audioBuffer: Buffer): Promise<{
+type UploadableAudio = Buffer | RecordedAudio;
+
+function getAudioUploadParts(audio: UploadableAudio): {
+  chunks: Iterable<Uint8Array>;
+  byteLength: number;
+  filename: string;
+  contentType: string;
+} {
+  if (Buffer.isBuffer(audio)) {
+    return {
+      chunks: [audio],
+      byteLength: audio.byteLength,
+      filename: 'audio.wav',
+      contentType: 'audio/wav',
+    };
+  }
+
+  return {
+    chunks: audio.chunks,
+    byteLength: audio.byteLength,
+    filename: audio.filename,
+    contentType: audio.contentType,
+  };
+}
+
+function createMultipartUpload(audio: UploadableAudio): {
+  boundary: string;
+  contentLength: number;
+  body: AsyncIterable<Uint8Array>;
+} {
+  const { chunks, byteLength, filename, contentType } = getAudioUploadParts(audio);
+  const boundary = `----WebKitFormBoundary${Math.random().toString(16).slice(2)}`;
+  const header = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`
+  );
+  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+
+  async function* body(): AsyncIterable<Uint8Array> {
+    yield header;
+    for (const chunk of chunks) {
+      yield chunk;
+    }
+    yield footer;
+  }
+
+  return {
+    boundary,
+    contentLength: header.byteLength + byteLength + footer.byteLength,
+    body: body(),
+  };
+}
+
+export async function processVoiceFlow(audioBuffer: UploadableAudio): Promise<{
   text: string;
   raw_text?: string;
   speech_duration_ms?: number;
@@ -157,22 +210,16 @@ export async function processVoiceFlow(audioBuffer: Buffer): Promise<{
   const url = `http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/process-flow`;
   
   try {
-    const boundary = `----WebKitFormBoundary${Math.random().toString(16).slice(2)}`;
-    const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
-    const footer = `\r\n--${boundary}--\r\n`;
-    
-    const body = Buffer.concat([
-      Buffer.from(header),
-      audioBuffer,
-      Buffer.from(footer),
-    ]);
+    const upload = createMultipartUpload(audioBuffer);
     
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Type': `multipart/form-data; boundary=${upload.boundary}`,
+        'Content-Length': String(upload.contentLength),
       },
-      body,
+      body: upload.body,
+      duplex: 'half',
       signal: AbortSignal.timeout(60000),
     });
     
@@ -201,7 +248,7 @@ export async function processVoiceFlow(audioBuffer: Buffer): Promise<{
   }
 }
 
-export async function transcribeOnly(audioBuffer: Buffer): Promise<{
+export async function transcribeOnly(audioBuffer: UploadableAudio): Promise<{
   text: string;
   success: boolean;
   error?: string;
@@ -209,22 +256,16 @@ export async function transcribeOnly(audioBuffer: Buffer): Promise<{
   const url = `http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/transcribe-only`;
   
   try {
-    const boundary = `----WebKitFormBoundary${Math.random().toString(16).slice(2)}`;
-    const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n`;
-    const footer = `\r\n--${boundary}--\r\n`;
-    
-    const body = Buffer.concat([
-      Buffer.from(header),
-      audioBuffer,
-      Buffer.from(footer),
-    ]);
+    const upload = createMultipartUpload(audioBuffer);
     
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Type': `multipart/form-data; boundary=${upload.boundary}`,
+        'Content-Length': String(upload.contentLength),
       },
-      body,
+      body: upload.body,
+      duplex: 'half',
       signal: AbortSignal.timeout(60000),
     });
     

@@ -5,6 +5,9 @@ const MAX_TIMEOUT_MS = 45000;
 const FETCH_USER_AGENT = 'Jarvis/1.0 (+desktop assistant fetch tool)';
 const MIN_GLOBAL_FETCH_INTERVAL_MS = 900;
 const MIN_DOMAIN_FETCH_INTERVAL_MS = 3000;
+const MIN_RESPONSE_READ_BYTES = 256 * 1024;
+const MAX_RESPONSE_READ_BYTES = 1024 * 1024;
+const HARD_CONTENT_LENGTH_REJECT_BYTES = 5 * 1024 * 1024;
 
 const FETCH_AVOID_HOST_PATTERNS = [
   /(^|\.)medium\.com$/i,
@@ -267,6 +270,71 @@ function inferContentType(contentTypeHeader: string | null, content: string): st
   return undefined;
 }
 
+function getResponseReadByteLimit(maxChars: number): number {
+  return Math.min(
+    MAX_RESPONSE_READ_BYTES,
+    Math.max(MIN_RESPONSE_READ_BYTES, maxChars * 12)
+  );
+}
+
+function parseContentLength(headers: Headers): number | null {
+  const rawContentLength = headers.get('content-length');
+  if (!rawContentLength) {
+    return null;
+  }
+
+  const contentLength = Number.parseInt(rawContentLength, 10);
+  return Number.isFinite(contentLength) && contentLength >= 0 ? contentLength : null;
+}
+
+async function readResponseTextWithLimit(response: Response, byteLimit: number): Promise<{ text: string; truncated: boolean }> {
+  if (!response.body) {
+    return { text: '', truncated: false };
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = '';
+  let truncated = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      if (!value) {
+        continue;
+      }
+
+      const remainingBytes = byteLimit - bytesRead;
+      if (remainingBytes <= 0) {
+        truncated = true;
+        await reader.cancel();
+        break;
+      }
+
+      if (value.byteLength > remainingBytes) {
+        text += decoder.decode(value.slice(0, remainingBytes), { stream: true });
+        bytesRead += remainingBytes;
+        truncated = true;
+        await reader.cancel();
+        break;
+      }
+
+      text += decoder.decode(value, { stream: true });
+      bytesRead += value.byteLength;
+    }
+
+    text += decoder.decode();
+    return { text, truncated };
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function detectBotChallenge(content: string, status?: number): string | null {
   const sample = content.slice(0, 12000);
   const matched = BOT_CHALLENGE_PATTERNS.some(pattern => pattern.test(sample));
@@ -305,6 +373,7 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
   }
 
   const maxChars = clampMaxChars(args.maxChars);
+  const responseReadByteLimit = getResponseReadByteLimit(maxChars);
   const timeoutMs = clampTimeoutMs();
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
@@ -323,7 +392,44 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
     });
 
     const finalUrl = response.url || requestedUrl;
-    const rawBody = await response.text();
+    const contentLength = parseContentLength(response.headers);
+    const contentTypeHeader = response.headers.get('content-type');
+    const headerContentType = contentTypeHeader?.split(';')[0]?.trim();
+
+    if (contentLength !== null && contentLength > HARD_CONTENT_LENGTH_REJECT_BYTES) {
+      return {
+        success: false,
+        requestedUrl,
+        finalUrl,
+        status: response.status,
+        statusText: response.statusText,
+        contentType: headerContentType,
+        fetchedAt,
+        error: `Response is too large to fetch safely (${contentLength} bytes; limit is ${HARD_CONTENT_LENGTH_REJECT_BYTES} bytes).`,
+      };
+    }
+
+    const unsupportedContentType = headerContentType
+      && !/html|xhtml/i.test(headerContentType)
+      && !/(application|text)\/([a-z0-9.+-]*\+)?json/i.test(headerContentType)
+      && !/^text\//i.test(headerContentType)
+      && !/xml/i.test(headerContentType);
+
+    if (unsupportedContentType) {
+      return {
+        success: false,
+        requestedUrl,
+        finalUrl,
+        status: response.status,
+        statusText: response.statusText,
+        contentType: headerContentType,
+        fetchedAt,
+        error: `Unsupported content type: ${headerContentType}`,
+      };
+    }
+
+    const rawRead = await readResponseTextWithLimit(response, responseReadByteLimit);
+    const rawBody = rawRead.text;
     const contentType = inferContentType(response.headers.get('content-type'), rawBody);
     const botChallengeError = detectBotChallenge(rawBody, response.status);
 
@@ -365,7 +471,7 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
         contentType,
         title: extractTitleFromHtml(rawBody),
         content: truncated.content,
-        truncated: truncated.truncated,
+        truncated: rawRead.truncated || truncated.truncated,
         fetchedAt,
       };
     }
@@ -408,7 +514,7 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
       contentType,
       title,
       content: truncated.content,
-      truncated: truncated.truncated,
+      truncated: rawRead.truncated || truncated.truncated,
       fetchedAt,
     };
   } catch (error) {

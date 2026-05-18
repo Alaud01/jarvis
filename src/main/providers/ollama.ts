@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   ModelInfo,
   Provider,
+  SendChatOptions,
   StreamChatTurnOptions,
   StreamChunk,
   StreamTurnResult,
@@ -68,11 +69,16 @@ export class OllamaProvider implements Provider {
     }
   }
 
-  async sendChat(model: string, messages: ChatMessage[]): Promise<string> {
+  async sendChat(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string> {
+    const requestBody: Record<string, unknown> = { model, messages, stream: false };
+    if (options?.keepAlive !== undefined) {
+      requestBody.keep_alive = options.keepAlive;
+    }
+
     const response = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
@@ -102,6 +108,10 @@ export class OllamaProvider implements Provider {
       think: true,
       options: { num_predict: 64000 },
     };
+
+    if (options?.keepAlive !== undefined) {
+      requestBody.keep_alive = options.keepAlive;
+    }
 
     if (requestTools) {
       requestBody.tools = requestTools;

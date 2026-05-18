@@ -18,6 +18,8 @@ BROWSER_SERVICE_PORT = int(os.environ.get("BROWSER_SERVICE_PORT", "8001"))
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 MAX_AGENT_STEPS = int(os.environ.get("BROWSER_MAX_STEPS", "50"))
 DEFAULT_PLANNER_MODEL = os.environ.get("BROWSER_PLANNER_MODEL", "deepseek-v4-flash:cloud")
+MAIN_MODEL_KEEP_ALIVE = os.environ.get("BROWSER_MODEL_KEEP_ALIVE", "2m")
+PLANNER_MODEL_KEEP_ALIVE = os.environ.get("BROWSER_PLANNER_KEEP_ALIVE", "0")
 AGENT_LLM_TIMEOUT = int(os.environ.get("BROWSER_LLM_TIMEOUT", "180"))
 AGENT_STEP_TIMEOUT = max(int(os.environ.get("BROWSER_STEP_TIMEOUT", "300")), AGENT_LLM_TIMEOUT + 60)
 BROWSER_VISION_MODE = os.environ.get("BROWSER_USE_VISION", "auto").strip().lower()
@@ -61,6 +63,11 @@ _session_lock = asyncio.Lock()
 _task_start_lock = asyncio.Lock()
 _chromium_path: str | None = None
 _persistent_session = None
+
+
+def parse_keep_alive(value: str) -> str | int:
+    normalized = value.strip()
+    return 0 if normalized == "0" else normalized
 
 
 class BrowserTaskRequest(BaseModel):
@@ -366,7 +373,7 @@ async def run_browser_agent(
                 timeout=300,
                 ollama_options={"temperature": 0},
             )
-            llm = RobustChatOllama(raw_llm)
+            llm = RobustChatOllama(raw_llm, keep_alive=parse_keep_alive(MAIN_MODEL_KEEP_ALIVE))
             print(f"[BrowserService] RobustChatOllama wrapper created successfully for model={model}")
         except Exception as e:
             import traceback
@@ -397,7 +404,7 @@ async def run_browser_agent(
                 timeout=120,
                 ollama_options={"temperature": 0},
             )
-            planner_llm = RobustChatOllama(raw_planner)
+            planner_llm = RobustChatOllama(raw_planner, keep_alive=parse_keep_alive(PLANNER_MODEL_KEEP_ALIVE))
             print(f"[BrowserService] Using planner model: {effective_planner_model}")
         except Exception as e:
             print(f"[BrowserService] Warning: Could not initialize planner model '{effective_planner_model}': {e}")

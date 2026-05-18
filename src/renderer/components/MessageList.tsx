@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHandle, forwardRef, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHandle, forwardRef, useState, useMemo } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
 import BrowserTraceSection from './BrowserTraceSection';
@@ -279,6 +279,45 @@ const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegme
   return collapseAdjacentThinkingSegments(rawSegments);
 };
 
+const PARSED_MESSAGE_CACHE_LIMIT = 300;
+const parsedMessageCache = new Map<string, {
+  text: string;
+  isStreaming?: boolean;
+  browserRuns?: BrowserToolRun[];
+  items: MessageRenderItem[];
+}>();
+
+const getCachedMessageRenderItems = (message: Message): MessageRenderItem[] => {
+  const cached = parsedMessageCache.get(message.id);
+  if (
+    cached
+    && cached.text === message.text
+    && cached.isStreaming === message.isStreaming
+    && cached.browserRuns === message.browserRuns
+  ) {
+    parsedMessageCache.delete(message.id);
+    parsedMessageCache.set(message.id, cached);
+    return cached.items;
+  }
+
+  const segments = parseMessageSegments(message.text, message.isStreaming);
+  const items = buildMessageRenderItems(segments, message.browserRuns);
+  parsedMessageCache.set(message.id, {
+    text: message.text,
+    isStreaming: message.isStreaming,
+    browserRuns: message.browserRuns,
+    items,
+  });
+
+  while (parsedMessageCache.size > PARSED_MESSAGE_CACHE_LIMIT) {
+    const oldestKey = parsedMessageCache.keys().next().value;
+    if (!oldestKey) break;
+    parsedMessageCache.delete(oldestKey);
+  }
+
+  return items;
+};
+
 const CopyIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -396,8 +435,187 @@ const SearchSourcesBar: React.FC<{ groups?: SearchSourceGroup[] }> = ({ groups }
   );
 };
 
+const formatMessageTime = (date: Date): string => {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+interface MessageRowProps {
+  message: Message;
+  isEditing: boolean;
+  editText: string;
+  copiedId: string | null;
+  isLoading: boolean;
+  setMessageRef: (messageId: string, element: HTMLDivElement | null) => void;
+  setEditText: (text: string) => void;
+  onCopy: (messageId: string, text: string) => void;
+  onStartEdit: (messageId: string, text: string) => void;
+  onCancelEdit: () => void;
+  onResubmit: (messageId: string) => void;
+  onRegenerate: (messageId: string) => void;
+  onAutoScrollCancel: () => void;
+  onAutoScrollReactivate: () => void;
+}
+
+const MessageRow = React.memo(({
+  message,
+  isEditing,
+  editText,
+  copiedId,
+  isLoading,
+  setMessageRef,
+  setEditText,
+  onCopy,
+  onStartEdit,
+  onCancelEdit,
+  onResubmit,
+  onRegenerate,
+  onAutoScrollCancel,
+  onAutoScrollReactivate,
+}: MessageRowProps) => {
+  const renderItems = useMemo(() => getCachedMessageRenderItems(message), [message]);
+
+  return (
+    <div
+      data-message-id={message.id}
+      ref={(el) => setMessageRef(message.id, el)}
+      className={`flex flex-col gap-2 last:border-b-0 ${message.sender === 'user' ? 'px-2 py-2 border border-border-secondary rounded bg-bg-secondary' : 'border-b border-border-primary py-4'}`}
+    >
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-[0.6rem] uppercase tracking-[0.15em] text-text-primary">
+          {message.sender === 'user' ? 'you' : 'jarvis'}
+        </span>
+        <span className="font-mono text-[0.65rem] text-text-tertiary">
+          {formatMessageTime(message.timestamp)}
+        </span>
+        {message.isStreaming && (
+          <span className="font-mono text-[0.65rem] text-text-muted animate-pulse">
+            streaming...
+          </span>
+        )}
+      </div>
+
+      {isEditing ? (
+        <div className="flex flex-col gap-3">
+          <textarea
+            className="w-full min-h-[60px] border border-text-primary bg-transparent p-3 text-base text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
+            value={editText}
+            onChange={(e) => setEditText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                onResubmit(message.id);
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                onCancelEdit();
+              }
+            }}
+            autoFocus
+          />
+          <div className="flex items-center justify-end gap-2">
+            <span className="font-mono text-[0.65rem] text-text-tertiary mr-auto">
+              Cmd + Enter to submit · Esc to cancel
+            </span>
+            <MessageActionButton
+              onClick={() => onCopy(message.id, editText)}
+              label={copiedId === message.id ? 'Copied' : 'Copy'}
+              icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
+            />
+            <MessageActionButton
+              onClick={onCancelEdit}
+              label="Cancel"
+              icon={<XIcon />}
+            />
+            <MessageActionButton
+              onClick={() => onResubmit(message.id)}
+              label="Submit"
+              icon={<CheckIcon />}
+              variant="primary"
+            />
+          </div>
+        </div>
+      ) : (
+        <>
+          {renderItems.map((item) => {
+            if (item.renderType === 'browserRun') {
+              return (
+                <BrowserTraceSection
+                  key={item.key}
+                  run={item.run}
+                  onAutoScrollCancel={onAutoScrollCancel}
+                  onAutoScrollReactivate={onAutoScrollReactivate}
+                />
+              );
+            }
+
+            const segment = item;
+            if (segment.type === 'thinking' && segment.text) {
+              return (
+                <ThinkingSection
+                  key={item.key}
+                  content={segment.text}
+                  isStreaming={segment.isThinkingInProgress}
+                  onAutoScrollCancel={onAutoScrollCancel}
+                  onAutoScrollReactivate={onAutoScrollReactivate}
+                />
+              );
+            }
+            if (segment.type === 'content' && segment.text) {
+              return (
+                <div key={item.key} className="text-base text-text-primary leading-[1.8]">
+                  <MarkdownRenderer content={segment.text} />
+                </div>
+              );
+            }
+            return null;
+          })}
+
+          {message.sender === 'assistant' && (
+            <SearchSourcesBar groups={message.searchSources} />
+          )}
+
+          {!message.isStreaming && !isLoading && (
+            <div className="flex items-center justify-end gap-2">
+              {message.sender === 'user' ? (
+                <>
+                  <MessageActionButton
+                    onClick={() => onCopy(message.id, message.text)}
+                    label={copiedId === message.id ? 'Copied' : 'Copy'}
+                    icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
+                  />
+                  <MessageActionButton
+                    onClick={() => onStartEdit(message.id, message.text)}
+                    label="Edit"
+                    icon={<PencilIcon />}
+                  />
+                </>
+              ) : (
+                <>
+                  <MessageActionButton
+                    onClick={() => onCopy(message.id, message.text)}
+                    label={copiedId === message.id ? 'Copied' : 'Copy'}
+                    icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
+                  />
+                  <MessageActionButton
+                    onClick={() => onRegenerate(message.id)}
+                    label="Regenerate"
+                    icon={<RefreshIcon />}
+                  />
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+});
+
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
 const STREAMING_STICKY_BOTTOM_THRESHOLD = 50;
+const VIRTUALIZATION_THRESHOLD = 80;
+const VIRTUALIZATION_OVERSCAN = 8;
+const DEFAULT_MESSAGE_HEIGHT = 180;
 
 const isNearBottom = (
   container: HTMLElement,
@@ -409,6 +627,30 @@ const isNearBottom = (
 interface ScrollSnapshot {
   shouldMaintain: boolean;
 }
+
+const estimateMessageHeight = (message: Message): number => {
+  const lineEstimate = Math.ceil(message.text.length / 88);
+  const toolEstimate = (message.browserRuns?.length ?? 0) * 120;
+  const sourcesEstimate = message.searchSources?.length ? 44 : 0;
+  const baseHeight = message.sender === 'user' ? 74 : 112;
+  return Math.max(baseHeight, baseHeight + lineEstimate * 28 + toolEstimate + sourcesEstimate);
+};
+
+const findOffsetIndex = (offsets: number[], target: number): number => {
+  let low = 0;
+  let high = offsets.length - 1;
+
+  while (low < high) {
+    const middle = Math.floor((low + high + 1) / 2);
+    if (offsets[middle] <= target) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return low;
+};
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(({ 
   messages, 
@@ -423,6 +665,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const messageRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const autoScrollEnabledRef = useRef(true);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
+  const measuredHeightsRef = useRef<Map<string, number>>(new Map());
+  const [heightVersion, setHeightVersion] = useState(0);
+  const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 0 });
 
   const setAutoScrollEnabled = useCallback((enabled: boolean) => {
     autoScrollEnabledRef.current = enabled;
@@ -442,6 +687,108 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       reactivateAutoScroll();
     }
   }, [reactivateAutoScroll, scrollContainerRef]);
+
+  const heightOffsets = useMemo(() => {
+    let total = 0;
+    const offsets = messages.map(message => {
+      const offset = total;
+      total += measuredHeightsRef.current.get(message.id) ?? estimateMessageHeight(message);
+      return offset;
+    });
+
+    return {
+      offsets,
+      totalHeight: total,
+    };
+  }, [messages, heightVersion]);
+
+  const shouldVirtualize = messages.length > VIRTUALIZATION_THRESHOLD;
+  const virtualRange = useMemo(() => {
+    if (!shouldVirtualize) {
+      return {
+        start: 0,
+        end: messages.length,
+        topPadding: 0,
+        bottomPadding: 0,
+      };
+    }
+
+    const viewportStart = Math.max(0, virtualViewport.scrollTop - DEFAULT_MESSAGE_HEIGHT * VIRTUALIZATION_OVERSCAN);
+    const viewportEnd = virtualViewport.scrollTop
+      + virtualViewport.height
+      + DEFAULT_MESSAGE_HEIGHT * VIRTUALIZATION_OVERSCAN;
+    const start = Math.max(0, findOffsetIndex(heightOffsets.offsets, viewportStart));
+    const end = Math.min(
+      messages.length,
+      findOffsetIndex(heightOffsets.offsets, viewportEnd) + VIRTUALIZATION_OVERSCAN + 1
+    );
+    const renderedEndOffset = end < messages.length
+      ? heightOffsets.offsets[end]
+      : heightOffsets.totalHeight;
+
+    return {
+      start,
+      end,
+      topPadding: heightOffsets.offsets[start] ?? 0,
+      bottomPadding: Math.max(0, heightOffsets.totalHeight - renderedEndOffset),
+    };
+  }, [heightOffsets, messages.length, shouldVirtualize, virtualViewport]);
+
+  const renderedMessages = shouldVirtualize
+    ? messages.slice(virtualRange.start, virtualRange.end)
+    : messages;
+
+  const updateVirtualViewport = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    setVirtualViewport({
+      scrollTop: container.scrollTop,
+      height: container.clientHeight,
+    });
+  }, [scrollContainerRef]);
+
+  useLayoutEffect(() => {
+    updateVirtualViewport();
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    container.addEventListener('scroll', updateVirtualViewport, { passive: true });
+    window.addEventListener('resize', updateVirtualViewport);
+    return () => {
+      container.removeEventListener('scroll', updateVirtualViewport);
+      window.removeEventListener('resize', updateVirtualViewport);
+    };
+  }, [scrollContainerRef, updateVirtualViewport]);
+
+  useLayoutEffect(() => {
+    updateVirtualViewport();
+  }, [messages.length, updateVirtualViewport]);
+
+  useEffect(() => {
+    const liveIds = new Set(messages.map(message => message.id));
+    measuredHeightsRef.current.forEach((_height, messageId) => {
+      if (!liveIds.has(messageId)) {
+        measuredHeightsRef.current.delete(messageId);
+      }
+    });
+  }, [messages]);
+
+  const setMessageRef = useCallback((messageId: string, element: HTMLDivElement | null) => {
+    if (element) {
+      messageRefsRef.current.set(messageId, element);
+      const measuredHeight = element.getBoundingClientRect().height;
+      const previousHeight = measuredHeightsRef.current.get(messageId);
+      if (Math.abs((previousHeight ?? 0) - measuredHeight) > 1) {
+        measuredHeightsRef.current.set(messageId, measuredHeight);
+        setHeightVersion(version => version + 1);
+      }
+    } else {
+      messageRefsRef.current.delete(messageId);
+    }
+  }, []);
 
   const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
     const container = scrollContainerRef.current;
@@ -483,6 +830,17 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       const messageElement = messageRefsRef.current.get(messageId);
       if (messageElement) {
         scrollElementIntoView(messageElement);
+        return;
+      }
+
+      const messageIndex = messages.findIndex(message => message.id === messageId);
+      const container = scrollContainerRef.current;
+      if (messageIndex !== -1 && container && shouldVirtualize) {
+        cancelAutoScroll();
+        container.scrollTo({
+          top: Math.max(0, heightOffsets.offsets[messageIndex] - 16),
+          behavior: 'smooth',
+        });
       }
     },
     scrollToMessageHeader: (messageId: string, headerIndex: number) => {
@@ -493,6 +851,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         scrollElementIntoView(headerElement, 24);
       } else if (messageElement) {
         scrollElementIntoView(messageElement);
+      } else {
+        const messageIndex = messages.findIndex(message => message.id === messageId);
+        const container = scrollContainerRef.current;
+        if (messageIndex !== -1 && container && shouldVirtualize) {
+          cancelAutoScroll();
+          container.scrollTo({
+            top: Math.max(0, heightOffsets.offsets[messageIndex] - 24),
+            behavior: 'smooth',
+          });
+        }
       }
     },
     scrollToBottom: () => {
@@ -503,7 +871,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     enableAutoScroll: () => {
       reactivateAutoScroll();
     }
-  }));
+  }), [
+    cancelAutoScroll,
+    heightOffsets,
+    messages,
+    reactivateAutoScroll,
+    scrollContainerRef,
+    scrollElementIntoView,
+    scrollToBottomNow,
+    shouldVirtualize,
+  ]);
 
   const streamingActive = messages.some(m => m.isStreaming);
   const scrollSnapshot: ScrollSnapshot = (() => {
@@ -536,10 +913,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       container.removeEventListener('scroll', handleScroll);
     };
   }, [scrollContainerRef, setAutoScrollEnabled]);
-
-  const formatTime = (date: Date): string => {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
 
   const hasStreamingMessage = messages.some(m => m.isStreaming);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -591,154 +964,31 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       ) : (
       <div className="py-4">
         <div ref={messagesColumnRef} className="max-w-[836px] mx-auto pl-9">
-          {messages.map((message) => {
-            const segments = parseMessageSegments(message.text, message.isStreaming);
-            const renderItems = buildMessageRenderItems(segments, message.browserRuns);
-            const isEditing = editingMessageId === message.id;
-            
-            return (
-              <div 
-                key={message.id} 
-                data-message-id={message.id}
-                ref={(el) => {
-                  if (el) {
-                    messageRefsRef.current.set(message.id, el);
-                  } else {
-                    messageRefsRef.current.delete(message.id);
-                  }
-                }}
-                className={`flex flex-col gap-2 last:border-b-0 ${message.sender === 'user' ? 'px-2 py-2 border border-border-secondary rounded bg-bg-secondary' : 'border-b border-border-primary py-4'}`}
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className={`font-mono text-[0.6rem] uppercase tracking-[0.15em] text-text-primary`}>
-                    {message.sender === 'user' ? 'you' : 'jarvis'}
-                  </span>
-                  <span className="font-mono text-[0.65rem] text-text-tertiary">
-                    {formatTime(message.timestamp)}
-                  </span>
-                  {message.isStreaming && (
-                    <span className="font-mono text-[0.65rem] text-text-muted animate-pulse">
-                      streaming...
-                    </span>
-                  )}
-                </div>
-                
-                {isEditing ? (
-                  <div className="flex flex-col gap-3">
-                    <textarea
-                      className="w-full min-h-[60px] border border-text-primary bg-transparent p-3 text-base text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
-                      value={editText}
-                      onChange={(e) => setEditText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                          e.preventDefault();
-                          handleResubmit(message.id);
-                        }
-                        if (e.key === 'Escape') {
-                          e.preventDefault();
-                          handleCancelEdit();
-                        }
-                      }}
-                      autoFocus
-                    />
-                    <div className="flex items-center justify-end gap-2">
-                      <span className="font-mono text-[0.65rem] text-text-tertiary mr-auto">
-                        ⌘ + Enter to submit · Esc to cancel
-                      </span>
-                      <MessageActionButton
-                        onClick={() => handleCopy(message.id, editText)}
-                        label={copiedId === message.id ? 'Copied' : 'Copy'}
-                        icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
-                      />
-                      <MessageActionButton
-                        onClick={handleCancelEdit}
-                        label="Cancel"
-                        icon={<XIcon />}
-                      />
-                      <MessageActionButton
-                        onClick={() => handleResubmit(message.id)}
-                        label="Submit"
-                        icon={<CheckIcon />}
-                        variant="primary"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    {renderItems.map((item) => {
-                      if (item.renderType === 'browserRun') {
-                        return (
-                          <BrowserTraceSection
-                            key={item.key}
-                            run={item.run}
-                            onAutoScrollCancel={cancelAutoScroll}
-                            onAutoScrollReactivate={reactivateAutoScrollIfAtBottom}
-                          />
-                        );
-                      }
-
-                      const segment = item;
-                      if (segment.type === 'thinking' && segment.text) {
-                        return (
-                          <ThinkingSection 
-                            key={item.key}
-                            content={segment.text} 
-                            isStreaming={segment.isThinkingInProgress} 
-                            onAutoScrollCancel={cancelAutoScroll}
-                            onAutoScrollReactivate={reactivateAutoScrollIfAtBottom}
-                          />
-                        );
-                      }
-                      if (segment.type === 'content' && segment.text) {
-                        return (
-                          <div key={item.key} className="text-base text-text-primary leading-[1.8]">
-                            <MarkdownRenderer content={segment.text} />
-                          </div>
-                        );
-                        }
-                        return null;
-                    })}
-
-                      {message.sender === 'assistant' && (
-                        <SearchSourcesBar groups={message.searchSources} />
-                      )}
-                      
-                      {!message.isStreaming && !isLoading && (
-                        <div className="flex items-center justify-end gap-2">
-                          {message.sender === 'user' ? (
-                            <>
-                              <MessageActionButton
-                                onClick={() => handleCopy(message.id, message.text)}
-                                label={copiedId === message.id ? 'Copied' : 'Copy'}
-                                icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
-                              />
-                              <MessageActionButton
-                                onClick={() => handleStartEdit(message.id, message.text)}
-                                label="Edit"
-                                icon={<PencilIcon />}
-                              />
-                            </>
-                          ) : (
-                            <>
-                              <MessageActionButton
-                                onClick={() => handleCopy(message.id, message.text)}
-                                label={copiedId === message.id ? 'Copied' : 'Copy'}
-                                icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
-                              />
-                              <MessageActionButton
-                                onClick={() => handleRegenerate(message.id)}
-                                label="Regenerate"
-                                icon={<RefreshIcon />}
-                              />
-                            </>
-                          )}
-                        </div>
-                      )}
-                  </>
-                )}
-              </div>
-            );
-          })}
+          {shouldVirtualize && virtualRange.topPadding > 0 && (
+            <div aria-hidden="true" style={{ height: virtualRange.topPadding }} />
+          )}
+          {renderedMessages.map((message) => (
+            <MessageRow
+              key={message.id}
+              message={message}
+              isEditing={editingMessageId === message.id}
+              editText={editText}
+              copiedId={copiedId}
+              isLoading={isLoading}
+              setMessageRef={setMessageRef}
+              setEditText={setEditText}
+              onCopy={handleCopy}
+              onStartEdit={handleStartEdit}
+              onCancelEdit={handleCancelEdit}
+              onResubmit={handleResubmit}
+              onRegenerate={handleRegenerate}
+              onAutoScrollCancel={cancelAutoScroll}
+              onAutoScrollReactivate={reactivateAutoScrollIfAtBottom}
+            />
+          ))}
+          {shouldVirtualize && virtualRange.bottomPadding > 0 && (
+            <div aria-hidden="true" style={{ height: virtualRange.bottomPadding }} />
+          )}
           
           {showTypingIndicator && (
             <TypingIndicator sender="assistant" />

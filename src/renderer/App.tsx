@@ -26,6 +26,7 @@ interface Conversation {
   timestamp: Date;
   messages: Message[];
   folderId: string | null;
+  isLoaded: boolean;
 }
 
 interface Folder {
@@ -51,6 +52,13 @@ interface SerializedConversation {
   folderId: string | null;
 }
 
+interface SerializedConversationMetadata {
+  id: string;
+  title: string;
+  timestamp: string;
+  folderId: string | null;
+}
+
 interface SerializedFolder {
   id: string;
   name: string;
@@ -58,6 +66,9 @@ interface SerializedFolder {
 }
 
 const SCROLL_BUTTON_BOTTOM_THRESHOLD = 8;
+const CONVERSATION_CACHE_LIMIT = 6;
+const SAVE_DEBOUNCE_MS = 400;
+const STREAM_FLUSH_MS = 60;
 
 const isScrollContainerAtBottom = (container: HTMLElement) => (
   container.scrollHeight - container.scrollTop - container.clientHeight <= SCROLL_BUTTON_BOTTOM_THRESHOLD
@@ -80,6 +91,15 @@ function serializeConversation(c: Conversation): SerializedConversation {
   };
 }
 
+function serializeConversationMetadata(c: Conversation): SerializedConversationMetadata {
+  return {
+    id: c.id,
+    title: c.title,
+    timestamp: c.timestamp.toISOString(),
+    folderId: c.folderId,
+  };
+}
+
 function deserializeConversation(c: SerializedConversation): Conversation {
   return {
     id: c.id,
@@ -94,6 +114,18 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       searchSources: m.searchSources,
     })),
     folderId: c.folderId ?? null,
+    isLoaded: true,
+  };
+}
+
+function deserializeConversationMetadata(c: SerializedConversationMetadata): Conversation {
+  return {
+    id: c.id,
+    title: c.title,
+    timestamp: new Date(c.timestamp),
+    messages: [],
+    folderId: c.folderId ?? null,
+    isLoaded: false,
   };
 }
 
@@ -111,6 +143,65 @@ function deserializeFolder(f: SerializedFolder): Folder {
     name: f.name,
     timestamp: new Date(f.timestamp),
   };
+}
+
+function hashString(value: string, seed = 2166136261): number {
+  let hash = seed >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function hashUnknown(value: unknown, seed = 2166136261): number {
+  if (value === null || value === undefined) {
+    return hashString(String(value), seed);
+  }
+
+  if (typeof value !== 'object') {
+    return hashString(String(value), seed);
+  }
+
+  if (Array.isArray(value)) {
+    return value.reduce((hash, item, index) => (
+      hashUnknown(item, hashString(`[${index}]`, hash))
+    ), seed);
+  }
+
+  return Object.keys(value as Record<string, unknown>)
+    .sort()
+    .reduce((hash, key) => (
+      hashUnknown((value as Record<string, unknown>)[key], hashString(key, hash))
+    ), seed);
+}
+
+function getConversationMetadataRevision(conversations: Conversation[]): string {
+  const hash = conversations.reduce((metadataHash, conversation) => (
+    hashString(
+      `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
+      metadataHash
+    )
+  ), 2166136261);
+  return `${conversations.length}:${hash}`;
+}
+
+function getConversationRevision(conversation: Conversation): string {
+  const hash = conversation.messages.reduce((messageHash, message) => {
+    let nextHash = hashString(
+      `${message.id}\u0000${message.sender}\u0000${message.timestamp.toISOString()}\u0000${message.text.length}`,
+      messageHash
+    );
+    nextHash = hashString(message.text, nextHash);
+    nextHash = hashUnknown(message.browserRuns, nextHash);
+    nextHash = hashUnknown(message.searchSources, nextHash);
+    return nextHash;
+  }, hashString(
+    `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
+    2166136261
+  ));
+
+  return `${conversation.messages.length}:${hash}`;
 }
 
 function getNextFolderName(existingFolders: Folder[]): string {
@@ -277,9 +368,15 @@ declare global {
       onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => () => void;
       onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => () => void;
       onVoiceError: (callback: (error: string) => void) => () => void;
-      sendAudioData: (samples: number[]) => void;
+      connectAudioPort: (port: MessagePort) => void;
+      sendAudioData: (chunk: ArrayBuffer | ArrayBufferView) => void;
       storeLoadConversations: () => Promise<SerializedConversation[]>;
+      storeLoadConversationList: () => Promise<SerializedConversationMetadata[]>;
+      storeLoadConversation: (id: string) => Promise<SerializedConversation | null>;
+      storeLoadConversationsById: (ids: string[]) => Promise<SerializedConversation[]>;
       storeSaveConversations: (conversations: SerializedConversation[]) => Promise<{ success: boolean }>;
+      storeSaveConversationList: (conversations: SerializedConversationMetadata[]) => Promise<{ success: boolean }>;
+      storeSaveConversation: (conversation: SerializedConversation) => Promise<{ success: boolean }>;
       storeDeleteConversation: (id: string) => Promise<{ success: boolean }>;
       storeLoadFolders: () => Promise<SerializedFolder[]>;
       storeSaveFolders: (folders: SerializedFolder[]) => Promise<{ success: boolean }>;
@@ -323,10 +420,28 @@ const App: React.FC = () => {
   const [newChatTrigger, setNewChatTrigger] = useState(0);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
   const selectedProviderRef = useRef(selectedProvider);
+  const conversationAccessRef = useRef<Map<string, number>>(new Map());
+  const savedConversationRevisionsRef = useRef<Map<string, string>>(new Map());
+  const savedConversationMetadataRevisionRef = useRef<string>('');
+  const metadataSaveTimerRef = useRef<number | null>(null);
+  const conversationSaveTimersRef = useRef<Map<string, number>>(new Map());
+  const streamingConversationIdRef = useRef<string | null>(null);
+  const streamChunkBufferRef = useRef<string[]>([]);
+  const streamFlushTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     selectedProviderRef.current = selectedProvider;
   }, [selectedProvider]);
+
+  useEffect(() => () => {
+    if (metadataSaveTimerRef.current !== null) {
+      window.clearTimeout(metadataSaveTimerRef.current);
+    }
+    conversationSaveTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
+    if (streamFlushTimerRef.current !== null) {
+      window.clearTimeout(streamFlushTimerRef.current);
+    }
+  }, []);
 
   const fetchModelsForProvider = useCallback(async (providerId: string) => {
     setIsLoadingModels(true);
@@ -408,7 +523,7 @@ const App: React.FC = () => {
 
     const loadStoredData = async () => {
       const [conversationsResult, foldersResult, modelResult, providerResult, tabIdsResult, currentConvResult] = await Promise.allSettled([
-        window.assistant.storeLoadConversations(),
+        window.assistant.storeLoadConversationList(),
         window.assistant.storeLoadFolders(),
         window.assistant.storeLoadModel(),
         window.assistant.storeLoadProvider(),
@@ -421,18 +536,43 @@ const App: React.FC = () => {
       }
 
       if (conversationsResult.status === 'fulfilled') {
-        const storedConversations = conversationsResult.value;
-        const deserialized = storedConversations.map(deserializeConversation);
-        setConversations(deserialized);
-        if (storedConversations.length > 0) {
+        const storedMetadata = conversationsResult.value;
+        const deserialized = storedMetadata.map(deserializeConversationMetadata);
+        if (storedMetadata.length > 0) {
           const validIds = new Set(deserialized.map(c => c.id));
           const storedTabIds = tabIdsResult.status === 'fulfilled' ? tabIdsResult.value : [];
           const storedCurrentId = currentConvResult.status === 'fulfilled' ? currentConvResult.value : null;
           const filteredTabs = storedTabIds.filter((id: string) => validIds.has(id));
           const resolvedCurrentId = (storedCurrentId && validIds.has(storedCurrentId)) ? storedCurrentId : (filteredTabs.length > 0 ? filteredTabs[filteredTabs.length - 1] : deserialized[deserialized.length - 1].id);
+          const warmIds = Array.from(new Set([
+            resolvedCurrentId,
+            ...filteredTabs,
+            ...deserialized.slice(0, CONVERSATION_CACHE_LIMIT).map(c => c.id),
+          ].filter((id): id is string => Boolean(id)))).slice(0, CONVERSATION_CACHE_LIMIT);
+          const warmConversations = warmIds.length > 0
+            ? await window.assistant.storeLoadConversationsById(warmIds)
+            : [];
+          const warmConversationMap = new Map(
+            warmConversations.map(c => [c.id, deserializeConversation(c)])
+          );
+          const hydratedConversations = deserialized.map(conversation =>
+            warmConversationMap.get(conversation.id) ?? conversation
+          );
+
+          warmIds.forEach((id, index) => {
+            conversationAccessRef.current.set(id, Date.now() - index);
+          });
+          savedConversationMetadataRevisionRef.current = getConversationMetadataRevision(hydratedConversations);
+          warmConversationMap.forEach(conversation => {
+            savedConversationRevisionsRef.current.set(conversation.id, getConversationRevision(conversation));
+          });
+
+          setConversations(hydratedConversations);
           setCurrentConversationId(resolvedCurrentId);
           setOpenTabIds(filteredTabs.length > 0 ? filteredTabs : [resolvedCurrentId]);
         } else {
+          savedConversationMetadataRevisionRef.current = getConversationMetadataRevision([]);
+          setConversations([]);
           setCurrentConversationId(null);
           setOpenTabIds([]);
         }
@@ -488,9 +628,42 @@ const App: React.FC = () => {
     const hasStreaming = conversations.some(c => c.messages.some(m => m.isStreaming));
     if (hasStreaming) return;
 
-    const serialized = conversations.map(serializeConversation);
-    window.assistant.storeSaveConversations(serialized).catch(err => {
-      console.error('Failed to save conversations:', err);
+    const metadataRevision = getConversationMetadataRevision(conversations);
+    if (metadataRevision !== savedConversationMetadataRevisionRef.current) {
+      savedConversationMetadataRevisionRef.current = metadataRevision;
+      if (metadataSaveTimerRef.current !== null) {
+        window.clearTimeout(metadataSaveTimerRef.current);
+      }
+      metadataSaveTimerRef.current = window.setTimeout(() => {
+        metadataSaveTimerRef.current = null;
+        window.assistant.storeSaveConversationList(conversations.map(serializeConversationMetadata)).catch(err => {
+          console.error('Failed to save conversation metadata:', err);
+        });
+      }, SAVE_DEBOUNCE_MS);
+    }
+
+    conversations.forEach(conversation => {
+      if (!conversation.isLoaded) {
+        return;
+      }
+
+      const revision = getConversationRevision(conversation);
+      if (revision === savedConversationRevisionsRef.current.get(conversation.id)) {
+        return;
+      }
+
+      savedConversationRevisionsRef.current.set(conversation.id, revision);
+      const existingTimer = conversationSaveTimersRef.current.get(conversation.id);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      const timerId = window.setTimeout(() => {
+        conversationSaveTimersRef.current.delete(conversation.id);
+        window.assistant.storeSaveConversation(serializeConversation(conversation)).catch(err => {
+          console.error('Failed to save conversation:', err);
+        });
+      }, SAVE_DEBOUNCE_MS);
+      conversationSaveTimersRef.current.set(conversation.id, timerId);
     });
   }, [conversations, hasHydratedStore]);
 
@@ -554,6 +727,78 @@ const App: React.FC = () => {
     });
   }, [currentConversationId, hasHydratedStore]);
 
+  const ensureConversationLoaded = useCallback(async (id: string) => {
+    conversationAccessRef.current.set(id, Date.now());
+
+    const alreadyLoaded = conversations.some(c => c.id === id && c.isLoaded);
+    if (alreadyLoaded) {
+      return;
+    }
+
+    try {
+      const storedConversation = await window.assistant.storeLoadConversation(id);
+      if (!storedConversation) {
+        return;
+      }
+
+      const loadedConversation = deserializeConversation(storedConversation);
+      savedConversationRevisionsRef.current.set(id, getConversationRevision(loadedConversation));
+      setConversations(prev =>
+        prev.map(conversation =>
+          conversation.id === id
+            ? loadedConversation
+            : conversation
+        )
+      );
+    } catch (error) {
+      console.error('Failed to load conversation:', error);
+    }
+  }, [conversations]);
+
+  useEffect(() => {
+    if (!hasHydratedStore || !currentConversationId) {
+      return;
+    }
+
+    void ensureConversationLoaded(currentConversationId);
+  }, [currentConversationId, ensureConversationLoaded, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) {
+      return;
+    }
+
+    const pinnedIds = new Set<string>([
+      ...openTabIds,
+      ...(currentConversationId ? [currentConversationId] : []),
+    ]);
+    const loadedConversations = conversations.filter(c => c.isLoaded);
+
+    if (loadedConversations.length <= CONVERSATION_CACHE_LIMIT) {
+      return;
+    }
+
+    const evictable = loadedConversations
+      .filter(c => !pinnedIds.has(c.id) && !c.messages.some(m => m.isStreaming))
+      .sort((a, b) =>
+        (conversationAccessRef.current.get(a.id) ?? 0) - (conversationAccessRef.current.get(b.id) ?? 0)
+      );
+    const evictCount = loadedConversations.length - CONVERSATION_CACHE_LIMIT;
+    const evictIds = new Set(evictable.slice(0, evictCount).map(c => c.id));
+
+    if (evictIds.size === 0) {
+      return;
+    }
+
+    setConversations(prev =>
+      prev.map(conversation =>
+        evictIds.has(conversation.id)
+          ? { ...conversation, messages: [], isLoaded: false }
+          : conversation
+      )
+    );
+  }, [conversations, currentConversationId, hasHydratedStore, openTabIds]);
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!hasHydratedStore) return;
@@ -615,32 +860,78 @@ const App: React.FC = () => {
     return cleanup;
   }, []);
 
+  const updateMessageInConversation = useCallback((
+    conversationId: string | null,
+    messageId: string,
+    updater: (message: Message) => Message
+  ) => {
+    if (!conversationId) {
+      return;
+    }
+
+    setConversations(prev =>
+      prev.map(conversation =>
+        conversation.id === conversationId
+          ? {
+              ...conversation,
+              messages: conversation.messages.map(message =>
+                message.id === messageId ? updater(message) : message
+              ),
+            }
+          : conversation
+      )
+    );
+  }, []);
+
+  const flushStreamChunkBuffer = useCallback(() => {
+    if (streamFlushTimerRef.current !== null) {
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+
+    const chunk = streamChunkBufferRef.current.join('');
+    streamChunkBufferRef.current = [];
+    if (!chunk || !streamingMessageIdRef.current) {
+      return;
+    }
+
+    updateMessageInConversation(
+      streamingConversationIdRef.current,
+      streamingMessageIdRef.current,
+      message => ({ ...message, text: message.text + chunk })
+    );
+  }, [updateMessageInConversation]);
+
+  const scheduleStreamFlush = useCallback(() => {
+    if (streamFlushTimerRef.current !== null) {
+      return;
+    }
+
+    streamFlushTimerRef.current = window.setTimeout(() => {
+      streamFlushTimerRef.current = null;
+      flushStreamChunkBuffer();
+    }, STREAM_FLUSH_MS);
+  }, [flushStreamChunkBuffer]);
+
   useEffect(() => {
     const handleChunk = (chunk: string) => {
-      if (streamingMessageIdRef.current) {
-        setConversations(prev =>
-          prev.map(c => ({
-            ...c,
-            messages: c.messages.map(m =>
-              m.id === streamingMessageIdRef.current
-                ? { ...m, text: m.text + chunk }
-                : m
-            ),
-          }))
-        );
+      if (!streamingMessageIdRef.current) {
+        return;
       }
+
+      streamChunkBufferRef.current.push(chunk);
+      scheduleStreamFlush();
     };
 
     const finishStreaming = () => {
-      setConversations(prev =>
-        prev.map(c => ({
-          ...c,
-          messages: c.messages.map(m =>
-            m.isStreaming ? { ...m, isStreaming: false } : m
-          )
-        }))
-      );
+      flushStreamChunkBuffer();
+      const conversationId = streamingConversationIdRef.current;
+      const messageId = streamingMessageIdRef.current;
+      if (messageId) {
+        updateMessageInConversation(conversationId, messageId, message => ({ ...message, isStreaming: false }));
+      }
       streamingMessageIdRef.current = null;
+      streamingConversationIdRef.current = null;
       setIsLoading(false);
     };
 
@@ -651,21 +942,18 @@ const App: React.FC = () => {
     const handleError = (error: string) => {
       console.error('Streaming error:', error);
       if (streamingMessageIdRef.current) {
-        setConversations(prev =>
-          prev.map(c => ({
-            ...c,
-            messages: c.messages.map(m =>
-              m.id === streamingMessageIdRef.current
-                ? {
-                    ...m,
-                    text: `Error: ${error}. Make sure your selected provider is running and configured.`,
-                    isStreaming: false,
-                  }
-                : m
-            )
-          }))
+        flushStreamChunkBuffer();
+        updateMessageInConversation(
+          streamingConversationIdRef.current,
+          streamingMessageIdRef.current,
+          message => ({
+            ...message,
+            text: `Error: ${error}. Make sure your selected provider is running and configured.`,
+            isStreaming: false,
+          })
         );
         streamingMessageIdRef.current = null;
+        streamingConversationIdRef.current = null;
         setIsLoading(false);
       }
     };
@@ -675,41 +963,31 @@ const App: React.FC = () => {
         return;
       }
 
-      setConversations(prev =>
-        prev.map(c => ({
-          ...c,
-          messages: c.messages.map(m =>
-            m.id === event.assistantMessageId
-              ? {
-                  ...m,
-                  browserRuns: applyBrowserTraceEventToRuns(m.browserRuns, event, m.text.length),
-                }
-              : m
-          ),
-        }))
+      updateMessageInConversation(
+        streamingConversationIdRef.current,
+        event.assistantMessageId,
+        message => ({
+          ...message,
+          browserRuns: applyBrowserTraceEventToRuns(message.browserRuns, event, message.text.length),
+        })
       );
     };
 
     const handleSearchSources = (event: SearchSourcesEvent) => {
-      setConversations(prev =>
-        prev.map(c => ({
-          ...c,
-          messages: c.messages.map(m => {
-            if (m.id !== event.assistantMessageId) {
-              return m;
-            }
+      updateMessageInConversation(
+        streamingConversationIdRef.current,
+        event.assistantMessageId,
+        message => {
+          const currentGroups = message.searchSources ?? [];
+          if (currentGroups.some(group => group.id === event.group.id)) {
+            return message;
+          }
 
-            const currentGroups = m.searchSources ?? [];
-            if (currentGroups.some(group => group.id === event.group.id)) {
-              return m;
-            }
-
-            return {
-              ...m,
-              searchSources: [...currentGroups, event.group],
-            };
-          }),
-        }))
+          return {
+            ...message,
+            searchSources: [...currentGroups, event.group],
+          };
+        }
       );
     };
 
@@ -724,7 +1002,7 @@ const App: React.FC = () => {
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
     };
-  }, [currentConversationId]);
+  }, [flushStreamChunkBuffer, scheduleStreamFlush, updateMessageInConversation]);
 
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages || [];
@@ -772,6 +1050,7 @@ const App: React.FC = () => {
   }, []);
 
   const handleConversationSelect = useCallback((id: string) => {
+    conversationAccessRef.current.set(id, Date.now());
     setCurrentConversationId(id);
     setOpenTabIds(prev => {
       if (!prev.includes(id)) {
@@ -779,7 +1058,8 @@ const App: React.FC = () => {
       }
       return prev;
     });
-  }, []);
+    void ensureConversationLoaded(id);
+  }, [ensureConversationLoaded]);
 
   const handleDeleteConversation = useCallback((id: string) => {
     if (!window.confirm('Delete this conversation?')) return;
@@ -791,6 +1071,13 @@ const App: React.FC = () => {
 
     void window.assistant.storeDeleteConversation(id)
       .then(() => {
+        conversationAccessRef.current.delete(id);
+        savedConversationRevisionsRef.current.delete(id);
+        const timerId = conversationSaveTimersRef.current.get(id);
+        if (timerId !== undefined) {
+          window.clearTimeout(timerId);
+          conversationSaveTimersRef.current.delete(id);
+        }
         setConversations(prev => prev.filter(c => c.id !== id));
         setOpenTabIds(prev => {
           const filtered = prev.filter(tabId => tabId !== id);
@@ -846,6 +1133,15 @@ const App: React.FC = () => {
 
     void window.assistant.storeDeleteFolder(id)
       .then(() => {
+        deletedIds.forEach(conversationId => {
+          conversationAccessRef.current.delete(conversationId);
+          savedConversationRevisionsRef.current.delete(conversationId);
+          const timerId = conversationSaveTimersRef.current.get(conversationId);
+          if (timerId !== undefined) {
+            window.clearTimeout(timerId);
+            conversationSaveTimersRef.current.delete(conversationId);
+          }
+        });
         setConversations(prev => prev.filter(c => c.folderId !== id));
         setFolders(prev => prev.filter(f => f.id !== id));
         setOpenTabIds(prev => {
@@ -921,21 +1217,18 @@ const App: React.FC = () => {
     await window.assistant.stopStream();
     
     if (streamingMessageIdRef.current) {
-      setConversations(prev =>
-        prev.map(c => ({
-          ...c,
-          messages: c.messages.map(m =>
-            m.id === streamingMessageIdRef.current
-              ? { ...m, isStreaming: false }
-              : m
-          ),
-        }))
+      flushStreamChunkBuffer();
+      updateMessageInConversation(
+        streamingConversationIdRef.current,
+        streamingMessageIdRef.current,
+        message => ({ ...message, isStreaming: false })
       );
       streamingMessageIdRef.current = null;
+      streamingConversationIdRef.current = null;
     }
     
     setIsLoading(false);
-  }, []);
+  }, [flushStreamChunkBuffer, updateMessageInConversation]);
 
   const handleScrollToMessage = useCallback((messageId: string, headerIndex?: number) => {
     if (headerIndex !== undefined) {
@@ -1009,6 +1302,7 @@ const App: React.FC = () => {
     );
 
     streamingMessageIdRef.current = assistantMessageId;
+    streamingConversationIdRef.current = conversation.id;
 
     try {
       const conversationMessages: SendMessageStreamRequest['messages'] = [
@@ -1045,6 +1339,7 @@ const App: React.FC = () => {
       );
       setIsLoading(false);
       streamingMessageIdRef.current = null;
+      streamingConversationIdRef.current = null;
     }
   }, [currentConversationId, selectedModel, selectedProvider, conversations]);
 
@@ -1093,6 +1388,7 @@ const App: React.FC = () => {
     );
 
     streamingMessageIdRef.current = assistantMessageId;
+    streamingConversationIdRef.current = conversation.id;
 
     try {
       const conversationMessages: SendMessageStreamRequest['messages'] = [
@@ -1129,6 +1425,7 @@ const App: React.FC = () => {
       );
       setIsLoading(false);
       streamingMessageIdRef.current = null;
+      streamingConversationIdRef.current = null;
     }
   }, [currentConversationId, selectedModel, selectedProvider, conversations]);
 
@@ -1139,6 +1436,7 @@ const App: React.FC = () => {
     }
 
     let conversationId = currentConversationId;
+    let conversationMessagesForRequest = messages;
     
     if (!conversationId) {
       conversationId = Date.now().toString();
@@ -1148,9 +1446,11 @@ const App: React.FC = () => {
         timestamp: new Date(),
         messages: [],
         folderId: null,
+        isLoaded: true,
       };
       setConversations(prev => [newConversation, ...prev]);
       setCurrentConversationId(conversationId);
+      conversationAccessRef.current.set(conversationId, Date.now());
       
       const cid = conversationId;
       setOpenTabIds(prev => [...prev, cid]);
@@ -1166,6 +1466,20 @@ const App: React.FC = () => {
           );
         })
         .catch(() => {});
+    } else if (currentConversation && !currentConversation.isLoaded) {
+      const storedConversation = await window.assistant.storeLoadConversation(conversationId);
+      if (storedConversation) {
+        const loadedConversation = deserializeConversation(storedConversation);
+        conversationMessagesForRequest = loadedConversation.messages;
+        savedConversationRevisionsRef.current.set(conversationId, getConversationRevision(loadedConversation));
+        setConversations(prev =>
+          prev.map(conversation =>
+            conversation.id === conversationId
+              ? loadedConversation
+              : conversation
+          )
+        );
+      }
     }
 
     const userMessage: Message = {
@@ -1203,10 +1517,11 @@ const App: React.FC = () => {
     );
 
     streamingMessageIdRef.current = assistantMessageId;
+    streamingConversationIdRef.current = conversationId;
 
     try {
       const conversationMessages: SendMessageStreamRequest['messages'] = [
-        ...messages.map(toStreamMessage),
+        ...conversationMessagesForRequest.map(toStreamMessage),
         { role: 'user', content: text },
       ];
 
@@ -1239,8 +1554,9 @@ const App: React.FC = () => {
       );
       setIsLoading(false);
       streamingMessageIdRef.current = null;
+      streamingConversationIdRef.current = null;
     }
-  }, [currentConversationId, selectedModel, selectedProvider, messages]);
+  }, [currentConversation, currentConversationId, selectedModel, selectedProvider, messages]);
 
   useEffect(() => {
     if (currentConversationId === null && pendingJarvisMessageRef.current) {
@@ -1265,6 +1581,7 @@ const App: React.FC = () => {
   const activeConversation = currentConversationId && validConversationIds.has(currentConversationId)
     ? conversations.find(c => c.id === currentConversationId) ?? null
     : null;
+  const isCurrentConversationLoading = Boolean(activeConversation && !activeConversation.isLoaded);
 
   return (
     <ThemeProvider>
@@ -1324,7 +1641,7 @@ const App: React.FC = () => {
               onSendMessage={handleSendMessage}
               onStopStreaming={handleStopStreaming}
               isLoading={isLoading}
-              disabled={!selectedModel}
+              disabled={!selectedModel || isCurrentConversationLoading}
               voiceTranscript={voiceTranscript}
               onVoiceTextUsed={handleVoiceTextUsed}
               voiceShortcut={voiceShortcut}

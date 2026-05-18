@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourcesEvent } from '../shared/search';
 
+type TransferableMessagePort = NonNullable<Parameters<typeof ipcRenderer.postMessage>[2]>[number];
+
 type VoiceTranscriptPayload = {
   text: string;
   autoSubmit: boolean;
@@ -84,9 +86,15 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('voice-error', listener);
     return () => ipcRenderer.removeListener('voice-error', listener);
   },
-  sendAudioData: (samples: number[]) => ipcRenderer.send('audio-data', samples),
+  connectAudioPort: (port: TransferableMessagePort) => ipcRenderer.postMessage('audio-port', null, [port]),
+  sendAudioData: (chunk: ArrayBuffer | ArrayBufferView) => ipcRenderer.send('audio-data', chunk),
   storeLoadConversations: () => ipcRenderer.invoke('store:load-conversations'),
+  storeLoadConversationList: () => ipcRenderer.invoke('store:load-conversation-list'),
+  storeLoadConversation: (id: string) => ipcRenderer.invoke('store:load-conversation', id),
+  storeLoadConversationsById: (ids: string[]) => ipcRenderer.invoke('store:load-conversations-by-id', ids),
   storeSaveConversations: (conversations: unknown) => ipcRenderer.invoke('store:save-conversations', conversations),
+  storeSaveConversationList: (conversations: unknown) => ipcRenderer.invoke('store:save-conversation-list', conversations),
+  storeSaveConversation: (conversation: unknown) => ipcRenderer.invoke('store:save-conversation', conversation),
   storeDeleteConversation: (id: string) => ipcRenderer.invoke('store:delete-conversation', id),
   storeLoadFolders: () => ipcRenderer.invoke('store:load-folders'),
   storeSaveFolders: (folders: unknown) => ipcRenderer.invoke('store:save-folders', folders),

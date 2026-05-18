@@ -6,32 +6,29 @@ let overlayThemeIsDark = true;
 
 const OVERLAY_WIDTH = 200;
 const OVERLAY_MAX_WIDTH = 500;
-const OVERLAY_HEIGHT = 44;
+const OVERLAY_HEIGHT = 56;
 const OVERLAY_EXIT_MS = 160;
-
-type PixelFrame = {
-  pixels: number[];
-  duration: number;
-};
+const PROCESSING_FILL_MS = 180;
 
 type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
+type OverlayVisualStage = OverlayState | 'processing-fill';
 
-const STATE_CONFIG: Record<OverlayState, { color: string; label: string }> = {
+const STATE_CONFIG: Record<OverlayState, { label: string; stage: OverlayVisualStage }> = {
   recording: {
-    color: '#EF4444',
     label: 'Listening...',
+    stage: 'recording',
   },
   processing: {
-    color: '#F59E0B',
     label: 'Processing...',
+    stage: 'processing',
   },
   complete: {
-    color: '#22C55E',
     label: 'Transcribed',
+    stage: 'complete',
   },
   error: {
-    color: '#991B1B',
     label: 'Error',
+    stage: 'error',
   },
 };
 
@@ -58,44 +55,6 @@ function getOverlayThemeColors(): {
   };
 }
 
-const PIXEL_PATTERNS: Record<string, { frames: PixelFrame[] }> = {
-  recording: {
-    frames: [
-      { pixels: [1, 2], duration: 130 },
-      { pixels: [2, 3], duration: 130 },
-      { pixels: [3, 6], duration: 130 },
-      { pixels: [6, 9], duration: 130 },
-      { pixels: [9, 8], duration: 130 },
-      { pixels: [8, 7], duration: 130 },
-      { pixels: [7, 4], duration: 130 },
-      { pixels: [4, 1], duration: 130 },
-    ],
-  },
-  processing: {
-    frames: [
-      { pixels: [1, 9], duration: 350 },
-      { pixels: [2, 8], duration: 280 },
-      { pixels: [3, 7], duration: 220 },
-      { pixels: [6, 4], duration: 280 },
-      { pixels: [1, 9], duration: 350 },
-      { pixels: [2, 8], duration: 420 },
-    ],
-  },
-  complete: {
-    frames: [
-      { pixels: [3, 5, 7], duration: 180 },
-      { pixels: [2, 4, 5, 6, 8], duration: 220 },
-      { pixels: [4, 5, 6], duration: 900 },
-    ],
-  },
-  error: {
-    frames: [
-      { pixels: [1, 3, 5, 7, 9], duration: 240 },
-      { pixels: [2, 4, 5, 6, 8], duration: 240 },
-    ],
-  },
-};
-
 function getOverlayDisplayLabel(state: OverlayState, transcript?: string, errorMessage?: string): string {
   if (state === 'error') {
     return errorMessage || STATE_CONFIG.error.label;
@@ -106,22 +65,100 @@ function getOverlayDisplayLabel(state: OverlayState, transcript?: string, errorM
 
 function getOverlayWidth(label: string): number {
   const estimatedTextWidth = Math.ceil(label.length * 7.2);
-  return Math.min(OVERLAY_MAX_WIDTH, Math.max(OVERLAY_WIDTH, estimatedTextWidth + 66));
+  return Math.min(OVERLAY_MAX_WIDTH, Math.max(OVERLAY_WIDTH, estimatedTextWidth + 78));
 }
 
 function getOverlayPayload(state: OverlayState, transcript?: string, errorMessage?: string): {
   state: OverlayState;
   label: string;
-  config: { color: string; label: string };
-  frames: PixelFrame[];
+  stage: OverlayVisualStage;
 } {
   return {
     state,
     label: getOverlayDisplayLabel(state, transcript, errorMessage),
-    config: STATE_CONFIG[state],
-    frames: PIXEL_PATTERNS[state]?.frames || PIXEL_PATTERNS.recording.frames,
+    stage: STATE_CONFIG[state].stage,
   };
 }
+
+const PIXEL_SPINNER_CELLS = Array.from(
+  { length: 16 },
+  (_, index) => `<div class="cell cell-${index}"></div>`
+).join('');
+
+type PixelOpacityMap = Record<number, number[]>;
+
+const RECORDING_OPACITIES: PixelOpacityMap = {
+  0: [1, 0.5, 0.25, 0.15, 0, 1],
+  1: [1, 0.5, 0.25, 0.15, 0, 0],
+  2: [1, 1, 0.5, 0.25, 0.15, 0],
+  3: [0, 1, 0.5, 0.25, 0.15, 0],
+  4: [0.5, 0.25, 0.15, 0, 0, 1],
+  7: [0, 1, 1, 0.5, 0.25, 0.15],
+  8: [0.5, 0.25, 0.15, 0, 1, 1],
+  11: [0, 0, 1, 0.5, 0.25, 0.15],
+  12: [0.25, 0.15, 0, 0, 1, 0.5],
+  13: [0.25, 0.15, 0, 1, 1, 0.5],
+  14: [0.15, 0, 0, 1, 0.5, 0.25],
+  15: [0.15, 0, 1, 1, 0.5, 0.25],
+};
+
+const PROCESSING_OPACITIES: PixelOpacityMap = {
+  0: [0.15, 1, 0.5, 0.25],
+  1: [0.15, 1, 0.5, 0.25],
+  2: [0.15, 1, 0.5, 0.25],
+  3: [0.15, 1, 0.5, 0.25],
+  4: [0.15, 1, 0.5, 0.25],
+  5: [1, 0.5, 0.25, 1],
+  6: [1, 0.5, 0.25, 1],
+  7: [0.15, 1, 0.5, 0.25],
+  8: [0.15, 1, 0.5, 0.25],
+  9: [1, 0.5, 0.25, 1],
+  10: [1, 0.5, 0.25, 1],
+  11: [0.15, 1, 0.5, 0.25],
+  12: [0.15, 1, 0.5, 0.25],
+  13: [0.15, 1, 0.5, 0.25],
+  14: [0.15, 1, 0.5, 0.25],
+  15: [0.15, 1, 0.5, 0.25],
+};
+
+const COMPLETE_OPACITIES: PixelOpacityMap = {
+  0: [1, 0.5, 0.25, 0.15, 1, 0.5],
+  1: [0, 1, 0.5, 0.25, 0.15, 0],
+  2: [0.5, 0.25, 1, 0.5, 0.25, 1],
+  3: [0.15, 0, 0, 1, 0.5, 0.25],
+  4: [0, 1, 0.5, 0.25, 0.15, 0],
+  5: [1, 0.5, 0.25, 0.15, 0, 1],
+  6: [0.25, 0.15, 0, 1, 1, 0.5],
+  7: [0, 0, 1, 0.5, 0.25, 0.15],
+  8: [0, 0, 1, 0.5, 0.25, 0.15],
+  9: [0.25, 0.15, 0, 1, 1, 0.5],
+  10: [0.5, 1, 0.5, 0.25, 0.15, 1],
+  11: [1, 0.5, 0.25, 0.15, 0, 0],
+  12: [0.15, 0, 0, 1, 0.5, 0.25],
+  13: [0.5, 0.25, 1, 0.5, 0.25, 1],
+  14: [1, 0.5, 0.25, 0.15, 0, 0],
+  15: [0.25, 1, 0.5, 0.25, 1, 0.5],
+};
+
+function buildPixelKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): string {
+  return Object.entries(opacitiesByCell)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([cell, opacities]) => {
+      const loopedOpacities = [...opacities, opacities[0]];
+      const stepSize = 100 / opacities.length;
+      const steps = loopedOpacities
+        .map((opacity, index) => `      ${(index * stepSize).toFixed(2)}% { opacity: ${opacity}; }`)
+        .join('\n');
+      return `    @keyframes ${prefix}-ps-${cell} {\n${steps}\n    }`;
+    })
+    .join('\n');
+}
+
+const PIXEL_SPINNER_KEYFRAMES = [
+  buildPixelKeyframes('recording', RECORDING_OPACITIES),
+  buildPixelKeyframes('processing', PROCESSING_OPACITIES),
+  buildPixelKeyframes('complete', COMPLETE_OPACITIES),
+].join('\n');
 
 function createOverlayHTML(state: OverlayState, transcript?: string, errorMessage?: string): string {
   const payload = getOverlayPayload(state, transcript, errorMessage);
@@ -136,9 +173,6 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       --overlay-border: ${themeColors.border};
       --overlay-text: ${themeColors.text};
       --overlay-shadow: ${themeColors.shadow};
-      --cell-color: ${payload.config.color};
-      --cell-glow: ${payload.config.color}66;
-      --cell-glow-soft: ${payload.config.color}33;
       background: transparent;
       overflow: hidden;
       -webkit-app-region: no-drag;
@@ -167,8 +201,8 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     .overlay {
       display: flex;
       align-items: center;
-      gap: 10px;
-      padding: 8px 14px;
+      gap: 12px;
+      padding: 10px 18px;
       background: var(--overlay-bg);
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
@@ -184,32 +218,126 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     body.exiting .overlay {
       animation: overlayOut ${OVERLAY_EXIT_MS}ms cubic-bezier(0.4, 0, 1, 1) both;
     }
-    .pixel-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 7px);
-      grid-template-rows: repeat(3, 7px);
-      gap: 2px;
+    .pixel-spinner {
+      display: inline-grid;
+      grid-template-columns: repeat(4, 5px);
+      gap: 0;
       flex-shrink: 0;
     }
-    .pixel-cell {
-      width: 7px;
-      height: 7px;
-      border-radius: 2px;
-      background: transparent;
+    .pixel-spinner .cell {
+      width: 5px;
+      height: 5px;
       opacity: 0;
-      transform: scale(0.82);
-      transition:
-        background-color 130ms linear,
-        box-shadow 130ms linear,
-        opacity 130ms ease-out,
-        transform 130ms cubic-bezier(0.16, 1, 0.3, 1);
+      animation-duration: 1200ms;
+      animation-iteration-count: infinite;
+      animation-timing-function: linear;
+      background: linear-gradient(135deg, #ff416c, #ff4b2b);
+      box-shadow:
+        0 0 4px #ff416c,
+        0 0 10px #ff416c80,
+        0 0 19px #ff416c55;
     }
-    .pixel-cell.on {
-      background: var(--cell-color);
-      box-shadow: 0 0 7px 2px var(--cell-glow), 0 0 16px 4px var(--cell-glow-soft);
+    .pixel-spinner.stage-processing-fill .cell {
+      animation: none;
+    }
+    .pixel-spinner.stage-processing-fill .cell-0,
+    .pixel-spinner.stage-processing-fill .cell-1,
+    .pixel-spinner.stage-processing-fill .cell-2,
+    .pixel-spinner.stage-processing-fill .cell-3,
+    .pixel-spinner.stage-processing-fill .cell-4,
+    .pixel-spinner.stage-processing-fill .cell-7,
+    .pixel-spinner.stage-processing-fill .cell-8,
+    .pixel-spinner.stage-processing-fill .cell-11,
+    .pixel-spinner.stage-processing-fill .cell-12,
+    .pixel-spinner.stage-processing-fill .cell-13,
+    .pixel-spinner.stage-processing-fill .cell-14,
+    .pixel-spinner.stage-processing-fill .cell-15 {
       opacity: 1;
-      transform: scale(1);
     }
+    .pixel-spinner.stage-processing .cell {
+      animation-duration: 800ms;
+      background: linear-gradient(135deg, #f6d365, #fda085);
+      box-shadow:
+        0 0 4px #fda085,
+        0 0 10px #fda08580,
+        0 0 19px #fda08555;
+    }
+    .pixel-spinner.stage-complete .cell {
+      animation-duration: 1200ms;
+      background: linear-gradient(135deg, #134e5e, #33ff5c);
+      box-shadow:
+        0 0 4px #33ff5c,
+        0 0 10px #33ff5c80,
+        0 0 19px #33ff5c55;
+    }
+    .pixel-spinner.stage-error .cell {
+      animation: pixel-error-pulse 900ms ease-in-out infinite alternate;
+      background: linear-gradient(135deg, #7f1d1d, #ef4444);
+      box-shadow:
+        0 0 4px #ef4444,
+        0 0 10px #ef444480,
+        0 0 19px #ef444455;
+      opacity: 0.45;
+    }
+    .pixel-spinner.stage-error .cell-0,
+    .pixel-spinner.stage-error .cell-3,
+    .pixel-spinner.stage-error .cell-5,
+    .pixel-spinner.stage-error .cell-6,
+    .pixel-spinner.stage-error .cell-9,
+    .pixel-spinner.stage-error .cell-10,
+    .pixel-spinner.stage-error .cell-12,
+    .pixel-spinner.stage-error .cell-15 {
+      animation-delay: 120ms;
+    }
+    .pixel-spinner.stage-recording .cell-0 { animation-name: recording-ps-0; }
+    .pixel-spinner.stage-recording .cell-1 { animation-name: recording-ps-1; }
+    .pixel-spinner.stage-recording .cell-2 { animation-name: recording-ps-2; }
+    .pixel-spinner.stage-recording .cell-3 { animation-name: recording-ps-3; }
+    .pixel-spinner.stage-recording .cell-4 { animation-name: recording-ps-4; }
+    .pixel-spinner.stage-recording .cell-7 { animation-name: recording-ps-7; }
+    .pixel-spinner.stage-recording .cell-8 { animation-name: recording-ps-8; }
+    .pixel-spinner.stage-recording .cell-11 { animation-name: recording-ps-11; }
+    .pixel-spinner.stage-recording .cell-12 { animation-name: recording-ps-12; }
+    .pixel-spinner.stage-recording .cell-13 { animation-name: recording-ps-13; }
+    .pixel-spinner.stage-recording .cell-14 { animation-name: recording-ps-14; }
+    .pixel-spinner.stage-recording .cell-15 { animation-name: recording-ps-15; }
+    .pixel-spinner.stage-processing .cell-0 { animation-name: processing-ps-0; }
+    .pixel-spinner.stage-processing .cell-1 { animation-name: processing-ps-1; }
+    .pixel-spinner.stage-processing .cell-2 { animation-name: processing-ps-2; }
+    .pixel-spinner.stage-processing .cell-3 { animation-name: processing-ps-3; }
+    .pixel-spinner.stage-processing .cell-4 { animation-name: processing-ps-4; }
+    .pixel-spinner.stage-processing .cell-5 { animation-name: processing-ps-5; }
+    .pixel-spinner.stage-processing .cell-6 { animation-name: processing-ps-6; }
+    .pixel-spinner.stage-processing .cell-7 { animation-name: processing-ps-7; }
+    .pixel-spinner.stage-processing .cell-8 { animation-name: processing-ps-8; }
+    .pixel-spinner.stage-processing .cell-9 { animation-name: processing-ps-9; }
+    .pixel-spinner.stage-processing .cell-10 { animation-name: processing-ps-10; }
+    .pixel-spinner.stage-processing .cell-11 { animation-name: processing-ps-11; }
+    .pixel-spinner.stage-processing .cell-12 { animation-name: processing-ps-12; }
+    .pixel-spinner.stage-processing .cell-13 { animation-name: processing-ps-13; }
+    .pixel-spinner.stage-processing .cell-14 { animation-name: processing-ps-14; }
+    .pixel-spinner.stage-processing .cell-15 { animation-name: processing-ps-15; }
+    .pixel-spinner.stage-complete .cell-0 { animation-name: complete-ps-0; }
+    .pixel-spinner.stage-complete .cell-1 { animation-name: complete-ps-1; }
+    .pixel-spinner.stage-complete .cell-2 { animation-name: complete-ps-2; }
+    .pixel-spinner.stage-complete .cell-3 { animation-name: complete-ps-3; }
+    .pixel-spinner.stage-complete .cell-4 { animation-name: complete-ps-4; }
+    .pixel-spinner.stage-complete .cell-5 { animation-name: complete-ps-5; }
+    .pixel-spinner.stage-complete .cell-6 { animation-name: complete-ps-6; }
+    .pixel-spinner.stage-complete .cell-7 { animation-name: complete-ps-7; }
+    .pixel-spinner.stage-complete .cell-8 { animation-name: complete-ps-8; }
+    .pixel-spinner.stage-complete .cell-9 { animation-name: complete-ps-9; }
+    .pixel-spinner.stage-complete .cell-10 { animation-name: complete-ps-10; }
+    .pixel-spinner.stage-complete .cell-11 { animation-name: complete-ps-11; }
+    .pixel-spinner.stage-complete .cell-12 { animation-name: complete-ps-12; }
+    .pixel-spinner.stage-complete .cell-13 { animation-name: complete-ps-13; }
+    .pixel-spinner.stage-complete .cell-14 { animation-name: complete-ps-14; }
+    .pixel-spinner.stage-complete .cell-15 { animation-name: complete-ps-15; }
+    @keyframes pixel-error-pulse {
+      from { opacity: 0.35; }
+      to { opacity: 1; }
+    }
+${PIXEL_SPINNER_KEYFRAMES}
     .label {
       color: var(--overlay-text);
       font-size: 13px;
@@ -228,32 +356,18 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
 </head>
 <body>
   <div class="overlay">
-    <div class="pixel-grid" id="grid"></div>
+    <div class="pixel-spinner stage-${payload.stage}" id="spinner">
+      ${PIXEL_SPINNER_CELLS}
+    </div>
     <div class="label" id="label">${escapeHtml(payload.label)}</div>
   </div>
   <script>
     (function() {
-      var frames = ${JSON.stringify(payload.frames)};
       var state = ${JSON.stringify(state)};
-      var cells = [];
-      var activePixels = new Set();
-      var timer = null;
+      var fillTimer = null;
       var labelTimer = null;
-      var grid = document.getElementById('grid');
+      var spinner = document.getElementById('spinner');
       var label = document.getElementById('label');
-      for (var i = 0; i < 9; i++) {
-        var cell = document.createElement('div');
-        cell.className = 'pixel-cell';
-        cell.dataset.index = String(i + 1);
-        grid.appendChild(cell);
-        cells.push(cell);
-      }
-      var step = 0;
-      function setColor(color) {
-        document.body.style.setProperty('--cell-color', color);
-        document.body.style.setProperty('--cell-glow', color + '66');
-        document.body.style.setProperty('--cell-glow-soft', color + '33');
-      }
       function setLabel(nextLabel) {
         if (!label || label.textContent === nextLabel) return;
         if (labelTimer) clearTimeout(labelTimer);
@@ -265,46 +379,32 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
           });
         }, 95);
       }
-      function getActiveSet() {
-        if (frames.length === 0) return new Set();
-        return new Set(frames[step % frames.length].pixels);
+      function setStage(stage) {
+        if (!spinner) return;
+        spinner.className = 'pixel-spinner stage-' + stage;
       }
-      function paint(active) {
-        activePixels = active;
-        cells.forEach(function(cell) {
-          var idx = parseInt(cell.dataset.index, 10);
-          if (active.has(idx)) {
-            cell.classList.add('on');
-          } else {
-            cell.classList.remove('on');
-          }
-        });
-      }
-      function tick() {
-        var frame = frames[step % (frames.length || 1)];
-        paint(getActiveSet());
-        step = (step + 1) % (frames.length || 1);
-        timer = setTimeout(tick, frame ? frame.duration : 200);
+      function applyPayload(payload) {
+        state = payload.state;
+        setLabel(payload.label);
+        setStage(payload.stage);
       }
       window.updateOverlayState = function(payload) {
         document.body.classList.remove('exiting');
-        state = payload.state;
-        setColor(payload.config.color);
-        setLabel(payload.label);
+        if (fillTimer) {
+          clearTimeout(fillTimer);
+          fillTimer = null;
+        }
 
-        var nextFrames = payload.frames || [];
-        var firstNextFrame = nextFrames.length > 0 ? nextFrames[0].pixels : [];
-        var bridgeFrames = activePixels.size > 0
-          ? [
-              { pixels: Array.from(activePixels), duration: 90 },
-              { pixels: firstNextFrame, duration: 130 },
-            ]
-          : [];
+        if (state === 'recording' && payload.state === 'processing') {
+          setStage('processing-fill');
+          fillTimer = setTimeout(function() {
+            applyPayload(payload);
+            fillTimer = null;
+          }, ${PROCESSING_FILL_MS});
+          return;
+        }
 
-        frames = bridgeFrames.concat(nextFrames);
-        step = 0;
-        if (timer) clearTimeout(timer);
-        tick();
+        applyPayload(payload);
       };
       window.updateOverlayTheme = function(colors) {
         document.body.style.setProperty('--overlay-bg', colors.background);
@@ -312,7 +412,6 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
         document.body.style.setProperty('--overlay-text', colors.text);
         document.body.style.setProperty('--overlay-shadow', colors.shadow);
       };
-      tick();
     })();
   </script>
 </body>
@@ -343,6 +442,12 @@ function showOverlayWithoutFocus(win: BrowserWindow): void {
     win.showInactive();
   } else {
     win.show();
+  }
+}
+
+function hideOverlayWindowButtons(win: BrowserWindow): void {
+  if (process.platform === 'darwin') {
+    win.setWindowButtonVisibility(false);
   }
 }
 
@@ -377,6 +482,7 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
   }
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
+    hideOverlayWindowButtons(overlayWindow);
     overlayWindow.webContents.executeJavaScript(`
       if (window.updateOverlayState) {
         window.updateOverlayState(${JSON.stringify(payload)});
@@ -404,6 +510,10 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
     frame: false,
     alwaysOnTop: true,
     resizable: false,
+    closable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
     skipTaskbar: true,
     hasShadow: false,
     focusable: false,
@@ -417,6 +527,7 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setIgnoreMouseEvents(true);
   overlayWindow.setAlwaysOnTop(true, 'floating', 1);
+  hideOverlayWindowButtons(overlayWindow);
 
   overlayWindow.webContents.loadURL(
     `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
@@ -424,6 +535,7 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
 
   overlayWindow.once('ready-to-show', () => {
     if (overlayWindow && !overlayWindow.isDestroyed()) {
+      hideOverlayWindowButtons(overlayWindow);
       showOverlayWithoutFocus(overlayWindow);
     }
   });

@@ -6,7 +6,25 @@ import { startPythonService, stopPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
 import { setOverlayThemeBackground } from './overlayWindow';
 import { setMainWindow } from './audioRecorder';
-import { loadConversations, saveConversations, deleteConversation, loadFolders, saveFolders, loadSelectedModel, saveSelectedModel, loadSelectedProvider, saveSelectedProvider, loadOpenTabIds, saveOpenTabIds, loadCurrentConversationId, saveCurrentConversationId } from './store';
+import {
+  loadConversation,
+  loadConversationMetadata,
+  loadConversations,
+  saveConversation,
+  saveConversationMetadata,
+  saveConversations,
+  deleteConversation,
+  loadFolders,
+  saveFolders,
+  loadSelectedModel,
+  saveSelectedModel,
+  loadSelectedProvider,
+  saveSelectedProvider,
+  loadOpenTabIds,
+  saveOpenTabIds,
+  loadCurrentConversationId,
+  saveCurrentConversationId,
+} from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
 import { tavilySearch, toSearchSource, type TavilySearchToolArgs, type TavilySearchToolResult } from './tavilySearchService';
 import {
@@ -29,6 +47,8 @@ let isQuitting = false;
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 2;
 const MAX_FETCH_URL_CALLS_PER_TURN = 2;
+const CHAT_MODEL_KEEP_ALIVE = '2m';
+const ONE_OFF_MODEL_KEEP_ALIVE = 0;
 
 interface SendMessageStreamRequest {
   conversationId: string;
@@ -532,7 +552,13 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
     let fetchUrlCallsThisTurn = 0;
 
     while (true) {
-      const turnResult = await provider.streamChat(request.model, baseMessages, abortController, emitStreamChunk, { tools: CHAT_TOOLS });
+      const turnResult = await provider.streamChat(
+        request.model,
+        baseMessages,
+        abortController,
+        emitStreamChunk,
+        { tools: CHAT_TOOLS, keepAlive: CHAT_MODEL_KEEP_ALIVE }
+      );
       const assistantMessage = turnResult.assistantMessage;
       const toolCalls = assistantMessage?.tool_calls ?? [];
       if (!toolCalls.length) {
@@ -733,7 +759,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
           buildToolResultSynthesisMessages(baseMessages, assistantMessage, toolResultMessages),
           abortController,
           emitStreamChunk,
-          { tools: null },
+          { tools: null, keepAlive: CHAT_MODEL_KEEP_ALIVE },
         );
 
         if (synthesisResult.assistantMessage?.tool_calls?.length) {
@@ -781,8 +807,30 @@ ipcMain.handle('store:load-conversations', async () => {
   return loadConversations();
 });
 
+ipcMain.handle('store:load-conversation-list', async () => {
+  return loadConversationMetadata();
+});
+
+ipcMain.handle('store:load-conversation', async (_event, id: string) => {
+  return loadConversation(id);
+});
+
+ipcMain.handle('store:load-conversations-by-id', async (_event, ids: string[]) => {
+  return loadConversations(ids);
+});
+
 ipcMain.handle('store:save-conversations', async (_event, conversations: unknown) => {
   saveConversations(conversations as import('./store').SerializedConversation[]);
+  return { success: true };
+});
+
+ipcMain.handle('store:save-conversation-list', async (_event, metadata: unknown) => {
+  saveConversationMetadata(metadata as import('./store').SerializedConversationMetadata[]);
+  return { success: true };
+});
+
+ipcMain.handle('store:save-conversation', async (_event, conversation: unknown) => {
+  saveConversation(conversation as import('./store').SerializedConversation);
   return { success: true };
 });
 
@@ -801,7 +849,7 @@ ipcMain.handle('store:save-folders', async (_event, folders: unknown) => {
 });
 
 ipcMain.handle('store:delete-folder', async (_event, id: string) => {
-  const folderConversations = loadConversations().filter(c => c.folderId === id);
+  const folderConversations = loadConversationMetadata().filter(c => c.folderId === id);
   for (const c of folderConversations) {
     await deleteConversation(c.id);
   }
@@ -853,7 +901,7 @@ ipcMain.handle('generate-title', async (_event, message: string, model: string, 
     const result = await provider.sendChat(model, [
       { role: 'system', content: 'Generate a very short title (3-6 words) for a conversation that starts with the following message. Return ONLY the title, nothing else. No quotes, no punctuation at the end.' },
       { role: 'user', content: message },
-    ]);
+    ], { keepAlive: ONE_OFF_MODEL_KEEP_ALIVE });
     return result.trim();
   } catch (error) {
     console.error('Failed to generate title:', error);

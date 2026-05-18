@@ -44,6 +44,11 @@ export interface StreamTurnResult {
 
 export interface StreamChatTurnOptions {
   tools?: ToolDefinition[] | null;
+  keepAlive?: string | number;
+}
+
+export interface SendChatOptions {
+  keepAlive?: string | number;
 }
 
 export interface ModelInfo {
@@ -69,6 +74,6 @@ export interface Provider {
     onChunk: (chunk: StreamChunk) => void,
     options?: StreamChatTurnOptions,
   ): Promise<StreamTurnResult>;
-  sendChat(model: string, messages: ChatMessage[]): Promise<string>;
+  sendChat(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string>;
   getApiKey(): string | null;
 }

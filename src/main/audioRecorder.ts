@@ -1,5 +1,4 @@
-import { ipcMain, systemPreferences, BrowserWindow, desktopCapturer } from 'electron';
-import * as path from 'path';
+import { ipcMain, systemPreferences, BrowserWindow, type MessagePortMain } from 'electron';
 
 const SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
@@ -7,8 +6,17 @@ const BIT_DEPTH = 16;
 const AUDIO_STOP_DRAIN_MS = 150;
 
 let mainWindow: BrowserWindow | null = null;
-let audioChunks: Int16Array[] = [];
+let audioChunks: Buffer[] = [];
+let audioByteLength = 0;
+let audioPort: MessagePortMain | null = null;
 let isRecording = false;
+
+export type RecordedAudio = {
+  chunks: readonly Buffer[];
+  byteLength: number;
+  filename: string;
+  contentType: string;
+};
 
 function createWavHeader(dataLength: number): Buffer {
   const header = Buffer.alloc(44);
@@ -31,14 +39,6 @@ function createWavHeader(dataLength: number): Buffer {
   return header;
 }
 
-function int16ArrayToBuffer(array: Int16Array): Buffer {
-  const buffer = Buffer.alloc(array.byteLength);
-  for (let i = 0; i < array.length; i++) {
-    buffer.writeInt16LE(array[i], i * 2);
-  }
-  return buffer;
-}
-
 export async function requestMicrophoneAccess(): Promise<boolean> {
   if (process.platform === 'darwin') {
     const status = systemPreferences.getMediaAccessStatus('microphone');
@@ -59,11 +59,49 @@ export async function initAudioCapture(): Promise<void> {
   // Audio capture is initialized when needed
 }
 
-ipcMain.on('audio-data', (_event, samples: number[]) => {
-  if (isRecording) {
-    const int16Array = new Int16Array(samples);
-    audioChunks.push(int16Array);
+function closeAudioPort(): void {
+  if (audioPort) {
+    audioPort.close();
+    audioPort = null;
   }
+}
+
+function storeAudioChunk(chunk: unknown): void {
+  if (isRecording) {
+    if (chunk instanceof ArrayBuffer) {
+      const buffer = Buffer.from(chunk);
+      audioChunks.push(buffer);
+      audioByteLength += buffer.byteLength;
+    } else if (ArrayBuffer.isView(chunk)) {
+      const buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      audioChunks.push(buffer);
+      audioByteLength += buffer.byteLength;
+    }
+  }
+}
+
+ipcMain.on('audio-port', (event) => {
+  const [port] = event.ports;
+  if (!port) {
+    return;
+  }
+
+  closeAudioPort();
+  audioPort = port;
+
+  port.on('message', (messageEvent) => {
+    storeAudioChunk(messageEvent.data);
+  });
+  port.on('close', () => {
+    if (audioPort === port) {
+      audioPort = null;
+    }
+  });
+  port.start();
+});
+
+ipcMain.on('audio-data', (_event, chunk: ArrayBuffer | ArrayBufferView) => {
+  storeAudioChunk(chunk);
 });
 
 export async function startRecording(): Promise<{ success: boolean; error?: string }> {
@@ -77,6 +115,8 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
   }
   
   audioChunks = [];
+  audioByteLength = 0;
+  closeAudioPort();
   isRecording = true;
   
   try {
@@ -109,19 +149,19 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
               class AudioProcessor extends AudioWorkletProcessor {
                 constructor() {
                   super();
-                  this.samples = [];
                 }
                 
                 process(inputs, outputs, parameters) {
                   const input = inputs[0];
                   if (input.length > 0) {
                     const channelData = input[0];
-                    // Convert float32 to int16
-                    const int16Samples = new Int16Array(channelData.length);
+                    const pcmBuffer = new ArrayBuffer(channelData.length * 2);
+                    const pcmSamples = new DataView(pcmBuffer);
                     for (let i = 0; i < channelData.length; i++) {
-                      int16Samples[i] = Math.max(-32768, Math.min(32767, Math.floor(channelData[i] * 32768)));
+                      const sample = Math.max(-32768, Math.min(32767, Math.floor(channelData[i] * 32768)));
+                      pcmSamples.setInt16(i * 2, sample, true);
                     }
-                    this.port.postMessage({ samples: Array.from(int16Samples) });
+                    this.port.postMessage(pcmBuffer, [pcmBuffer]);
                   }
                   return true;
                 }
@@ -131,9 +171,26 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
           );
           
           const processor = new AudioWorkletNode(audioContext, 'audio-processor');
+          let audioPort = null;
+          try {
+            if (typeof MessageChannel !== 'undefined' && window.assistant?.connectAudioPort) {
+              const channel = new MessageChannel();
+              window.assistant.connectAudioPort(channel.port1);
+              audioPort = channel.port2;
+              audioPort.start?.();
+              window.__audioPort = audioPort;
+            }
+          } catch {
+            audioPort = null;
+          }
+
           processor.port.onmessage = (event) => {
-            if (event.data.samples) {
-              window.assistant?.sendAudioData?.(event.data.samples);
+            if (event.data instanceof ArrayBuffer) {
+              if (audioPort) {
+                audioPort.postMessage(event.data, [event.data]);
+              } else {
+                window.assistant?.sendAudioData?.(event.data);
+              }
             }
           };
           
@@ -152,17 +209,23 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
     
     if (!result.success) {
       isRecording = false;
+      audioChunks = [];
+      audioByteLength = 0;
+      closeAudioPort();
       return { success: false, error: result.error || 'Failed to start audio capture' };
     }
     
     return { success: true };
   } catch (error) {
     isRecording = false;
+    audioChunks = [];
+    audioByteLength = 0;
+    closeAudioPort();
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error starting recording' };
   }
 }
 
-export async function stopRecording(): Promise<Buffer> {
+export async function stopRecording(): Promise<RecordedAudio> {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
       await mainWindow.webContents.executeJavaScript(`
@@ -196,21 +259,21 @@ export async function stopRecording(): Promise<Buffer> {
   
   await new Promise(resolve => setTimeout(resolve, AUDIO_STOP_DRAIN_MS));
   isRecording = false;
-  
-  const totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const combinedData = new Int16Array(totalLength);
-  let offset = 0;
-  for (const chunk of audioChunks) {
-    combinedData.set(chunk, offset);
-    offset += chunk.length;
-  }
-  
+
+  const wavHeader = createWavHeader(audioByteLength);
+  const wavChunks = [wavHeader, ...audioChunks];
+  const byteLength = wavHeader.byteLength + audioByteLength;
+
   audioChunks = [];
-  
-  const audioBuffer = int16ArrayToBuffer(combinedData);
-  const wavHeader = createWavHeader(audioBuffer.length);
-  
-  return Buffer.concat([wavHeader, audioBuffer]);
+  audioByteLength = 0;
+  closeAudioPort();
+
+  return {
+    chunks: wavChunks,
+    byteLength,
+    filename: 'audio.wav',
+    contentType: 'audio/wav',
+  };
 }
 
 export function isCurrentlyRecording(): boolean {
@@ -220,6 +283,8 @@ export function isCurrentlyRecording(): boolean {
 export async function cleanupAudioCapture(): Promise<void> {
   isRecording = false;
   audioChunks = [];
+  audioByteLength = 0;
+  closeAudioPort();
   
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
@@ -230,6 +295,10 @@ export async function cleanupAudioCapture(): Promise<void> {
           }
           if (window.__audioContext) {
             window.__audioContext.close();
+          }
+          if (window.__audioPort) {
+            window.__audioPort.close();
+            window.__audioPort = null;
           }
         })()
       `);

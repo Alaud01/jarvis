@@ -154,9 +154,11 @@ class RobustChatOllama:
     - JSON schema is passed as format parameter to constrain the model
     """
 
-    def __init__(self, inner_llm):
+    def __init__(self, inner_llm, keep_alive: str | int | None = None):
         self._inner = inner_llm
-        print(f"[RobustChatOllama] Initialized wrapper for model={inner_llm.model}")
+        self._keep_alive = keep_alive
+        keep_alive_label = f", keep_alive={keep_alive}" if keep_alive is not None else ""
+        print(f"[RobustChatOllama] Initialized wrapper for model={inner_llm.model}{keep_alive_label}")
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):
@@ -178,12 +180,16 @@ class RobustChatOllama:
         schema = output_format.model_json_schema()
 
         client: OllamaAsyncClient = self._inner.get_client()
-        response = await client.chat(
-            model=self._inner.model,
-            messages=ollama_messages,
-            format=schema,
-            options=self._inner.ollama_options,
-        )
+        chat_kwargs: dict[str, Any] = {
+            "model": self._inner.model,
+            "messages": ollama_messages,
+            "format": schema,
+            "options": self._inner.ollama_options,
+        }
+        if self._keep_alive is not None:
+            chat_kwargs["keep_alive"] = self._keep_alive
+
+        response = await client.chat(**chat_kwargs)
 
         raw_content = response.message.content or ''
         if not raw_content or not raw_content.strip():
