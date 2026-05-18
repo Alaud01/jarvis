@@ -4,14 +4,17 @@ let overlayWindow: BrowserWindow | null = null;
 let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 let overlayThemeIsDark = true;
 
-const OVERLAY_WIDTH = 200;
 const OVERLAY_MAX_WIDTH = 500;
 const OVERLAY_HEIGHT = 56;
 const OVERLAY_EXIT_MS = 160;
 const PROCESSING_FILL_MS = 180;
+const COMPLETE_FILL_MS = 220;
+const OVERLAY_X_PADDING = 18;
+const OVERLAY_CONTENT_GAP = 12;
+const PIXEL_SPINNER_SIZE = 20;
 
 type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
-type OverlayVisualStage = OverlayState | 'processing-fill';
+type OverlayVisualStage = OverlayState | 'processing-fill' | 'complete-fill';
 
 const STATE_CONFIG: Record<OverlayState, { label: string; stage: OverlayVisualStage }> = {
   recording: {
@@ -65,7 +68,8 @@ function getOverlayDisplayLabel(state: OverlayState, transcript?: string, errorM
 
 function getOverlayWidth(label: string): number {
   const estimatedTextWidth = Math.ceil(label.length * 7.2);
-  return Math.min(OVERLAY_MAX_WIDTH, Math.max(OVERLAY_WIDTH, estimatedTextWidth + 78));
+  const contentWidth = (OVERLAY_X_PADDING * 2) + PIXEL_SPINNER_SIZE + OVERLAY_CONTENT_GAP + estimatedTextWidth;
+  return Math.min(OVERLAY_MAX_WIDTH, contentWidth);
 }
 
 function getOverlayPayload(state: OverlayState, transcript?: string, errorMessage?: string): {
@@ -122,22 +126,22 @@ const PROCESSING_OPACITIES: PixelOpacityMap = {
 };
 
 const COMPLETE_OPACITIES: PixelOpacityMap = {
-  0: [1, 0.5, 0.25, 0.15, 1, 0.5],
-  1: [0, 1, 0.5, 0.25, 0.15, 0],
-  2: [0.5, 0.25, 1, 0.5, 0.25, 1],
-  3: [0.15, 0, 0, 1, 0.5, 0.25],
-  4: [0, 1, 0.5, 0.25, 0.15, 0],
-  5: [1, 0.5, 0.25, 0.15, 0, 1],
-  6: [0.25, 0.15, 0, 1, 1, 0.5],
-  7: [0, 0, 1, 0.5, 0.25, 0.15],
-  8: [0, 0, 1, 0.5, 0.25, 0.15],
-  9: [0.25, 0.15, 0, 1, 1, 0.5],
-  10: [0.5, 1, 0.5, 0.25, 0.15, 1],
-  11: [1, 0.5, 0.25, 0.15, 0, 0],
-  12: [0.15, 0, 0, 1, 0.5, 0.25],
-  13: [0.5, 0.25, 1, 0.5, 0.25, 1],
-  14: [1, 0.5, 0.25, 0.15, 0, 0],
-  15: [0.25, 1, 0.5, 0.25, 1, 0.5],
+  0: [0.25, 0.15, 1, 0.5],
+  1: [0.5, 0.25, 0.15, 1],
+  2: [1, 0.5, 0.25, 0.15],
+  3: [0.15, 1, 0.5, 0.25],
+  4: [0.5, 1, 1, 1],
+  5: [1, 0.5, 1, 1],
+  6: [1, 1, 0.5, 1],
+  7: [1, 1, 1, 0.5],
+  8: [1, 0.5, 0.25, 1],
+  9: [1, 1, 0.5, 0.25],
+  10: [0.25, 1, 1, 0.5],
+  11: [0.5, 0.25, 1, 1],
+  12: [1, 0.5, 0.25, 0.15],
+  13: [0.15, 1, 0.5, 0.25],
+  14: [0.25, 0.15, 1, 0.5],
+  15: [0.5, 0.25, 0.15, 1],
 };
 
 function buildPixelKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): string {
@@ -154,10 +158,27 @@ function buildPixelKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): 
     .join('\n');
 }
 
+function buildPixelStepKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): string {
+  return Object.entries(opacitiesByCell)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([cell, opacities]) => {
+      const stepSize = 100 / opacities.length;
+      const steps = opacities
+        .map((opacity, index) => {
+          const start = index * stepSize;
+          const end = (index + 1) * stepSize - 0.01;
+          return `      ${start.toFixed(2)}%, ${end.toFixed(2)}% { opacity: ${opacity}; }`;
+        })
+        .join('\n');
+      return `    @keyframes ${prefix}-ps-${cell} {\n${steps}\n    }`;
+    })
+    .join('\n');
+}
+
 const PIXEL_SPINNER_KEYFRAMES = [
   buildPixelKeyframes('recording', RECORDING_OPACITIES),
   buildPixelKeyframes('processing', PROCESSING_OPACITIES),
-  buildPixelKeyframes('complete', COMPLETE_OPACITIES),
+  buildPixelStepKeyframes('complete', COMPLETE_OPACITIES),
 ].join('\n');
 
 function createOverlayHTML(state: OverlayState, transcript?: string, errorMessage?: string): string {
@@ -201,15 +222,14 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     .overlay {
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 10px 18px;
+      gap: ${OVERLAY_CONTENT_GAP}px;
+      padding: 10px ${OVERLAY_X_PADDING}px;
       background: var(--overlay-bg);
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
       border-radius: 999px;
       border: 1px solid var(--overlay-border);
       box-shadow: var(--overlay-shadow);
-      min-width: ${OVERLAY_WIDTH - 20}px;
       max-width: 500px;
       transform-origin: top center;
       animation: overlayIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -254,6 +274,14 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     .pixel-spinner.stage-processing-fill .cell-15 {
       opacity: 1;
     }
+    .pixel-spinner.stage-complete-fill .cell {
+      animation: pixel-complete-fill ${COMPLETE_FILL_MS}ms cubic-bezier(0.16, 1, 0.3, 1) both;
+      background: linear-gradient(135deg, #134e5e, #33ff5c);
+      box-shadow:
+        0 0 4px #33ff5c,
+        0 0 12px #33ff5ca6,
+        0 0 24px #33ff5c70;
+    }
     .pixel-spinner.stage-processing .cell {
       animation-duration: 800ms;
       background: linear-gradient(135deg, #f6d365, #fda085);
@@ -263,7 +291,8 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
         0 0 19px #fda08555;
     }
     .pixel-spinner.stage-complete .cell {
-      animation-duration: 1200ms;
+      animation-duration: 800ms;
+      animation-timing-function: steps(1, end);
       background: linear-gradient(135deg, #134e5e, #33ff5c);
       box-shadow:
         0 0 4px #33ff5c,
@@ -337,6 +366,20 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       from { opacity: 0.35; }
       to { opacity: 1; }
     }
+    @keyframes pixel-complete-fill {
+      from {
+        opacity: 0.35;
+        transform: scale(0.86);
+      }
+      55% {
+        opacity: 1;
+        transform: scale(1.12);
+      }
+      to {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
 ${PIXEL_SPINNER_KEYFRAMES}
     .label {
       color: var(--overlay-text);
@@ -404,6 +447,16 @@ ${PIXEL_SPINNER_KEYFRAMES}
           return;
         }
 
+        if (state === 'processing' && payload.state === 'complete') {
+          setLabel(payload.label);
+          setStage('complete-fill');
+          fillTimer = setTimeout(function() {
+            applyPayload(payload);
+            fillTimer = null;
+          }, ${COMPLETE_FILL_MS});
+          return;
+        }
+
         applyPayload(payload);
       };
       window.updateOverlayTheme = function(colors) {
@@ -426,7 +479,7 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function getOverlayPosition(width = OVERLAY_WIDTH): { x: number; y: number } {
+function getOverlayPosition(width: number): { x: number; y: number } {
   const cursor = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursor);
   const { width: screenWidth } = display.workAreaSize;
