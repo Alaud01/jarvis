@@ -39,8 +39,9 @@ pnpm install
 ## Development
 
 ```bash
-pnpm dev       # Start Vite dev server
-pnpm start     # Launch Electron
+pnpm dev       # Launch Electron with the Vite dev server
+pnpm dev:vite  # Start only the renderer dev server
+pnpm start     # Launch a production build in Electron
 ```
 
 ## Build

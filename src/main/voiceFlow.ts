@@ -132,6 +132,13 @@ async function stopAndProcess(): Promise<void> {
 
   try {
     const audioBuffer = await stopRecording();
+    if (audioBuffer.durationMs < 250 || audioBuffer.peak < 0.001) {
+      const errorMessage = `Microphone captured silence (${Math.round(audioBuffer.durationMs)}ms, peak ${audioBuffer.peak.toFixed(4)})`;
+      showOverlay('error', undefined, errorMessage);
+      sendErrorToRenderer(errorMessage);
+      return;
+    }
+
     const result = await processVoiceFlow(audioBuffer);
 
     if (result.success && result.text) {

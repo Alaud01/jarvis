@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
 import { createHash, randomUUID } from 'crypto';
-import { app } from 'electron';
+import { app, screen } from 'electron';
 import type { BrowserTraceAction, BrowserTraceEvent, BrowserTraceResult } from '../shared/browser';
 
 const BROWSER_SERVICE_PORT = 8001;
@@ -244,11 +244,25 @@ function getBootstrapPythonExecutable(): string {
     || (process.platform === 'win32' ? 'python' : 'python3');
 }
 
+function getBrowserWindowEnvironment(): NodeJS.ProcessEnv {
+  const cursor = screen.getCursorScreenPoint();
+  const display = screen.getDisplayNearestPoint(cursor);
+  const { x, y, width, height } = display.workArea;
+
+  return {
+    BROWSER_WINDOW_X: String(x),
+    BROWSER_WINDOW_Y: String(y),
+    BROWSER_WINDOW_WIDTH: String(width),
+    BROWSER_WINDOW_HEIGHT: String(height),
+  };
+}
+
 function getSetupStampPath(): string {
   return path.join(getBrowserStatePath(), BROWSER_SETUP_STAMP_FILE);
 }
 
 function spawnBrowserProcess(serviceDir: string, pythonExe: string): ChildProcess {
+  const browserWindowEnv = getBrowserWindowEnvironment();
 
   const proc = spawn(
     pythonExe,
@@ -256,7 +270,7 @@ function spawnBrowserProcess(serviceDir: string, pythonExe: string): ChildProces
     {
       cwd: serviceDir,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, ...browserWindowEnv, PYTHONUNBUFFERED: '1' },
     }
   );
 
@@ -710,6 +724,7 @@ export async function runBrowserTask(
   signal?: AbortSignal,
   plannerModel?: string,
   traceCallback?: (event: BrowserTraceEvent) => void,
+  apiKey?: string,
 ): Promise<BrowserTaskResult> {
   const running = await ensureServiceRunning();
   if (!running) {
@@ -732,7 +747,7 @@ export async function runBrowserTask(
   try {
     const response = await postJsonToBrowserService<BrowserTaskResult>(
       '/browser-task',
-      { task, model, provider, planner_model: plannerModel, run_id: runId },
+      { task, model, provider, api_key: apiKey, planner_model: plannerModel, run_id: runId },
       BROWSER_TASK_TIMEOUT_MS,
       signal,
     );

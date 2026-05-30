@@ -32,6 +32,24 @@ interface MarkdownRendererProps {
   content: string;
 }
 
+const containsTexCommand = (value: string): boolean => /\\[a-zA-Z]+/.test(value);
+
+const normalizeMathDelimiters = (value: string): string => (
+  value
+    .replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, math) => `$$${math.trim()}$$`)
+    .split('\n')
+    .map((line) => {
+      const match = /^(\s*)\[\s*(.+?)\s*\](\s*)$/.exec(line);
+
+      if (!match || !containsTexCommand(match[2])) {
+        return line;
+      }
+
+      return `${match[1]}$$${match[2]}$$${match[3]}`;
+    })
+    .join('\n')
+);
+
 const CopyIcon: React.FC = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
@@ -45,12 +63,21 @@ const CheckIcon: React.FC = () => (
   </svg>
 );
 
-const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props }) => {
-  const codeRef = useRef<HTMLElement>(null);
+const getCodeText = (children: React.ReactNode): string => (
+  String(children).replace(/\n$/, '')
+);
+
+const getLanguageFromClassName = (className?: string): string => {
+  const match = /language-([\w-]+)/.exec(className || '');
+  return match ? match[1] : '';
+};
+
+const PreBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   const [copied, setCopied] = useState(false);
-  const match = /language-(\w+)/.exec(className || '');
-  const language = match ? match[1] : '';
-  const code = String(children).replace(/\n$/, '');
+  const child = React.Children.only(children);
+  const childProps = React.isValidElement<CodeProps>(child) ? child.props : undefined;
+  const code = getCodeText(childProps?.children);
+  const language = getLanguageFromClassName(childProps?.className);
 
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(code).then(() => {
@@ -59,23 +86,8 @@ const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props 
     });
   }, [code]);
 
-  useEffect(() => {
-    if (!inline && codeRef.current && language) {
-      delete (codeRef.current as any).dataset.highlighted;
-      hljs.highlightElement(codeRef.current);
-    }
-  }, [code, language, inline]);
-
-  if (inline || !className) {
-    return (
-      <code className="bg-bg-code px-1.5 py-0.5 rounded text-[0.875em] font-mono inline" {...props}>
-        {children}
-      </code>
-    );
-  }
-
   return (
-    <div className="relative group my-4">
+    <div className="code-block-shell relative group">
       <button
         type="button"
         onClick={handleCopy}
@@ -89,22 +101,48 @@ const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props 
           {language}
         </div>
       )}
-      <pre className="bg-bg-code border border-border-primary rounded overflow-x-auto">
-        <code ref={codeRef} className={`language-${language} font-mono text-sm`} {...props}>
-          {children}
-        </code>
-      </pre>
+      <pre>{children}</pre>
     </div>
   );
 };
 
+const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props }) => {
+  const codeRef = useRef<HTMLElement>(null);
+  const language = getLanguageFromClassName(className);
+  const code = getCodeText(children);
+
+  useEffect(() => {
+    if (!inline && codeRef.current && language) {
+      delete (codeRef.current as HTMLElement & { dataset: DOMStringMap }).dataset.highlighted;
+      hljs.highlightElement(codeRef.current);
+    }
+  }, [code, language, inline]);
+
+  if (inline) {
+    return (
+      <code {...props}>
+        {children}
+      </code>
+    );
+  }
+
+  return (
+    <code ref={codeRef} className={className} {...props}>
+      {children}
+    </code>
+  );
+};
+
 const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
+  const normalizedContent = normalizeMathDelimiters(content);
+
   return (
     <div className="marktext-content markdown-content text-text-primary">
       <ReactMarkdown
-        remarkPlugins={[remarkMath, remarkGfm]}
+        remarkPlugins={[[remarkMath, { singleDollarTextMath: false }], remarkGfm]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          pre: PreBlock,
           code: CodeBlock,
           h1: ({ children }) => <h1>{children}</h1>,
           h2: ({ children }) => <h2>{children}</h2>,
@@ -144,7 +182,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
           img: ({ src, alt }) => <img src={src} alt={alt ?? ''} loading="lazy" />,
         }}
       >
-        {content}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );

@@ -42,53 +42,53 @@ const StepBlock: React.FC<{ step: BrowserLLMTraceStep }> = ({ step }) => {
 
   return (
     <div className="border-t border-border-secondary first:border-t-0 py-3 first:pt-0 last:pb-0">
-      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[0.65rem] uppercase tracking-widest text-text-tertiary">
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 thinking-panel-toggle-label">
         <span>Step {step.stepIndex + 1}</span>
         {formatTime(step.timestamp) && <span>{formatTime(step.timestamp)}</span>}
         {duration && <span>{duration}</span>}
       </div>
 
       {(step.pageTitle || step.url) && (
-        <div className="mb-2 min-w-0 text-xs text-text-secondary">
+        <div className="mb-2 min-w-0 text-text-secondary">
           {step.pageTitle && <div className="truncate font-medium text-text-primary">{step.pageTitle}</div>}
-          {step.url && <div className="truncate font-mono text-[0.7rem] text-text-muted">{step.url}</div>}
+          {step.url && <div className="truncate thinking-panel-meta">{step.url}</div>}
         </div>
       )}
 
       {step.thinking && (
-        <div className="mb-3 text-xs italic text-text-tertiary">
+        <div className="mb-3 italic text-text-tertiary">
           <MarkdownRenderer content={step.thinking} />
         </div>
       )}
 
-      <div className="space-y-2 text-xs text-text-secondary">
+      <div className="space-y-2 text-text-secondary">
         {step.evaluationPreviousGoal && (
           <div>
-            <span className="font-mono text-[0.65rem] uppercase tracking-widest text-text-muted">Evaluation</span>
+            <span className="thinking-panel-section-label">Evaluation</span>
             <div className="mt-1">{step.evaluationPreviousGoal}</div>
           </div>
         )}
         {step.memory && (
           <div>
-            <span className="font-mono text-[0.65rem] uppercase tracking-widest text-text-muted">Memory</span>
+            <span className="thinking-panel-section-label">Memory</span>
             <div className="mt-1">{step.memory}</div>
           </div>
         )}
         {step.nextGoal && (
           <div>
-            <span className="font-mono text-[0.65rem] uppercase tracking-widest text-text-muted">Next</span>
+            <span className="thinking-panel-section-label">Next</span>
             <div className="mt-1">{step.nextGoal}</div>
           </div>
         )}
         {step.actions && step.actions.length > 0 && (
           <div>
-            <span className="font-mono text-[0.65rem] uppercase tracking-widest text-text-muted">Actions</span>
+            <span className="thinking-panel-section-label">Actions</span>
             <div className="mt-1 space-y-1">
               {step.actions.map((action, index) => (
                 <div key={`${action.toolName}-${index}`} className="min-w-0 rounded border border-border-secondary px-2 py-1">
                   <span className="font-mono text-text-primary">{action.toolName}</span>
                   {stringifyInput(action.input) && (
-                    <span className="ml-2 break-words font-mono text-[0.7rem] text-text-muted">
+                    <span className="ml-2 break-words thinking-panel-meta">
                       {stringifyInput(action.input)}
                     </span>
                   )}
@@ -99,7 +99,7 @@ const StepBlock: React.FC<{ step: BrowserLLMTraceStep }> = ({ step }) => {
         )}
         {step.results && step.results.length > 0 && (
           <div>
-            <span className="font-mono text-[0.65rem] uppercase tracking-widest text-text-muted">Results</span>
+            <span className="thinking-panel-section-label">Results</span>
             <div className="mt-1 space-y-1">
               {step.results.map((result, index) => {
                 const text = result.error
@@ -210,14 +210,14 @@ const BrowserTraceSection: React.FC<BrowserTraceSectionProps> = ({
           >
             <polyline points="9 18 15 12 9 6" />
           </svg>
-          <span className="shrink-0 font-mono text-[0.65rem] uppercase tracking-widest text-text-tertiary">
+          <span className="shrink-0 thinking-panel-toggle-label">
             {isRunning ? 'Browser running...' : `Browser ${run.status}`}
           </span>
-          <span className="truncate font-mono text-[0.65rem] text-text-muted">
+          <span className="truncate thinking-panel-toggle-hint">
             {run.model ?? run.llmTrace?.model ?? 'model'} · {steps.length} step{steps.length === 1 ? '' : 's'}
           </span>
         </div>
-        <span className="shrink-0 font-mono text-[0.65rem] text-text-muted">
+        <span className="shrink-0 thinking-panel-toggle-hint">
           {isExpanded ? 'Click to collapse' : 'Click to expand'}
         </span>
       </button>
@@ -225,12 +225,12 @@ const BrowserTraceSection: React.FC<BrowserTraceSectionProps> = ({
       {isExpanded && (
         <div
           ref={contentRef}
-          className={`px-4 pb-4 pt-2 border-t text-xs border-border-secondary thinking-scroll-container ${isRunning ? 'max-h-[360px] overflow-y-auto' : ''}`}
+          className={`px-4 pb-4 pt-2 border-t border-border-secondary thinking-scroll-container ${isRunning ? 'max-h-[360px] overflow-y-auto' : ''}`}
         >
-          <div className="mb-3 text-xs text-text-secondary">
+          <div className="mb-3 text-text-secondary">
             <div className="font-medium text-text-primary">{run.instruction}</div>
             {(run.llmTrace?.plannerModel || typeof run.llmTrace?.useVision === 'boolean') && (
-              <div className="mt-1 font-mono text-[0.7rem] text-text-muted">
+              <div className="mt-1 thinking-panel-meta">
                 {run.llmTrace?.plannerModel && `planner ${run.llmTrace.plannerModel}`}
                 {run.llmTrace?.plannerModel && typeof run.llmTrace?.useVision === 'boolean' && ' · '}
                 {typeof run.llmTrace?.useVision === 'boolean' && `vision ${run.llmTrace.useVision ? 'on' : 'off'}`}
@@ -245,7 +245,7 @@ const BrowserTraceSection: React.FC<BrowserTraceSectionProps> = ({
           </div>
 
           {(run.summary || run.error) && (
-            <div className="mt-3 border-t border-border-secondary pt-3 text-xs text-text-secondary">
+            <div className="mt-3 border-t border-border-secondary pt-3 text-text-secondary">
               {run.summary && <div>{run.summary}</div>}
               {run.error && <div className="mt-2 text-red-300">{run.error}</div>}
             </div>

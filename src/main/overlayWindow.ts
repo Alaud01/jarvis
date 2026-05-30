@@ -46,7 +46,7 @@ function getOverlayThemeColors(): {
       background: 'rgba(15, 15, 15, 0.86)',
       border: 'rgba(255, 255, 255, 0.12)',
       text: 'rgba(255, 255, 255, 0.95)',
-      shadow: '0 10px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
+      shadow: 'none',
     };
   }
 
@@ -54,7 +54,7 @@ function getOverlayThemeColors(): {
     background: 'rgba(255, 255, 255, 0.9)',
     border: 'rgba(0, 0, 0, 0.12)',
     text: 'rgba(17, 17, 17, 0.94)',
-    shadow: '0 10px 28px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.82)',
+    shadow: 'none',
   };
 }
 
@@ -76,11 +76,14 @@ function getOverlayPayload(state: OverlayState, transcript?: string, errorMessag
   state: OverlayState;
   label: string;
   stage: OverlayVisualStage;
+  width: number;
 } {
+  const label = getOverlayDisplayLabel(state, transcript, errorMessage);
   return {
     state,
-    label: getOverlayDisplayLabel(state, transcript, errorMessage),
+    label,
     stage: STATE_CONFIG[state].stage,
+    width: getOverlayWidth(label),
   };
 }
 
@@ -194,10 +197,16 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       --overlay-border: ${themeColors.border};
       --overlay-text: ${themeColors.text};
       --overlay-shadow: ${themeColors.shadow};
+      --overlay-width: ${payload.width}px;
       background: transparent;
       overflow: hidden;
       -webkit-app-region: no-drag;
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+      height: ${OVERLAY_HEIGHT}px;
+      width: ${payload.width}px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     @keyframes overlayIn {
       from {
@@ -230,10 +239,14 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       border-radius: 999px;
       border: 1px solid var(--overlay-border);
       box-shadow: var(--overlay-shadow);
+      width: var(--overlay-width);
       max-width: 500px;
       transform-origin: top center;
       animation: overlayIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+      transition: width 210ms cubic-bezier(0.16, 1, 0.3, 1);
       will-change: opacity, transform;
+      contain: layout paint;
+      transform: translateZ(0);
     }
     body.exiting .overlay {
       animation: overlayOut ${OVERLAY_EXIT_MS}ms cubic-bezier(0.4, 0, 1, 1) both;
@@ -256,6 +269,12 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
         0 0 4px #ff416c,
         0 0 10px #ff416c80,
         0 0 19px #ff416c55;
+      transition:
+        opacity 180ms ease,
+        background 220ms ease,
+        box-shadow 220ms ease,
+        transform 180ms ease;
+      will-change: opacity, transform;
     }
     .pixel-spinner.stage-processing-fill .cell {
       animation: none;
@@ -383,13 +402,16 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
 ${PIXEL_SPINNER_KEYFRAMES}
     .label {
       color: var(--overlay-text);
+      flex: 1;
+      min-width: 0;
       font-size: 13px;
       font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       max-width: 460px;
-      transition: opacity 130ms ease, transform 130ms ease;
+      transition: opacity 150ms ease, transform 150ms ease;
+      will-change: opacity, transform;
     }
     .label.is-changing {
       opacity: 0;
@@ -426,8 +448,13 @@ ${PIXEL_SPINNER_KEYFRAMES}
         if (!spinner) return;
         spinner.className = 'pixel-spinner stage-' + stage;
       }
+      function setOverlayWidth(width) {
+        document.body.style.width = width + 'px';
+        document.body.style.setProperty('--overlay-width', width + 'px');
+      }
       function applyPayload(payload) {
         state = payload.state;
+        setOverlayWidth(payload.width);
         setLabel(payload.label);
         setStage(payload.stage);
       }
@@ -448,6 +475,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
         }
 
         if (state === 'processing' && payload.state === 'complete') {
+          setOverlayWidth(payload.width);
           setLabel(payload.label);
           setStage('complete-fill');
           fillTimer = setTimeout(function() {
@@ -527,8 +555,7 @@ export function setOverlayThemeBackground(isDark: boolean): void {
 
 export function showOverlay(state: OverlayState, transcript?: string, errorMessage?: string): void {
   const payload = getOverlayPayload(state, transcript, errorMessage);
-  const overlayWidth = getOverlayWidth(payload.label);
-  const pos = getOverlayPosition(overlayWidth);
+  const pos = getOverlayPosition(payload.width);
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
@@ -547,7 +574,7 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
         );
       }
     });
-    overlayWindow.setBounds({ x: pos.x, y: pos.y, width: overlayWidth, height: OVERLAY_HEIGHT }, true);
+    overlayWindow.setBounds({ x: pos.x, y: pos.y, width: payload.width, height: OVERLAY_HEIGHT }, false);
     if (!overlayWindow.isVisible()) {
       showOverlayWithoutFocus(overlayWindow);
     }
@@ -555,7 +582,7 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
   }
 
   overlayWindow = new BrowserWindow({
-    width: overlayWidth,
+    width: payload.width,
     height: OVERLAY_HEIGHT,
     x: pos.x,
     y: pos.y,

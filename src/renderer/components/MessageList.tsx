@@ -5,6 +5,7 @@ import BrowserTraceSection from './BrowserTraceSection';
 import TypingIndicator from './TypingIndicator';
 import type { BrowserToolRun } from '../../shared/browser';
 import type { SearchSource, SearchSourceGroup } from '../../shared/search';
+import type { FileAttachment } from '../../shared/attachments';
 
 interface Message {
   id: string;
@@ -14,6 +15,7 @@ interface Message {
   isStreaming?: boolean;
   browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
+  attachments?: FileAttachment[];
 }
 
 interface MessageListProps {
@@ -473,6 +475,30 @@ const MessageRow = React.memo(({
   onAutoScrollReactivate,
 }: MessageRowProps) => {
   const renderItems = useMemo(() => getCachedMessageRenderItems(message), [message]);
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const resizeEditTextarea = useCallback(() => {
+    const textarea = editTextareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = 'auto';
+    const maxHeight = window.innerHeight;
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!isEditing) return;
+    resizeEditTextarea();
+  }, [isEditing, editText, resizeEditTextarea]);
+
+  useEffect(() => {
+    if (!isEditing) return;
+
+    window.addEventListener('resize', resizeEditTextarea);
+    return () => window.removeEventListener('resize', resizeEditTextarea);
+  }, [isEditing, resizeEditTextarea]);
 
   return (
     <div
@@ -494,9 +520,24 @@ const MessageRow = React.memo(({
         )}
       </div>
 
+      {message.sender === 'user' && message.attachments && message.attachments.length > 0 && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {message.attachments.map((attachment, index) => (
+            <span
+              key={`${attachment.name}-${attachment.size}-${index}`}
+              className="border border-border-secondary px-2 py-1 font-mono text-[0.65rem] text-text-secondary"
+              title={attachment.truncated ? 'Model context was truncated for this file' : undefined}
+            >
+              {attachment.name}{attachment.truncated ? ' (trimmed)' : ''}
+            </span>
+          ))}
+        </div>
+      )}
+
       {isEditing ? (
         <div className="flex flex-col gap-3">
           <textarea
+            ref={editTextareaRef}
             className="w-full min-h-[60px] border border-text-primary bg-transparent p-3 text-base text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
@@ -664,6 +705,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 }, ref) => {
   const messageRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const autoScrollEnabledRef = useRef(true);
+  const prevLastMessageIdRef = useRef<string | null>(null);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
   const measuredHeightsRef = useRef<Map<string, number>>(new Map());
   const [heightVersion, setHeightVersion] = useState(0);
@@ -796,6 +838,24 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     container.scrollTo({ top: container.scrollHeight, behavior });
     setAutoScrollEnabled(true);
   }, [scrollContainerRef, setAutoScrollEnabled]);
+
+  useLayoutEffect(() => {
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage) {
+      prevLastMessageIdRef.current = null;
+      return;
+    }
+
+    const previousLastId = prevLastMessageIdRef.current;
+    prevLastMessageIdRef.current = lastMessage.id;
+
+    if (
+      lastMessage.id !== previousLastId &&
+      (lastMessage.sender === 'user' || lastMessage.isStreaming)
+    ) {
+      scrollToBottomNow();
+    }
+  }, [messages, scrollToBottomNow]);
 
   const maintainScrollAtEnd = useCallback((snapshot: ScrollSnapshot) => {
     if (!snapshot.shouldMaintain) {

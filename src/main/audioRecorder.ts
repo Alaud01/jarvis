@@ -8,6 +8,9 @@ const AUDIO_STOP_DRAIN_MS = 150;
 let mainWindow: BrowserWindow | null = null;
 let audioChunks: Buffer[] = [];
 let audioByteLength = 0;
+let audioSampleCount = 0;
+let audioSumSquares = 0;
+let audioPeakAbs = 0;
 let audioPort: MessagePortMain | null = null;
 let isRecording = false;
 
@@ -16,6 +19,9 @@ export type RecordedAudio = {
   byteLength: number;
   filename: string;
   contentType: string;
+  durationMs: number;
+  peak: number;
+  rms: number;
 };
 
 function createWavHeader(dataLength: number): Buffer {
@@ -68,14 +74,23 @@ function closeAudioPort(): void {
 
 function storeAudioChunk(chunk: unknown): void {
   if (isRecording) {
+    let buffer: Buffer | null = null;
     if (chunk instanceof ArrayBuffer) {
-      const buffer = Buffer.from(chunk);
-      audioChunks.push(buffer);
-      audioByteLength += buffer.byteLength;
+      buffer = Buffer.from(chunk);
     } else if (ArrayBuffer.isView(chunk)) {
-      const buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      buffer = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    }
+
+    if (buffer) {
       audioChunks.push(buffer);
       audioByteLength += buffer.byteLength;
+      for (let offset = 0; offset + 1 < buffer.byteLength; offset += 2) {
+        const sample = buffer.readInt16LE(offset) / 32768;
+        const absSample = Math.abs(sample);
+        audioPeakAbs = Math.max(audioPeakAbs, absSample);
+        audioSumSquares += sample * sample;
+        audioSampleCount += 1;
+      }
     }
   }
 }
@@ -116,6 +131,9 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
   
   audioChunks = [];
   audioByteLength = 0;
+  audioSampleCount = 0;
+  audioSumSquares = 0;
+  audioPeakAbs = 0;
   closeAudioPort();
   isRecording = true;
   
@@ -138,6 +156,9 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
           });
           
           const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: ${SAMPLE_RATE} });
+          if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+          }
           const source = audioContext.createMediaStreamSource(stream);
           
           // Store references for cleanup
@@ -211,6 +232,9 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
       isRecording = false;
       audioChunks = [];
       audioByteLength = 0;
+      audioSampleCount = 0;
+      audioSumSquares = 0;
+      audioPeakAbs = 0;
       closeAudioPort();
       return { success: false, error: result.error || 'Failed to start audio capture' };
     }
@@ -220,6 +244,9 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
     isRecording = false;
     audioChunks = [];
     audioByteLength = 0;
+    audioSampleCount = 0;
+    audioSumSquares = 0;
+    audioPeakAbs = 0;
     closeAudioPort();
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error starting recording' };
   }
@@ -263,16 +290,32 @@ export async function stopRecording(): Promise<RecordedAudio> {
   const wavHeader = createWavHeader(audioByteLength);
   const wavChunks = [wavHeader, ...audioChunks];
   const byteLength = wavHeader.byteLength + audioByteLength;
+  const durationMs = audioSampleCount > 0 ? (audioSampleCount / SAMPLE_RATE) * 1000 : 0;
+  const rms = audioSampleCount > 0 ? Math.sqrt(audioSumSquares / audioSampleCount) : 0;
+
+  console.log('[AudioRecorder] Captured audio:', {
+    bytes: audioByteLength,
+    durationMs: Math.round(durationMs),
+    peak: Number(audioPeakAbs.toFixed(4)),
+    rms: Number(rms.toFixed(4)),
+  });
 
   audioChunks = [];
   audioByteLength = 0;
+  audioSampleCount = 0;
+  audioSumSquares = 0;
+  const peak = audioPeakAbs;
   closeAudioPort();
+  audioPeakAbs = 0;
 
   return {
     chunks: wavChunks,
     byteLength,
     filename: 'audio.wav',
     contentType: 'audio/wav',
+    durationMs,
+    peak,
+    rms,
   };
 }
 
@@ -284,6 +327,9 @@ export async function cleanupAudioCapture(): Promise<void> {
   isRecording = false;
   audioChunks = [];
   audioByteLength = 0;
+  audioSampleCount = 0;
+  audioSumSquares = 0;
+  audioPeakAbs = 0;
   closeAudioPort();
   
   if (mainWindow && !mainWindow.isDestroyed()) {

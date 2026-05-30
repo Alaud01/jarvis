@@ -1,13 +1,22 @@
 import json
 import re
+from collections.abc import Mapping
 from typing import Any, TypeVar
 
+import httpx
+from anthropic import NotGiven, omit
+from anthropic.types import CacheControlEphemeralParam, Message, ToolParam
+from anthropic.types.tool_choice_tool_param import ToolChoiceToolParam
 from ollama import AsyncClient as OllamaAsyncClient
 from pydantic import BaseModel, ValidationError
 
+from browser_use.llm.anthropic.chat import ChatAnthropic
+from browser_use.llm.anthropic.serializer import AnthropicMessageSerializer
+from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 from browser_use.llm.messages import BaseMessage
 from browser_use.llm.ollama.serializer import OllamaMessageSerializer
-from browser_use.llm.views import ChatInvokeCompletion
+from browser_use.llm.schema import SchemaOptimizer
+from browser_use.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 
 T = TypeVar('T', bound=BaseModel)
 
@@ -250,3 +259,126 @@ class RobustChatOllama:
 
         print(f"[RobustChatOllama] Successfully parsed structured output for model={self._inner.model}")
         return ChatInvokeCompletion(completion=parsed, usage=None)
+
+
+class OpenCodeGoChatAnthropic(ChatAnthropic):
+    """
+    ChatAnthropic subclass for OpenCode Go's Qwen models served via
+    Anthropic-compatible endpoints.
+
+    Qwen models behind the OpenCode Go proxy have thinking enabled by default.
+    When thinking is active, the endpoint rejects tool_choice set to "required"
+    or a specific tool object. This subclass explicitly disables thinking when
+    using forced tool_choice (structured output path), resolving the conflict.
+    """
+
+    async def ainvoke(
+        self, messages: list[BaseMessage], output_format: type[T] | None = None, **kwargs: Any
+    ) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
+        anthropic_messages, system_prompt = AnthropicMessageSerializer.serialize_messages(messages)
+
+        try:
+            if output_format is None:
+                response = await self.get_client().messages.create(
+                    model=self.model,
+                    messages=anthropic_messages,
+                    system=system_prompt or omit,
+                    **self._get_client_params_for_invoke(),
+                )
+
+                if not isinstance(response, Message):
+                    raise ModelProviderError(
+                        message=f'Unexpected response type: {type(response).__name__}',
+                        status_code=502,
+                        model=self.name,
+                    )
+
+                usage = self._get_usage(response)
+                first_content = response.content[0]
+                response_text = first_content.text if hasattr(first_content, 'text') else str(first_content)
+
+                return ChatInvokeCompletion(
+                    completion=response_text,
+                    usage=usage,
+                    stop_reason=response.stop_reason,
+                )
+            else:
+                tool_name = output_format.__name__
+                schema = SchemaOptimizer.create_optimized_json_schema(output_format)
+                if 'title' in schema:
+                    del schema['title']
+
+                tool = ToolParam(
+                    name=tool_name,
+                    description=f'Extract information in the format of {tool_name}',
+                    input_schema=schema,
+                    cache_control=CacheControlEphemeralParam(type='ephemeral'),
+                )
+
+                tool_choice = ToolChoiceToolParam(type='tool', name=tool_name)
+
+                invoke_params = self._get_client_params_for_invoke()
+
+                response = await self.get_client().messages.create(
+                    model=self.model,
+                    messages=anthropic_messages,
+                    tools=[tool],
+                    system=system_prompt or omit,
+                    tool_choice=tool_choice,
+                    thinking={"type": "disabled"},
+                    **invoke_params,
+                )
+
+                if not isinstance(response, Message):
+                    raise ModelProviderError(
+                        message=f'Unexpected response type: {type(response).__name__}',
+                        status_code=502,
+                        model=self.name,
+                    )
+
+                usage = self._get_usage(response)
+
+                for content_block in response.content:
+                    if hasattr(content_block, 'type') and content_block.type == 'tool_use':
+                        try:
+                            return ChatInvokeCompletion(
+                                completion=output_format.model_validate(content_block.input),
+                                usage=usage,
+                                stop_reason=response.stop_reason,
+                            )
+                        except Exception as e:
+                            _input = content_block.input
+                            if isinstance(_input, str):
+                                _input = json.loads(_input)
+                            elif isinstance(_input, dict):
+                                for key, value in _input.items():
+                                    if isinstance(value, str) and value.startswith(('[', '{')):
+                                        try:
+                                            _input[key] = json.loads(value)
+                                        except json.JSONDecodeError:
+                                            cleaned = value.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+                                            try:
+                                                _input[key] = json.loads(cleaned)
+                                            except json.JSONDecodeError:
+                                                pass
+                            else:
+                                raise
+                            return ChatInvokeCompletion(
+                                completion=output_format.model_validate(_input),
+                                usage=usage,
+                                stop_reason=response.stop_reason,
+                            )
+
+                raise ValueError('Expected tool use in response but none found')
+
+        except Exception as e:
+            if isinstance(e, (ModelProviderError, ModelRateLimitError)):
+                raise
+            from anthropic import APIConnectionError, APIStatusError, RateLimitError
+            if isinstance(e, APIConnectionError):
+                raise ModelProviderError(message=e.message, model=self.name) from e
+            if isinstance(e, RateLimitError):
+                raise ModelRateLimitError(message=e.message, model=self.name) from e
+            if isinstance(e, APIStatusError):
+                raise ModelProviderError(message=e.message, status_code=e.status_code, model=self.name) from e
+            raise ModelProviderError(message=str(e), model=self.name) from e

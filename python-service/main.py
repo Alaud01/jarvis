@@ -177,6 +177,19 @@ def detect_speech_segments(wav: np.ndarray) -> tuple[list[tuple[int, int]], floa
     return speech_segments, speech_duration_ms
 
 
+def describe_audio(wav: np.ndarray) -> dict[str, float]:
+    if wav.size == 0:
+        return {"duration_ms": 0.0, "peak": 0.0, "rms": 0.0}
+
+    peak = float(np.max(np.abs(wav)))
+    rms = float(np.sqrt(np.mean(np.square(wav.astype(np.float64, copy=False)))))
+    return {
+        "duration_ms": (wav.shape[0] / TARGET_SAMPLE_RATE) * 1000,
+        "peak": peak,
+        "rms": rms,
+    }
+
+
 def build_transcription_audio(
     wav: np.ndarray,
     speech_segments: list[tuple[int, int]],
@@ -413,6 +426,13 @@ async def process_flow(file: UploadFile = File(...)):
         
         print(f"[VoiceService] Processing audio file: {temp_path} ({upload_bytes} bytes)")
         wav = load_audio(temp_path)
+        audio_stats = describe_audio(wav)
+        print(
+            "[VoiceService] Audio stats: "
+            f"duration={audio_stats['duration_ms']:.0f}ms "
+            f"peak={audio_stats['peak']:.4f} "
+            f"rms={audio_stats['rms']:.4f}"
+        )
         speech_segments, speech_duration = detect_speech_segments(wav)
         
         if speech_duration < VAD_MIN_SPEECH_MS:

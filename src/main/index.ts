@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { app, BrowserWindow, Tray, nativeImage, Menu, ipcMain } from 'electron';
+import { app, BrowserWindow, Tray, nativeImage, Menu, ipcMain, shell, dialog } from 'electron';
 import { randomUUID } from 'crypto';
 import * as path from 'path';
 import { startPythonService, stopPythonService } from './pythonService';
@@ -20,6 +20,8 @@ import {
   saveSelectedModel,
   loadSelectedProvider,
   saveSelectedProvider,
+  loadOpenCodeGoApiKey,
+  saveOpenCodeGoApiKey,
   loadOpenTabIds,
   saveOpenTabIds,
   loadCurrentConversationId,
@@ -33,15 +35,17 @@ import {
   type BrowserTaskResult,
 } from './browserService';
 import type { BrowserTraceEvent } from '../shared/browser';
+import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
-import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider } from './providers/registry';
+import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider, setOpenCodeGoApiKey } from './providers/registry';
 import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo } from './providers/types';
+import { ATTACHMENT_DIALOG_FILTERS, readAttachments } from './attachmentService';
 
 dotenv.config({ quiet: true });
 
 let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
-let currentAbortController: AbortController | null = null;
+let activeStreams = new Map<string, AbortController>();
 let isQuitting = false;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -408,8 +412,13 @@ function createWindow(): void {
   
   setMainWindow(mainWindow);
 
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL('http://localhost:5174');
     // mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -461,31 +470,50 @@ ipcMain.handle('get-providers', async () => {
   return getAvailableProviders();
 });
 
+ipcMain.handle('pick-attachments', async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ['openFile', 'multiSelections'],
+    filters: ATTACHMENT_DIALOG_FILTERS,
+  });
+
+  if (result.canceled) {
+    return { attachments: [], errors: [] };
+  }
+
+  return readAttachments(result.filePaths);
+});
+
 ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRequest) => {
   let flushThinkingConsoleBuffer = (_reason: string) => undefined;
+  const streamKey = request.assistantMessageId;
+  const streamContext: StreamEventContext = {
+    conversationId: request.conversationId,
+    assistantMessageId: request.assistantMessageId,
+  };
 
   const sendToRenderer = (channel: string, ...args: unknown[]) => {
     try {
       if (!event.sender.isDestroyed()) {
         event.sender.send(channel, ...args);
       } else {
-        currentAbortController?.abort();
+        activeStreams.get(streamKey)?.abort();
       }
     } catch {
-      currentAbortController?.abort();
+      activeStreams.get(streamKey)?.abort();
     }
   };
 
   try {
     const abortController = new AbortController();
-    currentAbortController = abortController;
+    activeStreams.set(streamKey, abortController);
     let inThinking = false;
     let streamedTextLength = 0;
     let thinkingConsoleBuffer = '';
 
     const sendChatChunk = (chunk: string) => {
       streamedTextLength += chunk.length;
-      sendToRenderer('ollama-chunk', chunk);
+      const payload: StreamChunkEvent = { ...streamContext, chunk };
+      sendToRenderer('ollama-chunk', payload);
     };
 
     const provider = getProvider(request.provider);
@@ -563,7 +591,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       const toolCalls = assistantMessage?.tool_calls ?? [];
       if (!toolCalls.length) {
         closeThinkingSection('turn-complete');
-        sendToRenderer('ollama-done');
+        sendToRenderer('ollama-done', streamContext);
         return { success: true };
       }
 
@@ -710,6 +738,9 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
             model: request.model,
           });
 
+          const browserApiKey = request.provider === 'opencode-go'
+            ? (loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY)
+            : undefined;
           const browserResult = await runBrowserTask(
             task,
             request.model,
@@ -722,6 +753,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
                 assistantMessageId: request.assistantMessageId,
               });
             },
+            browserApiKey,
           );
           const browserContent = formatBrowserTaskResult(browserResult);
           logMainProcess('LLM', 'Browser task result returned to LLM', {
@@ -771,7 +803,7 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
         }
 
         closeThinkingSection('tool-synthesis-complete');
-        sendToRenderer('ollama-done');
+        sendToRenderer('ollama-done', streamContext);
         return { success: true };
       }
 
@@ -783,21 +815,20 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
   } catch (error) {
     flushThinkingConsoleBuffer('stream-error');
     if (isAbortLikeError(error)) {
-      sendToRenderer('ollama-done');
+      sendToRenderer('ollama-done', streamContext);
       return { success: true, aborted: true };
     }
     const errorMessage = error instanceof Error ? error.message : 'Unknown error during streaming';
-    sendToRenderer('ollama-error', errorMessage);
+    const errorPayload: StreamErrorEvent = { ...streamContext, error: errorMessage };
+    sendToRenderer('ollama-error', errorPayload);
     throw error;
   } finally {
-    currentAbortController = null;
+    activeStreams.delete(streamKey);
   }
 });
 
-ipcMain.handle('stop-stream', async () => {
-  if (currentAbortController) {
-    currentAbortController.abort();
-  }
+ipcMain.handle('stop-stream', async (_event, request: StopStreamRequest) => {
+  activeStreams.get(request.assistantMessageId)?.abort();
   return { success: true };
 });
 
@@ -874,6 +905,16 @@ ipcMain.handle('store:save-provider', async (_event, provider: string) => {
   return { success: true };
 });
 
+ipcMain.handle('store:load-opencode-go-api-key', async () => {
+  return loadOpenCodeGoApiKey();
+});
+
+ipcMain.handle('store:save-opencode-go-api-key', async (_event, key: string) => {
+  saveOpenCodeGoApiKey(key);
+  setOpenCodeGoApiKey(key);
+  return { success: true };
+});
+
 ipcMain.handle('store:load-open-tab-ids', async () => {
   return loadOpenTabIds();
 });
@@ -919,7 +960,7 @@ ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
 });
 
 app.whenReady().then(async () => {
-  initializeProviders();
+  initializeProviders(loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY);
 
   if (process.platform === 'darwin' && !isDev) {
     Menu.setApplicationMenu(Menu.buildFromTemplate([]));
@@ -930,16 +971,17 @@ app.whenReady().then(async () => {
   
   console.log('[Main] Starting Python voice service...');
   
-  try {
-    const pythonStarted = await startPythonService();
-    if (!pythonStarted) {
-      console.error('[Main] Failed to start Python voice service - voice features will not work');
-    } else {
-      console.log('[Main] Python voice service started successfully');
-    }
-  } catch (error) {
-    console.error('[Main] Error starting Python service:', error);
-  }
+  void startPythonService()
+    .then((pythonStarted) => {
+      if (!pythonStarted) {
+        console.error('[Main] Failed to start Python voice service - voice features will not work');
+      } else {
+        console.log('[Main] Python voice service started successfully');
+      }
+    })
+    .catch((error) => {
+      console.error('[Main] Error starting Python service:', error);
+    });
   
   try {
     await initializeVoiceFlow();

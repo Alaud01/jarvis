@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourcesEvent } from '../shared/search';
+import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
+import type { AttachmentSelectionResult } from '../shared/attachments';
 
 type TransferableMessagePort = NonNullable<Parameters<typeof ipcRenderer.postMessage>[2]>[number];
 
@@ -39,22 +41,23 @@ contextBridge.exposeInMainWorld('assistant', {
   getModels: () => ipcRenderer.invoke('get-models'),
   getModelsForProvider: (providerId: string) => ipcRenderer.invoke('get-models-for-provider', providerId),
   getProviders: () => ipcRenderer.invoke('get-providers'),
+  pickAttachments: (): Promise<AttachmentSelectionResult> => ipcRenderer.invoke('pick-attachments'),
   sendMessageStream: (request: SendMessageStreamRequest) =>
     ipcRenderer.invoke('send-message-stream', request),
-  stopStream: () => ipcRenderer.invoke('stop-stream'),
+  stopStream: (request: StopStreamRequest) => ipcRenderer.invoke('stop-stream', request),
   getVoiceShortcut: () => ipcRenderer.invoke('voice-shortcut-label'),
-  onChunk: (callback: (chunk: string) => void) => {
-    const listener = (_event: any, chunk: string) => callback(chunk);
+  onChunk: (callback: (event: StreamChunkEvent) => void) => {
+    const listener = (_event: unknown, payload: StreamChunkEvent) => callback(payload);
     ipcRenderer.on('ollama-chunk', listener);
     return () => ipcRenderer.removeListener('ollama-chunk', listener);
   },
-  onDone: (callback: () => void) => {
-    const listener = () => callback();
+  onDone: (callback: (event: StreamEventContext) => void) => {
+    const listener = (_event: unknown, payload: StreamEventContext) => callback(payload);
     ipcRenderer.on('ollama-done', listener);
     return () => ipcRenderer.removeListener('ollama-done', listener);
   },
-  onError: (callback: (error: string) => void) => {
-    const listener = (_event: any, error: string) => callback(error);
+  onError: (callback: (event: StreamErrorEvent) => void) => {
+    const listener = (_event: unknown, payload: StreamErrorEvent) => callback(payload);
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
   },
@@ -103,6 +106,8 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
   storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
+  storeLoadOpenCodeGoApiKey: () => ipcRenderer.invoke('store:load-opencode-go-api-key'),
+  storeSaveOpenCodeGoApiKey: (key: string) => ipcRenderer.invoke('store:save-opencode-go-api-key', key),
   storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),
   storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),

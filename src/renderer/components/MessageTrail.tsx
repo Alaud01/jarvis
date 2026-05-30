@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -154,7 +154,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
   }, [assistantEntries]);
 
   return (
-    <div className="flex min-h-full flex-col justify-center gap-0.5">
+    <div className="flex flex-col gap-0.5">
       {messages.map((message) => {
         if (message.sender === 'assistant') {
           const entry = entriesByMessageId.get(message.id);
@@ -221,7 +221,9 @@ interface ExpandedTrailProps {
 const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarget, onScrollToMessage }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const didAutoScrollRef = useRef(false);
-  const visibleEntries = trailEntries.filter((entry) => entry.sender === 'user' || entry.headers.length > 0);
+  const visibleEntries = trailEntries.filter((entry) => (
+    entry.sender === 'user' || entry.headers.length > 0 || entry.previewText.length > 0 || entry.isStreaming
+  ));
 
   useEffect(() => {
     if (didAutoScrollRef.current || !activeTarget) return;
@@ -238,7 +240,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
   }, [activeTarget]);
 
   return (
-    <div ref={scrollRef} className="h-full min-h-0 overflow-x-hidden overflow-y-auto bg-[var(--color-bg-secondary)] px-2 py-2">
+    <div ref={scrollRef} className="max-h-[inherit] min-h-0 overflow-x-hidden overflow-y-auto bg-[var(--color-bg-secondary)] px-2 py-2">
       <div className="mb-2 px-2 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-text-tertiary">
         Trail
       </div>
@@ -253,48 +255,70 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                   : ''
               }`}
             >
-              <button
-                type="button"
-                className="w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1 text-left font-mono text-[0.62rem] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
-                onClick={() => onScrollToMessage(entry.messageId)}
-              >
-                <span className={`block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap`}>
-                  {entry.sender === 'user' ? 'You' : 'Jarvis'} {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
-                </span>
-              </button>
               {entry.sender === 'user' ? (
                 <button
                   type="button"
                   data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined ? 'true' : undefined}
-                  className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1.5 text-left text-[0.75rem] leading-[1.25] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${
+                  className={`flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-2 py-1.5 text-left transition-colors hover:bg-bg-hover focus:bg-bg-hover focus:outline-none ${
                     activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined
                       ? 'bg-bg-hover text-text-primary'
                       : 'text-text-secondary'
                   }`}
                   onClick={() => onScrollToMessage(entry.messageId)}
                 >
-                  <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                  <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.62rem] uppercase tracking-[0.14em] text-text-tertiary">
+                    You {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
+                  </span>
+                  <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.75rem] leading-[1.25]">
                     {entry.isStreaming ? 'Streaming...' : <InlineMarkdownPreview content={entry.previewText || 'Untitled message'} />}
                   </span>
                 </button>
               ) : (
-                entry.headers.map((header, headerIndex) => (
+                <>
                   <button
-                    key={`${entry.messageId}-${headerIndex}`}
                     type="button"
-                    data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex ? 'true' : undefined}
-                    className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1.5 text-left text-[0.75rem] leading-[1.25] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]} ${
-                      activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex
-                        ? 'bg-bg-hover text-text-primary'
-                        : 'text-text-tertiary'
-                    }`}
-                    onClick={() => onScrollToMessage(entry.messageId, headerIndex)}
+                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1 text-left font-mono text-[0.62rem] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
+                    onClick={() => onScrollToMessage(entry.messageId)}
                   >
                     <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
-                      <InlineMarkdownPreview content={header.text} />
+                      Jarvis {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
                     </span>
                   </button>
-                ))
+                  {entry.headers.length > 0 ? (
+                    entry.headers.map((header, headerIndex) => (
+                      <button
+                        key={`${entry.messageId}-${headerIndex}`}
+                        type="button"
+                        data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex ? 'true' : undefined}
+                        className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1.5 text-left text-[0.75rem] leading-[1.25] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]} ${
+                          activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex
+                            ? 'bg-bg-hover text-text-primary'
+                            : 'text-text-tertiary'
+                        }`}
+                        onClick={() => onScrollToMessage(entry.messageId, headerIndex)}
+                      >
+                        <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                          <InlineMarkdownPreview content={header.text} />
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <button
+                      type="button"
+                      data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined ? 'true' : undefined}
+                      className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1.5 text-left text-[0.75rem] leading-[1.25] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${
+                        activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined
+                          ? 'bg-bg-hover text-text-primary'
+                          : 'text-text-tertiary'
+                      }`}
+                      onClick={() => onScrollToMessage(entry.messageId)}
+                    >
+                      <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                        {entry.isStreaming ? 'Streaming...' : <InlineMarkdownPreview content={entry.previewText || 'Untitled message'} />}
+                      </span>
+                    </button>
+                  )}
+                </>
               )}
             </div>
           ))}
@@ -313,6 +337,10 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   const [isCollapsing, setIsCollapsing] = useState(false);
   const [activeTarget, setActiveTarget] = useState<ActiveTrailTarget | null>(null);
   const collapseTimeoutRef = useRef<number | null>(null);
+  const expandedPanelRef = useRef<HTMLDivElement>(null);
+  const collapsedHoverRef = useRef<HTMLDivElement>(null);
+  const isExpandedRef = useRef(isExpanded);
+  isExpandedRef.current = isExpanded;
   const trailEntries = useMemo<TrailEntry[]>(() => {
     return messages.map((message, messageIndex) => {
       const headers = message.sender === 'assistant' ? parseHeaders(message.text) : [];
@@ -394,13 +422,63 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     };
   }, [scrollContainerRef, trailEntries]);
 
+  const collapseTrailImmediate = useCallback(() => {
+    if (collapseTimeoutRef.current !== null) {
+      window.clearTimeout(collapseTimeoutRef.current);
+      collapseTimeoutRef.current = null;
+    }
+    setIsCollapsing(false);
+    setIsExpanded(false);
+  }, []);
+
+  const collapseTrailIfNotHovered = useCallback(() => {
+    requestAnimationFrame(() => {
+      if (!isExpandedRef.current) return;
+
+      const expandedPanelHovered = expandedPanelRef.current?.matches(':hover') ?? false;
+      const collapsedHovered = collapsedHoverRef.current?.matches(':hover') ?? false;
+      if (!expandedPanelHovered && !collapsedHovered) {
+        collapseTrailImmediate();
+      }
+    });
+  }, [collapseTrailImmediate]);
+
   useEffect(() => {
+    const handleWindowBlur = () => {
+      collapseTrailImmediate();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        collapseTrailImmediate();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      collapseTrailIfNotHovered();
+    };
+
+    const handleDocumentMouseLeave = (event: MouseEvent) => {
+      if (!event.relatedTarget) {
+        collapseTrailImmediate();
+      }
+    };
+
+    window.addEventListener('blur', handleWindowBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    document.documentElement.addEventListener('mouseleave', handleDocumentMouseLeave);
+
     return () => {
+      window.removeEventListener('blur', handleWindowBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.documentElement.removeEventListener('mouseleave', handleDocumentMouseLeave);
       if (collapseTimeoutRef.current !== null) {
         window.clearTimeout(collapseTimeoutRef.current);
       }
     };
-  }, []);
+  }, [collapseTrailImmediate, collapseTrailIfNotHovered]);
 
   const expandTrail = () => {
     if (collapseTimeoutRef.current !== null) {
@@ -428,26 +506,22 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   if (messages.length === 0) return null;
 
   const shouldRenderExpandedTrail = isExpanded || isCollapsing;
+  const handleTrailBlur = (event: React.FocusEvent<HTMLElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) {
+      collapseTrail();
+    }
+  };
 
   return (
     <div
-      tabIndex={0}
       role="navigation"
       aria-label="Message headers"
       className="relative z-[200] w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
-      onMouseEnter={expandTrail}
-      onMouseLeave={collapseTrail}
-      onFocusCapture={expandTrail}
-      onBlurCapture={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) {
-          collapseTrail();
-        }
-      }}
     >
       {shouldRenderExpandedTrail ? (
         <>
           <div
-            className={`h-full max-h-full overflow-y-auto px-1 py-2 pointer-events-none ${
+            className={`h-full max-h-full overflow-y-auto px-1 py-2 pointer-events-none flex items-center ${
               isCollapsing ? 'message-trail-bars-enter' : 'message-trail-bars-exit'
             }`}
           >
@@ -458,24 +532,42 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
             />
           </div>
           <div
-            className={`fixed right-3 top-12 bottom-4 z-[200] w-[280px] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
-              isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
-            }`}
+            ref={expandedPanelRef}
+            className="fixed right-3 top-1/2 z-[200] max-h-[calc(100vh-2rem)] w-[280px] -translate-y-1/2"
+            onMouseEnter={expandTrail}
+            onMouseLeave={collapseTrail}
+            onFocusCapture={expandTrail}
+            onBlurCapture={handleTrailBlur}
           >
-            <ExpandedTrail
-              trailEntries={trailEntries}
-              activeTarget={activeTarget}
-              onScrollToMessage={onScrollToMessage}
-            />
+            <div
+              className={`max-h-[inherit] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
+                isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
+              }`}
+            >
+              <ExpandedTrail
+                trailEntries={trailEntries}
+                activeTarget={activeTarget}
+                onScrollToMessage={onScrollToMessage}
+              />
+            </div>
           </div>
         </>
       ) : (
-        <div className="h-full max-h-full overflow-y-auto px-1 py-2">
-          <CollapsedTrail
-            messages={messages}
-            assistantEntries={assistantEntries}
-            onScrollToMessage={onScrollToMessage}
-          />
+        <div className="h-full max-h-full overflow-y-auto px-1 py-2 flex items-center">
+          <div
+            ref={collapsedHoverRef}
+            className="min-w-full"
+            onMouseEnter={expandTrail}
+            onMouseLeave={collapseTrail}
+            onFocusCapture={expandTrail}
+            onBlurCapture={handleTrailBlur}
+          >
+            <CollapsedTrail
+              messages={messages}
+              assistantEntries={assistantEntries}
+              onScrollToMessage={onScrollToMessage}
+            />
+          </div>
         </div>
       )}
     </div>

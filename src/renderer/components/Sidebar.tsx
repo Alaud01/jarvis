@@ -161,10 +161,32 @@ function DraggableConversationItem({
   );
 }
 
+function FolderContentsPanel({
+  isExpanded,
+  children,
+}: {
+  isExpanded: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`folder-contents ${isExpanded ? 'folder-contents-expanded' : ''}`}
+      aria-hidden={!isExpanded}
+    >
+      <div className="folder-contents-inner">
+        <div className="folder-contents-list ml-4 border-l-1 border-border-secondary space-y-0.5">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DroppableFolderItem({
   folder,
   conversationCount,
   isExpanded,
+  containsActiveConversation,
   isEditing,
   onToggle,
   onRename,
@@ -178,6 +200,7 @@ function DroppableFolderItem({
   folder: Folder;
   conversationCount: number;
   isExpanded: boolean;
+  containsActiveConversation: boolean;
   isEditing: boolean;
   onToggle: () => void;
   onRename: (id: string, name: string) => void;
@@ -232,12 +255,13 @@ function DroppableFolderItem({
   };
 
   const highlighted = isOver || isDragOver;
+  const showAsSelected = containsActiveConversation && !isExpanded;
 
   return (
     <div ref={setNodeRef}>
       <div
         className={`group flex items-center gap-1 px-1 py-[0.4rem] text-[0.85rem] transition-all duration-150 ${
-          highlighted
+          highlighted || showAsSelected
             ? 'bg-bg-active text-text-primary'
             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
         }`}
@@ -249,7 +273,7 @@ function DroppableFolderItem({
         onContextMenu={(e) => onContextMenu(e, folder.id)}
         aria-expanded={isExpanded}
       >
-        <svg className="h-3 w-3 shrink-0 text-text-tertiary transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>
+        <svg className={`h-3 w-3 shrink-0 text-text-tertiary transition-transform duration-200 ${isExpanded ? 'rotate-90' : 'rotate-0'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
         </svg>
         <svg className="h-3.5 w-3.5 shrink-0 text-text-tertiary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -311,11 +335,9 @@ function DroppableFolderItem({
           </div>
         )}
       </div>
-      {isExpanded && (
-        <div className="ml-4 border-l border-border-primary/40 pt-1.5 space-y-0.5">
-          {children}
-        </div>
-      )}
+      <FolderContentsPanel isExpanded={isExpanded}>
+        {children}
+      </FolderContentsPanel>
     </div>
   );
 }
@@ -612,7 +634,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               New Chat
             </button>
           </div>
-          <div className="mt-8 flex flex-col gap-2">
+          <div className="mt-8 flex flex-col gap-1">
             <div>
               <div className="group/label mb-2 flex items-center justify-between px-2">
                 <span className="font-mono text-[0.6rem] uppercase tracking-[2px] text-text-muted">
@@ -634,6 +656,9 @@ const Sidebar: React.FC<SidebarProps> = ({
                   sortedFolders.map((folder) => {
                     const folderConversations = conversations.filter(c => c.folderId === folder.id);
                     const isExpanded = expandedFolders.has(folder.id);
+                    const containsActiveConversation = folderConversations.some(
+                      conversation => conversation.id === currentConversationId
+                    );
 
                     return (
                       <DroppableFolderItem
@@ -641,6 +666,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                         folder={folder}
                         conversationCount={folderConversations.length}
                         isExpanded={isExpanded}
+                        containsActiveConversation={containsActiveConversation}
                         isEditing={editingFolderId === folder.id}
                         onToggle={() => handleToggleFolder(folder.id)}
                         onRename={onRenameFolder}
@@ -651,11 +677,9 @@ const Sidebar: React.FC<SidebarProps> = ({
                         isDragOver={dragOverFolderId === folder.id}
                       >
                         {folderConversations.length === 0 ? (
-                          isExpanded && (
-                            <div className="py-2 pl-1 text-[0.75rem] italic text-text-tertiary">
-                              Drop chats here or create one from a chat menu.
-                            </div>
-                          )
+                          <div className="py-2 pl-1 text-[0.75rem] italic text-text-tertiary">
+                            Drop chats here or create one from a chat menu.
+                          </div>
                         ) : (
                           folderConversations.map((conversation) => (
                             <DraggableConversationItem

@@ -25,8 +25,16 @@ AGENT_STEP_TIMEOUT = max(int(os.environ.get("BROWSER_STEP_TIMEOUT", "300")), AGE
 BROWSER_VISION_MODE = os.environ.get("BROWSER_USE_VISION", "auto").strip().lower()
 BROWSER_LLM_SCREENSHOT_WIDTH = int(os.environ.get("BROWSER_LLM_SCREENSHOT_WIDTH", "1024"))
 BROWSER_LLM_SCREENSHOT_HEIGHT = int(os.environ.get("BROWSER_LLM_SCREENSHOT_HEIGHT", "768"))
-BROWSER_WINDOW_WIDTH = BROWSER_LLM_SCREENSHOT_WIDTH if BROWSER_LLM_SCREENSHOT_WIDTH > 0 else 1024
-BROWSER_WINDOW_HEIGHT = BROWSER_LLM_SCREENSHOT_HEIGHT if BROWSER_LLM_SCREENSHOT_HEIGHT > 0 else 768
+BROWSER_WINDOW_X = int(os.environ.get("BROWSER_WINDOW_X", "0"))
+BROWSER_WINDOW_Y = int(os.environ.get("BROWSER_WINDOW_Y", "0"))
+BROWSER_WINDOW_WIDTH = int(os.environ.get(
+    "BROWSER_WINDOW_WIDTH",
+    str(BROWSER_LLM_SCREENSHOT_WIDTH if BROWSER_LLM_SCREENSHOT_WIDTH > 0 else 1024),
+))
+BROWSER_WINDOW_HEIGHT = int(os.environ.get(
+    "BROWSER_WINDOW_HEIGHT",
+    str(BROWSER_LLM_SCREENSHOT_HEIGHT if BROWSER_LLM_SCREENSHOT_HEIGHT > 0 else 768),
+))
 VISION_MODEL_PATTERNS = (
     "kimi",
     "llava",
@@ -280,6 +288,7 @@ def create_browser_session():
         "device_scale_factor": 1,
         "args": [
             f"--window-size={BROWSER_WINDOW_WIDTH},{BROWSER_WINDOW_HEIGHT}",
+            f"--window-position={BROWSER_WINDOW_X},{BROWSER_WINDOW_Y}",
             "--force-device-scale-factor=1",
         ],
     }
@@ -375,6 +384,25 @@ async def run_browser_agent(
             )
             llm = RobustChatOllama(raw_llm, keep_alive=parse_keep_alive(MAIN_MODEL_KEEP_ALIVE))
             print(f"[BrowserService] RobustChatOllama wrapper created successfully for model={model}")
+        except Exception as e:
+            import traceback
+            print(f"[BrowserService] Failed to create LLM for model={model}: {e}")
+            print(f"[BrowserService] Traceback:\n{traceback.format_exc()}")
+            raise
+    elif provider == "opencode-go":
+        from llm_wrapper import OpenCodeGoChatAnthropic
+        if not api_key:
+            raise ValueError("OpenCode Go API key is required for browser automation")
+        print(f"[BrowserService] Creating OpenCodeGoChatAnthropic for opencode-go with model={model}")
+        try:
+            llm = OpenCodeGoChatAnthropic(
+                model=model,
+                api_key=api_key,
+                base_url="https://opencode.ai/zen/go",
+                timeout=300.0,
+                max_tokens=8192,
+            )
+            print(f"[BrowserService] OpenCodeGoChatAnthropic created successfully for model={model}")
         except Exception as e:
             import traceback
             print(f"[BrowserService] Failed to create LLM for model={model}: {e}")

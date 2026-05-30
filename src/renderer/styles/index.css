@@ -270,8 +270,83 @@ h1, h2, h3, h4, h5, h6 {
   overflow-x: hidden;
 }
 
+.thinking-panel-toggle-label {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.thinking-panel-toggle-hint {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+}
+
 .thinking-scroll-container {
   overflow-anchor: auto;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.thinking-panel-section-label {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.77em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.thinking-panel-meta {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+.thinking-scroll-container .marktext-content {
+  font-size: inherit;
+  line-height: inherit;
+  letter-spacing: 0.01em;
+}
+
+.thinking-scroll-container .marktext-content p {
+  margin: 0 0 0.75rem;
+}
+
+.thinking-scroll-container .marktext-content h1 {
+  font-size: 1.15rem;
+  margin: 1.1rem 0 0.5rem;
+}
+
+.thinking-scroll-container .marktext-content h2 {
+  font-size: 1.02rem;
+  margin: 1rem 0 0.45rem;
+}
+
+.thinking-scroll-container .marktext-content h3 {
+  font-size: 0.94rem;
+  margin: 0.85rem 0 0.4rem;
+}
+
+.thinking-scroll-container .marktext-content h4,
+.thinking-scroll-container .marktext-content h5,
+.thinking-scroll-container .marktext-content h6 {
+  font-size: 0.875rem;
+  margin: 0.75rem 0 0.35rem;
+}
+
+.thinking-scroll-container .marktext-content pre code {
+  font-size: 0.78rem;
+}
+
+.thinking-scroll-container .marktext-content pre {
+  margin: 0.85rem 0;
+  padding: 0.7rem 0.85rem;
+}
+
+.thinking-scroll-container .marktext-content .code-block-shell {
+  margin: 0.85rem 0;
 }
 
 select option {
@@ -446,7 +521,7 @@ select option {
 .marktext-content code {
   background: var(--color-bg-code);
   border: 1px solid var(--color-border-primary);
-  border-radius: 0.3rem;
+  border-radius: 0.2rem;
   font-family: var(--font-mono);
   font-size: 0.88em;
   padding: 0.12rem 0.35rem;
@@ -455,11 +530,11 @@ select option {
 .marktext-content pre {
   background: var(--color-bg-code);
   border: 1px solid var(--color-border-primary);
-  border-radius: 0.55rem;
+  border-radius: 0.25rem;
   line-height: 1.62;
   margin: 1.1rem 0;
   overflow-x: auto;
-  padding: 1rem;
+  padding: 0.85rem 1rem;
 }
 
 .marktext-content pre code {
@@ -470,6 +545,19 @@ select option {
   font-size: 0.88rem;
   padding: 0;
   white-space: pre;
+}
+
+.marktext-content pre code.hljs {
+  background: transparent;
+  padding: 0;
+}
+
+.marktext-content .code-block-shell {
+  margin: 1.1rem 0;
+}
+
+.marktext-content .code-block-shell pre {
+  margin: 0;
 }
 
 .marktext-content .table-scroll {
@@ -582,6 +670,50 @@ select option {
   }
 }
 
+.folder-contents {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+
+.folder-contents-expanded {
+  grid-template-rows: 1fr;
+}
+
+.folder-contents-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.folder-contents-list > * {
+  opacity: 0;
+  transform: translateY(-8px);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.folder-contents:not(.folder-contents-expanded) .folder-contents-list > * {
+  transition: none;
+}
+
+.folder-contents-expanded .folder-contents-list > * {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.folder-contents-expanded .folder-contents-list > *:nth-child(1) { transition-delay: 0ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(2) { transition-delay: 35ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(3) { transition-delay: 70ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(4) { transition-delay: 105ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(5) { transition-delay: 140ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(6) { transition-delay: 175ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(7) { transition-delay: 210ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(8) { transition-delay: 245ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(9) { transition-delay: 280ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(10) { transition-delay: 315ms; }
+.folder-contents-expanded .folder-contents-list > *:nth-child(n+11) { transition-delay: 350ms; }
+
 @media (prefers-reduced-motion: reduce) {
   .message-trail-bars-exit,
   .message-trail-bars-enter,
@@ -589,6 +721,16 @@ select option {
   .message-trail-panel-exit {
     animation-duration: 1ms;
     animation-delay: 0ms;
+  }
+
+  .folder-contents {
+    transition: none;
+  }
+
+  .folder-contents-list > * {
+    transition: none;
+    opacity: 1;
+    transform: none;
   }
 }
 

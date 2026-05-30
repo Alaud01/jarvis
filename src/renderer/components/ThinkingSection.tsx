@@ -117,11 +117,11 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
           >
             <polyline points="9 18 15 12 9 6" />
           </svg>
-          <span className="font-mono text-[0.65rem] uppercase tracking-widest text-text-tertiary">
+          <span className="thinking-panel-toggle-label">
             {isStreaming ? streamingLabel : finishedLabel}
           </span>
         </div>
-        <span className="font-mono text-[0.65rem] text-text-muted">
+        <span className="thinking-panel-toggle-hint">
           {isExpanded ? 'Click to collapse' : 'Click to expand'}
         </span>
       </button>
@@ -129,7 +129,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
       {isExpanded && (
         <div
           ref={contentRef}
-          className={`px-4 pb-4 pt-2 border-t text-xs border-border-secondary thinking-scroll-container ${isStreaming ? 'max-h-[300px] overflow-y-auto' : ''}`}
+          className={`px-4 pb-4 pt-2 border-t border-border-secondary thinking-scroll-container ${isStreaming ? 'max-h-[300px] overflow-y-auto' : ''}`}
         >
           <div className={contentClassName}>
             <MarkdownRenderer content={content} />

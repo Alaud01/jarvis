@@ -1,11 +1,22 @@
 import type { ModelInfo, Provider, ProviderInfo } from './types';
 import { OllamaProvider } from './ollama';
+import { OpenCodeGoProvider } from './opencode-go';
 
 const providers: Map<string, Provider> = new Map();
 
-export function initializeProviders(): void {
+export function initializeProviders(opencodeGoApiKey?: string): void {
   const ollama = new OllamaProvider();
   providers.set(ollama.id, ollama);
+
+  const opencodeGo = new OpenCodeGoProvider(opencodeGoApiKey);
+  providers.set(opencodeGo.id, opencodeGo);
+}
+
+export function setOpenCodeGoApiKey(key: string): void {
+  const provider = providers.get('opencode-go');
+  if (provider && provider instanceof OpenCodeGoProvider) {
+    provider.setApiKey(key);
+  }
 }
 
 export function getProvider(providerId: string): Provider | undefined {

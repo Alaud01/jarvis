@@ -9,6 +9,8 @@ import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
 import type { BrowserLLMTraceStep, BrowserToolRun, BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
+import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
+import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
 
 interface Message {
   id: string;
@@ -18,6 +20,7 @@ interface Message {
   isStreaming?: boolean;
   browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
+  attachments?: FileAttachment[];
 }
 
 interface Conversation {
@@ -42,6 +45,7 @@ interface SerializedMessage {
   timestamp: string;
   browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
+  attachments?: FileAttachment[];
 }
 
 interface SerializedConversation {
@@ -86,6 +90,7 @@ function serializeConversation(c: Conversation): SerializedConversation {
       timestamp: m.timestamp.toISOString(),
       browserRuns: m.browserRuns,
       searchSources: m.searchSources,
+      attachments: m.attachments,
     })),
     folderId: c.folderId,
   };
@@ -112,6 +117,7 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       timestamp: new Date(m.timestamp),
       browserRuns: m.browserRuns,
       searchSources: m.searchSources,
+      attachments: m.attachments,
     })),
     folderId: c.folderId ?? null,
     isLoaded: true,
@@ -195,6 +201,7 @@ function getConversationRevision(conversation: Conversation): string {
     nextHash = hashString(message.text, nextHash);
     nextHash = hashUnknown(message.browserRuns, nextHash);
     nextHash = hashUnknown(message.searchSources, nextHash);
+    nextHash = hashUnknown(message.attachments, nextHash);
     return nextHash;
   }, hashString(
     `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
@@ -251,10 +258,23 @@ interface SendMessageStreamRequest {
   messages: { role: 'user' | 'assistant'; content: string }[];
 }
 
-function toStreamMessage(message: Pick<Message, 'sender' | 'text'>): SendMessageStreamRequest['messages'][number] {
+function getProviderForModel(models: ModelInfo[], modelId: string | null): string {
+  if (!modelId) return 'ollama';
+  const model = models.find(m => m.id === modelId);
+  return model?.provider || 'ollama';
+}
+
+function toStreamMessage(message: Pick<Message, 'sender' | 'text' | 'attachments'>): SendMessageStreamRequest['messages'][number] {
+  const attachmentContext = message.attachments?.map(attachment => [
+    '',
+    `--- Attached file: ${attachment.name}${attachment.truncated ? ' (truncated)' : ''} ---`,
+    attachment.content,
+    `--- End attached file: ${attachment.name} ---`,
+  ].join('\n')).join('\n') ?? '';
+
   return {
     role: message.sender === 'user' ? 'user' : 'assistant',
-    content: message.text,
+    content: `${message.text}${attachmentContext}`,
   };
 }
 
@@ -354,12 +374,13 @@ declare global {
       getModels: () => Promise<ModelInfo[]>;
       getModelsForProvider: (providerId: string) => Promise<ModelInfo[]>;
       getProviders: () => Promise<ProviderInfo[]>;
+      pickAttachments: () => Promise<AttachmentSelectionResult>;
       sendMessageStream: (request: SendMessageStreamRequest) => Promise<{ success: boolean; aborted?: boolean }>;
-      stopStream: () => Promise<{ success: boolean }>;
+      stopStream: (request: StopStreamRequest) => Promise<{ success: boolean }>;
       getVoiceShortcut: () => Promise<string>;
-      onChunk: (callback: (chunk: string) => void) => () => void;
-      onDone: (callback: () => void) => () => void;
-      onError: (callback: (error: string) => void) => () => void;
+      onChunk: (callback: (event: StreamChunkEvent) => void) => () => void;
+      onDone: (callback: (event: StreamEventContext) => void) => () => void;
+      onError: (callback: (event: StreamErrorEvent) => void) => () => void;
       onBrowserTraceEvent: (callback: (event: BrowserTraceEvent) => void) => () => void;
       onSearchSources: (callback: (event: SearchSourcesEvent) => void) => () => void;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
@@ -385,6 +406,8 @@ declare global {
       storeSaveModel: (model: string) => Promise<{ success: boolean }>;
       storeLoadProvider: () => Promise<string>;
       storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
+      storeLoadOpenCodeGoApiKey: () => Promise<string>;
+      storeSaveOpenCodeGoApiKey: (key: string) => Promise<{ success: boolean }>;
       storeLoadOpenTabIds: () => Promise<string[]>;
       storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
@@ -401,17 +424,16 @@ const App: React.FC = () => {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<string>('ollama');
   const [isLoadingModels, setIsLoadingModels] = useState(true);
+  const selectedProvider = getProviderForModel(models, selectedModel);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [voiceTranscript, setVoiceTranscript] = useState<PendingVoiceTranscript | null>(null);
   const [voiceShortcut, setVoiceShortcut] = useState<string>('');
   
-  const streamingMessageIdRef = useRef<string | null>(null);
+  const streamingSessionsRef = useRef<Map<string, { conversationId: string }>>(new Map());
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
@@ -419,56 +441,34 @@ const App: React.FC = () => {
   const pendingJarvisMessageRef = useRef<string | null>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
-  const selectedProviderRef = useRef(selectedProvider);
   const conversationAccessRef = useRef<Map<string, number>>(new Map());
   const savedConversationRevisionsRef = useRef<Map<string, string>>(new Map());
   const savedConversationMetadataRevisionRef = useRef<string>('');
   const metadataSaveTimerRef = useRef<number | null>(null);
   const conversationSaveTimersRef = useRef<Map<string, number>>(new Map());
-  const streamingConversationIdRef = useRef<string | null>(null);
-  const streamChunkBufferRef = useRef<string[]>([]);
-  const streamFlushTimerRef = useRef<number | null>(null);
+  const streamChunkBuffersRef = useRef<Map<string, string[]>>(new Map());
+  const streamFlushTimersRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
-    selectedProviderRef.current = selectedProvider;
-  }, [selectedProvider]);
+    // provider is now derived from the selected model
+  }, []);
 
   useEffect(() => () => {
     if (metadataSaveTimerRef.current !== null) {
       window.clearTimeout(metadataSaveTimerRef.current);
     }
     conversationSaveTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
-    if (streamFlushTimerRef.current !== null) {
-      window.clearTimeout(streamFlushTimerRef.current);
-    }
+    streamFlushTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
   }, []);
-
-  const fetchModelsForProvider = useCallback(async (providerId: string) => {
-    setIsLoadingModels(true);
-    try {
-      const fetchedModels = await window.assistant.getModelsForProvider(providerId);
-      setModels(fetchedModels);
-      const currentStillValid = fetchedModels.some(m => m.id === selectedModel);
-      if (!currentStillValid && fetchedModels.length > 0) {
-        setSelectedModel(fetchedModels[0].id);
-      } else if (fetchedModels.length === 0) {
-        setSelectedModel(null);
-      }
-    } catch (error) {
-      console.error('Failed to fetch models for provider:', error);
-      setModels([]);
-    } finally {
-      setIsLoadingModels(false);
-    }
-  }, [selectedModel]);
 
   const refreshModels = useCallback(async () => {
     setIsLoadingModels(true);
     try {
-      const fetchedProviders = await window.assistant.getProviders();
+      const [fetchedProviders, fetchedModels] = await Promise.all([
+        window.assistant.getProviders(),
+        window.assistant.getModels(),
+      ]);
       setProviders(fetchedProviders);
-      const providerId = selectedProviderRef.current;
-      const fetchedModels = await window.assistant.getModelsForProvider(providerId);
       setModels(fetchedModels);
       const currentStillValid = fetchedModels.some(m => m.id === selectedModel);
       if (!currentStillValid && fetchedModels.length > 0) {
@@ -488,25 +488,14 @@ const App: React.FC = () => {
     const loadProvidersAndModels = async () => {
       setIsLoadingModels(true);
       try {
-        const fetchedProviders = await window.assistant.getProviders();
+        const [fetchedProviders, fetchedModels] = await Promise.all([
+          window.assistant.getProviders(),
+          window.assistant.getModels(),
+        ]);
         setProviders(fetchedProviders);
-
-        const providerId = selectedProviderRef.current;
-        if (fetchedProviders.length > 0 && !fetchedProviders.find(p => p.id === providerId)) {
-          const firstProvider = fetchedProviders[0].id;
-          setSelectedProvider(firstProvider);
-          selectedProviderRef.current = firstProvider;
-          const fetchedModels = await window.assistant.getModelsForProvider(firstProvider);
-          setModels(fetchedModels);
-          if (fetchedModels.length > 0) {
-            setSelectedModel(prev => prev ?? fetchedModels[0].id);
-          }
-        } else {
-          const fetchedModels = await window.assistant.getModelsForProvider(providerId);
-          setModels(fetchedModels);
-          if (fetchedModels.length > 0) {
-            setSelectedModel(prev => prev ?? fetchedModels[0].id);
-          }
+        setModels(fetchedModels);
+        if (fetchedModels.length > 0) {
+          setSelectedModel(prev => prev ?? fetchedModels[0].id);
         }
       } catch (error) {
         console.error('Failed to load providers/models:', error);
@@ -595,17 +584,7 @@ const App: React.FC = () => {
       }
 
       if (providerResult.status === 'fulfilled') {
-        if (providerResult.value) {
-          const storedProvider = providerResult.value;
-          const validProviders = await window.assistant.getProviders();
-          if (validProviders.some(p => p.id === storedProvider)) {
-            setSelectedProvider(storedProvider);
-            selectedProviderRef.current = storedProvider;
-          } else if (validProviders.length > 0) {
-            setSelectedProvider(validProviders[0].id);
-            selectedProviderRef.current = validProviders[0].id;
-          }
-        }
+        // Provider is derived from selected model, no separate hydration needed
       } else {
         console.error('Failed to load stored provider:', providerResult.reason);
       }
@@ -698,18 +677,12 @@ const App: React.FC = () => {
       window.assistant.storeSaveModel(selectedModel).catch(err => {
         console.error('Failed to save selected model:', err);
       });
-    }
-  }, [selectedModel, hasHydratedStore]);
-
-  useEffect(() => {
-    if (!hasHydratedStore) return;
-
-    if (selectedProvider) {
-      window.assistant.storeSaveProvider(selectedProvider).catch(err => {
+      const provider = getProviderForModel(models, selectedModel);
+      window.assistant.storeSaveProvider(provider).catch(err => {
         console.error('Failed to save selected provider:', err);
       });
     }
-  }, [selectedProvider, hasHydratedStore]);
+  }, [selectedModel, models, hasHydratedStore]);
 
   useEffect(() => {
     if (!hasHydratedStore) return;
@@ -799,13 +772,6 @@ const App: React.FC = () => {
     );
   }, [conversations, currentConversationId, hasHydratedStore, openTabIds]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!hasHydratedStore) return;
-
-    fetchModelsForProvider(selectedProvider);
-  }, [selectedProvider, hasHydratedStore]);
-
   useEffect(() => {
     const loadVoiceShortcut = async () => {
       try {
@@ -883,79 +849,109 @@ const App: React.FC = () => {
     );
   }, []);
 
-  const flushStreamChunkBuffer = useCallback(() => {
-    if (streamFlushTimerRef.current !== null) {
-      window.clearTimeout(streamFlushTimerRef.current);
-      streamFlushTimerRef.current = null;
+  const unregisterStreamSession = useCallback((assistantMessageId: string) => {
+    streamingSessionsRef.current.delete(assistantMessageId);
+    streamChunkBuffersRef.current.delete(assistantMessageId);
+    const timerId = streamFlushTimersRef.current.get(assistantMessageId);
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      streamFlushTimersRef.current.delete(assistantMessageId);
+    }
+  }, []);
+
+  const registerStreamSession = useCallback((conversationId: string, assistantMessageId: string) => {
+    streamingSessionsRef.current.set(assistantMessageId, { conversationId });
+  }, []);
+
+  const flushStreamChunkBuffer = useCallback((assistantMessageId: string) => {
+    const timerId = streamFlushTimersRef.current.get(assistantMessageId);
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      streamFlushTimersRef.current.delete(assistantMessageId);
     }
 
-    const chunk = streamChunkBufferRef.current.join('');
-    streamChunkBufferRef.current = [];
-    if (!chunk || !streamingMessageIdRef.current) {
+    const buffer = streamChunkBuffersRef.current.get(assistantMessageId) ?? [];
+    streamChunkBuffersRef.current.delete(assistantMessageId);
+    const chunk = buffer.join('');
+    if (!chunk) {
+      return;
+    }
+
+    const session = streamingSessionsRef.current.get(assistantMessageId);
+    if (!session) {
       return;
     }
 
     updateMessageInConversation(
-      streamingConversationIdRef.current,
-      streamingMessageIdRef.current,
+      session.conversationId,
+      assistantMessageId,
       message => ({ ...message, text: message.text + chunk })
     );
   }, [updateMessageInConversation]);
 
-  const scheduleStreamFlush = useCallback(() => {
-    if (streamFlushTimerRef.current !== null) {
+  const scheduleStreamFlush = useCallback((assistantMessageId: string) => {
+    if (streamFlushTimersRef.current.has(assistantMessageId)) {
       return;
     }
 
-    streamFlushTimerRef.current = window.setTimeout(() => {
-      streamFlushTimerRef.current = null;
-      flushStreamChunkBuffer();
+    const timerId = window.setTimeout(() => {
+      streamFlushTimersRef.current.delete(assistantMessageId);
+      flushStreamChunkBuffer(assistantMessageId);
     }, STREAM_FLUSH_MS);
+    streamFlushTimersRef.current.set(assistantMessageId, timerId);
   }, [flushStreamChunkBuffer]);
 
+  const finishStreaming = useCallback((conversationId: string, assistantMessageId: string) => {
+    if (!streamingSessionsRef.current.has(assistantMessageId)) {
+      return;
+    }
+
+    flushStreamChunkBuffer(assistantMessageId);
+    updateMessageInConversation(
+      conversationId,
+      assistantMessageId,
+      message => ({ ...message, isStreaming: false })
+    );
+    unregisterStreamSession(assistantMessageId);
+  }, [flushStreamChunkBuffer, unregisterStreamSession, updateMessageInConversation]);
+
   useEffect(() => {
-    const handleChunk = (chunk: string) => {
-      if (!streamingMessageIdRef.current) {
+    const handleChunk = (event: StreamChunkEvent) => {
+      if (!streamingSessionsRef.current.has(event.assistantMessageId)) {
         return;
       }
 
-      streamChunkBufferRef.current.push(chunk);
-      scheduleStreamFlush();
+      const buffer = streamChunkBuffersRef.current.get(event.assistantMessageId) ?? [];
+      buffer.push(event.chunk);
+      streamChunkBuffersRef.current.set(event.assistantMessageId, buffer);
+      scheduleStreamFlush(event.assistantMessageId);
     };
 
-    const finishStreaming = () => {
-      flushStreamChunkBuffer();
-      const conversationId = streamingConversationIdRef.current;
-      const messageId = streamingMessageIdRef.current;
-      if (messageId) {
-        updateMessageInConversation(conversationId, messageId, message => ({ ...message, isStreaming: false }));
+    const handleDone = (event: StreamEventContext) => {
+      finishStreaming(event.conversationId, event.assistantMessageId);
+    };
+
+    const handleError = (event: StreamErrorEvent) => {
+      console.error('Streaming error:', event.error);
+      if (!streamingSessionsRef.current.has(event.assistantMessageId)) {
+        return;
       }
-      streamingMessageIdRef.current = null;
-      streamingConversationIdRef.current = null;
-      setIsLoading(false);
+
+      flushStreamChunkBuffer(event.assistantMessageId);
+      updateMessageInConversation(
+        event.conversationId,
+        event.assistantMessageId,
+        message => ({
+          ...message,
+          text: `Error: ${event.error}. Make sure your selected provider is running and configured.`,
+          isStreaming: false,
+        })
+      );
+      unregisterStreamSession(event.assistantMessageId);
     };
 
-    const handleDone = () => {
-      finishStreaming();
-    };
-
-    const handleError = (error: string) => {
-      console.error('Streaming error:', error);
-      if (streamingMessageIdRef.current) {
-        flushStreamChunkBuffer();
-        updateMessageInConversation(
-          streamingConversationIdRef.current,
-          streamingMessageIdRef.current,
-          message => ({
-            ...message,
-            text: `Error: ${error}. Make sure your selected provider is running and configured.`,
-            isStreaming: false,
-          })
-        );
-        streamingMessageIdRef.current = null;
-        streamingConversationIdRef.current = null;
-        setIsLoading(false);
-      }
+    const getConversationIdForMessage = (assistantMessageId: string): string | null => {
+      return streamingSessionsRef.current.get(assistantMessageId)?.conversationId ?? null;
     };
 
     const handleBrowserTraceEvent = (event: BrowserTraceEvent) => {
@@ -963,8 +959,13 @@ const App: React.FC = () => {
         return;
       }
 
+      const conversationId = getConversationIdForMessage(event.assistantMessageId);
+      if (!conversationId) {
+        return;
+      }
+
       updateMessageInConversation(
-        streamingConversationIdRef.current,
+        conversationId,
         event.assistantMessageId,
         message => ({
           ...message,
@@ -974,8 +975,13 @@ const App: React.FC = () => {
     };
 
     const handleSearchSources = (event: SearchSourcesEvent) => {
+      const conversationId = getConversationIdForMessage(event.assistantMessageId);
+      if (!conversationId) {
+        return;
+      }
+
       updateMessageInConversation(
-        streamingConversationIdRef.current,
+        conversationId,
         event.assistantMessageId,
         message => {
           const currentGroups = message.searchSources ?? [];
@@ -1002,7 +1008,7 @@ const App: React.FC = () => {
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
     };
-  }, [flushStreamChunkBuffer, scheduleStreamFlush, updateMessageInConversation]);
+  }, [finishStreaming, flushStreamChunkBuffer, scheduleStreamFlush, unregisterStreamSession, updateMessageInConversation]);
 
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages || [];
@@ -1207,28 +1213,22 @@ const App: React.FC = () => {
     setSelectedModel(model);
   }, []);
 
-  const handleProviderSelect = useCallback((providerId: string) => {
-    setSelectedProvider(providerId);
-    selectedProviderRef.current = providerId;
-    setSelectedModel(null);
-  }, []);
-
   const handleStopStreaming = useCallback(async () => {
-    await window.assistant.stopStream();
-    
-    if (streamingMessageIdRef.current) {
-      flushStreamChunkBuffer();
-      updateMessageInConversation(
-        streamingConversationIdRef.current,
-        streamingMessageIdRef.current,
-        message => ({ ...message, isStreaming: false })
-      );
-      streamingMessageIdRef.current = null;
-      streamingConversationIdRef.current = null;
+    if (!currentConversationId) {
+      return;
     }
-    
-    setIsLoading(false);
-  }, [flushStreamChunkBuffer, updateMessageInConversation]);
+
+    const conversation = conversations.find(c => c.id === currentConversationId);
+    const streamingMessage = conversation?.messages.find(message => message.isStreaming);
+    if (!streamingMessage) {
+      return;
+    }
+
+    await window.assistant.stopStream({
+      conversationId: currentConversationId,
+      assistantMessageId: streamingMessage.id,
+    });
+  }, [conversations, currentConversationId]);
 
   const handleScrollToMessage = useCallback((messageId: string, headerIndex?: number) => {
     if (headerIndex !== undefined) {
@@ -1272,6 +1272,7 @@ const App: React.FC = () => {
       text: newText,
       sender: 'user',
       timestamp: new Date(),
+      attachments: conversation.messages[messageIndex].attachments,
     };
 
     setConversations(prev =>
@@ -1281,8 +1282,6 @@ const App: React.FC = () => {
           : c
       )
     );
-
-    setIsLoading(true);
 
     const assistantMessageId = crypto.randomUUID();
     const assistantMessage: Message = {
@@ -1301,13 +1300,12 @@ const App: React.FC = () => {
       )
     );
 
-    streamingMessageIdRef.current = assistantMessageId;
-    streamingConversationIdRef.current = conversation.id;
+    registerStreamSession(conversation.id, assistantMessageId);
 
     try {
       const conversationMessages: SendMessageStreamRequest['messages'] = [
         ...conversation.messages.slice(0, messageIndex).map(toStreamMessage),
-        { role: 'user', content: newText },
+        toStreamMessage(editedMessage),
       ];
 
       await window.assistant.sendMessageStream({
@@ -1337,11 +1335,9 @@ const App: React.FC = () => {
             : c
         )
       );
-      setIsLoading(false);
-      streamingMessageIdRef.current = null;
-      streamingConversationIdRef.current = null;
+      unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversationId, selectedModel, selectedProvider, conversations]);
+  }, [currentConversationId, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession]);
 
   const handleRegenerateResponse = useCallback(async (messageId: string) => {
     if (!selectedModel) {
@@ -1368,8 +1364,6 @@ const App: React.FC = () => {
       )
     );
 
-    setIsLoading(true);
-
     const assistantMessageId = crypto.randomUUID();
     const assistantMessage: Message = {
       id: assistantMessageId,
@@ -1387,13 +1381,12 @@ const App: React.FC = () => {
       )
     );
 
-    streamingMessageIdRef.current = assistantMessageId;
-    streamingConversationIdRef.current = conversation.id;
+    registerStreamSession(conversation.id, assistantMessageId);
 
     try {
       const conversationMessages: SendMessageStreamRequest['messages'] = [
         ...conversation.messages.slice(0, userMessageIndex).map(toStreamMessage),
-        { role: 'user', content: userMessage.text },
+        toStreamMessage(userMessage),
       ];
 
       await window.assistant.sendMessageStream({
@@ -1423,13 +1416,11 @@ const App: React.FC = () => {
             : c
         )
       );
-      setIsLoading(false);
-      streamingMessageIdRef.current = null;
-      streamingConversationIdRef.current = null;
+      unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversationId, selectedModel, selectedProvider, conversations]);
+  }, [currentConversationId, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession]);
 
-  const handleSendMessage = useCallback(async (text: string) => {
+  const handleSendMessage = useCallback(async (text: string, attachments: FileAttachment[] = []) => {
     if (!selectedModel) {
       alert('Please select a model first');
       return;
@@ -1487,6 +1478,7 @@ const App: React.FC = () => {
       text,
       sender: 'user',
       timestamp: new Date(),
+      attachments: attachments.length > 0 ? attachments : undefined,
     };
 
     setConversations(prev =>
@@ -1497,8 +1489,6 @@ const App: React.FC = () => {
       )
     );
 
-    setIsLoading(true);
-    
     const assistantMessageId = crypto.randomUUID();
     const assistantMessage: Message = {
       id: assistantMessageId,
@@ -1516,13 +1506,12 @@ const App: React.FC = () => {
       )
     );
 
-    streamingMessageIdRef.current = assistantMessageId;
-    streamingConversationIdRef.current = conversationId;
+    registerStreamSession(conversationId, assistantMessageId);
 
     try {
       const conversationMessages: SendMessageStreamRequest['messages'] = [
         ...conversationMessagesForRequest.map(toStreamMessage),
-        { role: 'user', content: text },
+        toStreamMessage(userMessage),
       ];
 
       await window.assistant.sendMessageStream({
@@ -1552,11 +1541,9 @@ const App: React.FC = () => {
             : c
         )
       );
-      setIsLoading(false);
-      streamingMessageIdRef.current = null;
-      streamingConversationIdRef.current = null;
+      unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversation, currentConversationId, selectedModel, selectedProvider, messages]);
+  }, [currentConversation, currentConversationId, selectedModel, selectedProvider, messages, registerStreamSession, unregisterStreamSession]);
 
   useEffect(() => {
     if (currentConversationId === null && pendingJarvisMessageRef.current) {
@@ -1582,6 +1569,7 @@ const App: React.FC = () => {
     ? conversations.find(c => c.id === currentConversationId) ?? null
     : null;
   const isCurrentConversationLoading = Boolean(activeConversation && !activeConversation.isLoaded);
+  const isCurrentConversationStreaming = messages.some(message => message.isStreaming);
 
   return (
     <ThemeProvider>
@@ -1622,7 +1610,7 @@ const App: React.FC = () => {
                 ref={messageListRef} 
                 scrollContainerRef={chatScrollContainerRef}
                 messages={messages} 
-                isLoading={isLoading}
+                isLoading={isCurrentConversationStreaming}
                 editingMessageId={editingMessageId}
                 onEditMessage={handleEditMessage}
                 onCancelEdit={handleCancelEdit}
@@ -1640,7 +1628,7 @@ const App: React.FC = () => {
             <InputArea
               onSendMessage={handleSendMessage}
               onStopStreaming={handleStopStreaming}
-              isLoading={isLoading}
+              isLoading={isCurrentConversationStreaming}
               disabled={!selectedModel || isCurrentConversationLoading}
               voiceTranscript={voiceTranscript}
               onVoiceTextUsed={handleVoiceTextUsed}
@@ -1649,9 +1637,6 @@ const App: React.FC = () => {
               selectedModel={selectedModel}
               onModelSelect={handleModelSelect}
               isLoadingModels={isLoadingModels}
-              providers={providers}
-              selectedProvider={selectedProvider}
-              onProviderSelect={handleProviderSelect}
               onRefreshModels={refreshModels}
               composeFocusKey={newChatTrigger}
             />

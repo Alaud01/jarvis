@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserToolRun } from '../shared/browser';
 import type { SearchSourceGroup } from '../shared/search';
+import type { FileAttachment } from '../shared/attachments';
 
 export interface SerializedMessage {
   id: string;
@@ -11,6 +12,7 @@ export interface SerializedMessage {
   timestamp: string;
   browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
+  attachments?: FileAttachment[];
 }
 
 export interface SerializedConversation {
@@ -44,6 +46,7 @@ interface StoreSchema {
   selectedProvider: string;
   openTabIds: string[];
   currentConversationId: string | null;
+  opencodeGoApiKey: string;
 }
 
 const store = new Store<StoreSchema>({
@@ -58,6 +61,7 @@ const store = new Store<StoreSchema>({
     selectedProvider: 'ollama',
     openTabIds: [],
     currentConversationId: null,
+    opencodeGoApiKey: '',
   },
 }) as any;
 
@@ -258,6 +262,14 @@ export function loadSelectedProvider(): string {
 
 export function saveSelectedProvider(provider: string): void {
   store.set('selectedProvider', provider);
+}
+
+export function loadOpenCodeGoApiKey(): string {
+  return store.get('opencodeGoApiKey', '') as string;
+}
+
+export function saveOpenCodeGoApiKey(key: string): void {
+  store.set('opencodeGoApiKey', key);
 }
 
 export function loadOpenTabIds(): string[] {

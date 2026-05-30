@@ -37,7 +37,7 @@ const TopNavbar: React.FC<TopNavbarProps> = ({
         {tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`h-8 px-3 flex grow shrink basis-[160px] min-w-0 max-w-[200px] items-center gap-2 overflow-hidden text-[0.7rem] font-mono cursor-pointer transition-all duration-[150ms] [-webkit-app-region:no-drag] ${
+            className={`h-8 px-3 flex grow shrink basis-[160px] min-w-0 max-w-[200px] items-center gap-2 overflow-hidden font-readable text-[0.7rem] cursor-pointer transition-all duration-[150ms] [-webkit-app-region:no-drag] ${
               activeTabId === tab.id
                 ? 'bg-bg-primary text-text-primary border border-border-primary border-b-bg-primary -mb-px'
                 : 'text-text-secondary border border-transparent border-b-transparent hover:bg-bg-hover hover:text-text-primary'

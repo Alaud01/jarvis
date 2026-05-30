@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { app } from 'electron';
 import type { RecordedAudio } from './audioRecorder';
 
-const PYTHON_SERVICE_PORT = 8000;
+const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
 
 let pythonProcess: ChildProcess | null = null;
@@ -45,6 +45,18 @@ export async function startPythonService(): Promise<boolean> {
   if (pythonProcess) {
     console.log('[PythonService] Already running');
     return true;
+  }
+
+  const existingServiceHealth = await checkServiceHealth();
+  if (existingServiceHealth.ready) {
+    console.log(`[PythonService] Reusing healthy service already running on port ${PYTHON_SERVICE_PORT}`);
+    isServiceReady = true;
+    return true;
+  }
+
+  if (existingServiceHealth.reachable) {
+    console.error(`[PythonService] Port ${PYTHON_SERVICE_PORT} is occupied by an incompatible service`);
+    return false;
   }
   
   const serviceDir = getPythonServicePath();
@@ -91,23 +103,29 @@ export async function startPythonService(): Promise<boolean> {
   return ready;
 }
 
+async function checkServiceHealth(): Promise<{ reachable: boolean; ready: boolean }> {
+  try {
+    const response = await fetch(`http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/health`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return { reachable: true, ready: false };
+    }
+
+    const data = await response.json() as { status?: string; models_loaded?: boolean };
+    return { reachable: true, ready: data.status === 'healthy' && data.models_loaded === true };
+  } catch {
+    return { reachable: false, ready: false };
+  }
+}
+
 async function waitForService(maxAttempts: number = 60, intervalMs: number = 1000): Promise<boolean> {
   for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const response = await fetch(`http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/health`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(5000),
-      });
-      
-      if (response.ok) {
-        const data = await response.json() as { status?: string; models_loaded?: boolean };
-        if (data.status === 'healthy' && data.models_loaded) {
-          console.log('[PythonService] Service is ready');
-          return true;
-        }
-      }
-    } catch {
-      // Service not ready yet
+    if ((await checkServiceHealth()).ready) {
+      console.log('[PythonService] Service is ready');
+      return true;
     }
     
     await new Promise(resolve => setTimeout(resolve, intervalMs));
