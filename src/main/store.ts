@@ -47,6 +47,7 @@ interface StoreSchema {
   openTabIds: string[];
   currentConversationId: string | null;
   opencodeGoApiKey: string;
+  openRouterApiKey: string;
 }
 
 const store = new Store<StoreSchema>({
@@ -62,6 +63,7 @@ const store = new Store<StoreSchema>({
     openTabIds: [],
     currentConversationId: null,
     opencodeGoApiKey: '',
+    openRouterApiKey: '',
   },
 }) as any;
 
@@ -270,6 +272,14 @@ export function loadOpenCodeGoApiKey(): string {
 
 export function saveOpenCodeGoApiKey(key: string): void {
   store.set('opencodeGoApiKey', key);
+}
+
+export function loadOpenRouterApiKey(): string {
+  return store.get('openRouterApiKey', '') as string;
+}
+
+export function saveOpenRouterApiKey(key: string): void {
+  store.set('openRouterApiKey', key);
 }
 
 export function loadOpenTabIds(): string[] {

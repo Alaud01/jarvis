@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 interface Message {
   id: string;
@@ -47,6 +49,7 @@ interface ActiveTrailTarget {
 const MAX_PREVIEW_HEADERS = 9;
 const ACTIVE_READING_OFFSET = 56;
 const TRAIL_COLLAPSE_ANIMATION_MS = 220;
+const TRAIL_HOVER_RECHECK_MS = 700;
 
 const parseHeaders = (text: string): HeaderEntry[] => {
   let cleanText = text;
@@ -123,7 +126,8 @@ const HEADER_INDENT: Record<number, string> = {
 const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => (
   <span className={`trail-markdown-preview ${className}`}>
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[[remarkMath, { singleDollarTextMath: true }], remarkGfm]}
+      rehypePlugins={[rehypeKatex]}
       components={{
         p: ({ children }) => <span>{children}</span>,
         strong: ({ children }) => <strong>{children}</strong>,
@@ -337,6 +341,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   const [isCollapsing, setIsCollapsing] = useState(false);
   const [activeTarget, setActiveTarget] = useState<ActiveTrailTarget | null>(null);
   const collapseTimeoutRef = useRef<number | null>(null);
+  const hoverRecheckTimeoutRef = useRef<number | null>(null);
   const expandedPanelRef = useRef<HTMLDivElement>(null);
   const collapsedHoverRef = useRef<HTMLDivElement>(null);
   const isExpandedRef = useRef(isExpanded);
@@ -422,14 +427,37 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     };
   }, [scrollContainerRef, trailEntries]);
 
+  const clearHoverRecheck = useCallback(() => {
+    if (hoverRecheckTimeoutRef.current !== null) {
+      window.clearTimeout(hoverRecheckTimeoutRef.current);
+      hoverRecheckTimeoutRef.current = null;
+    }
+  }, []);
+
   const collapseTrailImmediate = useCallback(() => {
+    clearHoverRecheck();
     if (collapseTimeoutRef.current !== null) {
       window.clearTimeout(collapseTimeoutRef.current);
       collapseTimeoutRef.current = null;
     }
     setIsCollapsing(false);
     setIsExpanded(false);
-  }, []);
+  }, [clearHoverRecheck]);
+
+  const collapseTrail = useCallback(() => {
+    if (!isExpandedRef.current) return;
+
+    clearHoverRecheck();
+    setIsCollapsing(true);
+    if (collapseTimeoutRef.current !== null) {
+      window.clearTimeout(collapseTimeoutRef.current);
+    }
+    collapseTimeoutRef.current = window.setTimeout(() => {
+      setIsExpanded(false);
+      setIsCollapsing(false);
+      collapseTimeoutRef.current = null;
+    }, TRAIL_COLLAPSE_ANIMATION_MS);
+  }, [clearHoverRecheck]);
 
   const collapseTrailIfNotHovered = useCallback(() => {
     requestAnimationFrame(() => {
@@ -438,14 +466,24 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
       const expandedPanelHovered = expandedPanelRef.current?.matches(':hover') ?? false;
       const collapsedHovered = collapsedHoverRef.current?.matches(':hover') ?? false;
       if (!expandedPanelHovered && !collapsedHovered) {
-        collapseTrailImmediate();
+        collapseTrail();
       }
     });
-  }, [collapseTrailImmediate]);
+  }, [collapseTrail]);
+
+  const scheduleHoverRecheck = useCallback(() => {
+    if (!isExpandedRef.current) return;
+
+    clearHoverRecheck();
+    hoverRecheckTimeoutRef.current = window.setTimeout(() => {
+      hoverRecheckTimeoutRef.current = null;
+      collapseTrailIfNotHovered();
+    }, TRAIL_HOVER_RECHECK_MS);
+  }, [clearHoverRecheck, collapseTrailIfNotHovered]);
 
   useEffect(() => {
     const handleWindowBlur = () => {
-      collapseTrailImmediate();
+      scheduleHoverRecheck();
     };
 
     const handleVisibilityChange = () => {
@@ -455,12 +493,13 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     };
 
     const handleWindowFocus = () => {
+      clearHoverRecheck();
       collapseTrailIfNotHovered();
     };
 
     const handleDocumentMouseLeave = (event: MouseEvent) => {
       if (!event.relatedTarget) {
-        collapseTrailImmediate();
+        scheduleHoverRecheck();
       }
     };
 
@@ -474,33 +513,21 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
       document.documentElement.removeEventListener('mouseleave', handleDocumentMouseLeave);
+      clearHoverRecheck();
       if (collapseTimeoutRef.current !== null) {
         window.clearTimeout(collapseTimeoutRef.current);
       }
     };
-  }, [collapseTrailImmediate, collapseTrailIfNotHovered]);
+  }, [clearHoverRecheck, collapseTrailImmediate, collapseTrailIfNotHovered, scheduleHoverRecheck]);
 
   const expandTrail = () => {
+    clearHoverRecheck();
     if (collapseTimeoutRef.current !== null) {
       window.clearTimeout(collapseTimeoutRef.current);
       collapseTimeoutRef.current = null;
     }
     setIsCollapsing(false);
     setIsExpanded(true);
-  };
-
-  const collapseTrail = () => {
-    if (!isExpanded) return;
-
-    setIsCollapsing(true);
-    if (collapseTimeoutRef.current !== null) {
-      window.clearTimeout(collapseTimeoutRef.current);
-    }
-    collapseTimeoutRef.current = window.setTimeout(() => {
-      setIsExpanded(false);
-      setIsCollapsing(false);
-      collapseTimeoutRef.current = null;
-    }, TRAIL_COLLAPSE_ANIMATION_MS);
   };
 
   if (messages.length === 0) return null;
@@ -535,7 +562,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
             ref={expandedPanelRef}
             className="fixed right-3 top-1/2 z-[200] max-h-[calc(100vh-2rem)] w-[280px] -translate-y-1/2"
             onMouseEnter={expandTrail}
-            onMouseLeave={collapseTrail}
+            onMouseLeave={scheduleHoverRecheck}
             onFocusCapture={expandTrail}
             onBlurCapture={handleTrailBlur}
           >

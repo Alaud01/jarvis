@@ -114,8 +114,17 @@ async function checkServiceHealth(): Promise<{ reachable: boolean; ready: boolea
       return { reachable: true, ready: false };
     }
 
-    const data = await response.json() as { status?: string; models_loaded?: boolean };
-    return { reachable: true, ready: data.status === 'healthy' && data.models_loaded === true };
+    const data = await response.json() as {
+      status?: string;
+      models_loaded?: boolean;
+      transcription_provider?: string;
+    };
+    return {
+      reachable: true,
+      ready: data.status === 'healthy'
+        && data.models_loaded === true
+        && data.transcription_provider === 'openrouter',
+    };
   } catch {
     return { reachable: false, ready: false };
   }

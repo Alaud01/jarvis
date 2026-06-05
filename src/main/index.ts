@@ -22,6 +22,8 @@ import {
   saveSelectedProvider,
   loadOpenCodeGoApiKey,
   saveOpenCodeGoApiKey,
+  loadOpenRouterApiKey,
+  saveOpenRouterApiKey,
   loadOpenTabIds,
   saveOpenTabIds,
   loadCurrentConversationId,
@@ -37,7 +39,7 @@ import {
 import type { BrowserTraceEvent } from '../shared/browser';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
-import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider, setOpenCodeGoApiKey } from './providers/registry';
+import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider, setOpenCodeGoApiKey, setOpenRouterApiKey } from './providers/registry';
 import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo } from './providers/types';
 import { ATTACHMENT_DIALOG_FILTERS, readAttachments } from './attachmentService';
 
@@ -168,7 +170,7 @@ async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> 
       'When you use tavily_search, include relevant Markdown links to the sources you relied on.',
       'Use the fetch_url tool first for public webpages when you only need to read page content, summarize it, or extract information such as headlines, links, prices, or article text.',
       'Use the browser_task tool only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
-      'When using browser_task, give it the whole interactive objective in one call, including navigation, clicks, typing, waiting, handling dialogs, and the final success condition. Do not split one user request into multiple browser_task calls.',
+      'Prefer one complete browser_task that covers the full interactive objective when possible, including navigation, clicks, typing, waiting, handling dialogs, and the final success condition. You may call browser_task again in the same turn if a follow-up step or retry is needed after reviewing the previous result.',
       'When web access is unnecessary, answer normally without calling a tool.',
       'After using a tool, answer the user with the result instead of repeating raw tool output verbatim.',
     ].join(' ')
@@ -575,7 +577,6 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
       await buildSystemPrompt(request.conversationId),
       ...request.messages,
     ];
-    let browserTaskExecutedThisTurn = false;
     let tavilySearchCallsThisTurn = 0;
     let fetchUrlCallsThisTurn = 0;
 
@@ -704,22 +705,6 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
         }
 
         if (toolCall.function.name === 'browser_task') {
-          if (browserTaskExecutedThisTurn) {
-            toolResultMessages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id || toolCall.function.name,
-              tool_name: toolCall.function.name,
-              content: [
-                'Browser task skipped.',
-                'Error: A browser_task has already run during this user turn. Do not retry browser automation immediately.',
-                'Use the previous browser task result to answer the user with the observed outcome, failure, or next manual step.',
-              ].join('\n'),
-            });
-            continue;
-          }
-
-          browserTaskExecutedThisTurn = true;
-
           const args = parseToolArgumentsObject(toolCall.function.name, toolCall.function.arguments);
           const task = typeof args.task === 'string' ? args.task.trim() : '';
 
@@ -740,13 +725,15 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
 
           const browserApiKey = request.provider === 'opencode-go'
             ? (loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY)
-            : undefined;
+            : request.provider === 'openrouter'
+              ? (loadOpenRouterApiKey() || process.env.OPENROUTER_API_KEY)
+              : undefined;
           const browserResult = await runBrowserTask(
             task,
             request.model,
             request.provider,
             abortController.signal,
-            undefined,
+            request.model,
             (traceEvent: BrowserTraceEvent) => {
               sendToRenderer('browser-trace-event', {
                 ...traceEvent,
@@ -915,6 +902,16 @@ ipcMain.handle('store:save-opencode-go-api-key', async (_event, key: string) => 
   return { success: true };
 });
 
+ipcMain.handle('store:load-openrouter-api-key', async () => {
+  return loadOpenRouterApiKey();
+});
+
+ipcMain.handle('store:save-openrouter-api-key', async (_event, key: string) => {
+  saveOpenRouterApiKey(key);
+  setOpenRouterApiKey(key);
+  return { success: true };
+});
+
 ipcMain.handle('store:load-open-tab-ids', async () => {
   return loadOpenTabIds();
 });
@@ -960,7 +957,10 @@ ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
 });
 
 app.whenReady().then(async () => {
-  initializeProviders(loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY);
+  initializeProviders(
+    loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY,
+    loadOpenRouterApiKey() || process.env.OPENROUTER_API_KEY,
+  );
 
   if (process.platform === 'darwin' && !isDev) {
     Menu.setApplicationMenu(Menu.buildFromTemplate([]));

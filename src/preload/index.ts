@@ -108,6 +108,8 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
   storeLoadOpenCodeGoApiKey: () => ipcRenderer.invoke('store:load-opencode-go-api-key'),
   storeSaveOpenCodeGoApiKey: (key: string) => ipcRenderer.invoke('store:save-opencode-go-api-key', key),
+  storeLoadOpenRouterApiKey: () => ipcRenderer.invoke('store:load-openrouter-api-key'),
+  storeSaveOpenRouterApiKey: (key: string) => ipcRenderer.invoke('store:save-openrouter-api-key', key),
   storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),
   storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),

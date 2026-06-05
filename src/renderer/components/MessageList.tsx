@@ -360,14 +360,17 @@ interface MessageActionButtonProps {
   label: string;
   icon?: React.ReactNode;
   variant?: 'default' | 'primary';
+  disabled?: boolean;
 }
 
-const MessageActionButton: React.FC<MessageActionButtonProps> = ({ onClick, label, icon, variant = 'default' }) => (
+const MessageActionButton: React.FC<MessageActionButtonProps> = ({ onClick, label, icon, variant = 'default', disabled = false }) => (
   <button
     onClick={onClick}
+    disabled={disabled}
     title={label}
-    className={`flex items-center justify-center p-1.5 transition-all duration-150 ${
-      variant === 'primary'
+    className={`flex items-center justify-center p-1.5 transition-all duration-150 ${disabled
+      ? 'cursor-not-allowed border border-border-secondary text-text-tertiary opacity-60'
+      : variant === 'primary'
         ? 'border border-text-primary bg-text-primary text-bg-primary hover:bg-transparent hover:text-text-primary'
         : 'border border-border-secondary text-text-secondary hover:border-text-primary hover:text-text-primary'
     }`}
@@ -500,6 +503,8 @@ const MessageRow = React.memo(({
     return () => window.removeEventListener('resize', resizeEditTextarea);
   }, [isEditing, resizeEditTextarea]);
 
+  const actionsDisabled = Boolean(message.isStreaming || isLoading);
+
   return (
     <div
       data-message-id={message.id}
@@ -615,37 +620,39 @@ const MessageRow = React.memo(({
             <SearchSourcesBar groups={message.searchSources} />
           )}
 
-          {!message.isStreaming && !isLoading && (
-            <div className="flex items-center justify-end gap-2">
-              {message.sender === 'user' ? (
-                <>
-                  <MessageActionButton
-                    onClick={() => onCopy(message.id, message.text)}
-                    label={copiedId === message.id ? 'Copied' : 'Copy'}
-                    icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
-                  />
-                  <MessageActionButton
-                    onClick={() => onStartEdit(message.id, message.text)}
-                    label="Edit"
-                    icon={<PencilIcon />}
-                  />
-                </>
-              ) : (
-                <>
-                  <MessageActionButton
-                    onClick={() => onCopy(message.id, message.text)}
-                    label={copiedId === message.id ? 'Copied' : 'Copy'}
-                    icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
-                  />
-                  <MessageActionButton
-                    onClick={() => onRegenerate(message.id)}
-                    label="Regenerate"
-                    icon={<RefreshIcon />}
-                  />
-                </>
-              )}
-            </div>
-          )}
+          <div className="flex items-center justify-end gap-2">
+            {message.sender === 'user' ? (
+              <>
+                <MessageActionButton
+                  onClick={() => onCopy(message.id, message.text)}
+                  label={copiedId === message.id ? 'Copied' : 'Copy'}
+                  icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
+                  disabled={actionsDisabled}
+                />
+                <MessageActionButton
+                  onClick={() => onStartEdit(message.id, message.text)}
+                  label="Edit"
+                  icon={<PencilIcon />}
+                  disabled={actionsDisabled}
+                />
+              </>
+            ) : (
+              <>
+                <MessageActionButton
+                  onClick={() => onCopy(message.id, message.text)}
+                  label={copiedId === message.id ? 'Copied' : 'Copy'}
+                  icon={copiedId === message.id ? <CheckIcon /> : <CopyIcon />}
+                  disabled={actionsDisabled}
+                />
+                <MessageActionButton
+                  onClick={() => onRegenerate(message.id)}
+                  label="Regenerate"
+                  icon={<RefreshIcon />}
+                  disabled={actionsDisabled}
+                />
+              </>
+            )}
+          </div>
         </>
       )}
     </div>
@@ -654,6 +661,7 @@ const MessageRow = React.memo(({
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
 const STREAMING_STICKY_BOTTOM_THRESHOLD = 50;
+const SMOOTH_AUTO_SCROLL_TRACKING_MS = 500;
 const VIRTUALIZATION_THRESHOLD = 80;
 const VIRTUALIZATION_OVERSCAN = 8;
 const DEFAULT_MESSAGE_HEIGHT = 180;
@@ -705,6 +713,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 }, ref) => {
   const messageRefsRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const autoScrollEnabledRef = useRef(true);
+  const smoothAutoScrollDeadlineRef = useRef(0);
+  const smoothAutoScrollTimeoutRef = useRef<number | null>(null);
   const prevLastMessageIdRef = useRef<string | null>(null);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
   const measuredHeightsRef = useRef<Map<string, number>>(new Map());
@@ -722,6 +732,25 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const reactivateAutoScroll = useCallback(() => {
     setAutoScrollEnabled(true);
   }, [setAutoScrollEnabled]);
+
+  const clearSmoothAutoScrollTracking = useCallback(() => {
+    smoothAutoScrollDeadlineRef.current = 0;
+    if (smoothAutoScrollTimeoutRef.current !== null) {
+      window.clearTimeout(smoothAutoScrollTimeoutRef.current);
+      smoothAutoScrollTimeoutRef.current = null;
+    }
+  }, []);
+
+  const trackSmoothAutoScroll = useCallback(() => {
+    smoothAutoScrollDeadlineRef.current = performance.now() + SMOOTH_AUTO_SCROLL_TRACKING_MS;
+    if (smoothAutoScrollTimeoutRef.current !== null) {
+      window.clearTimeout(smoothAutoScrollTimeoutRef.current);
+    }
+    smoothAutoScrollTimeoutRef.current = window.setTimeout(() => {
+      smoothAutoScrollDeadlineRef.current = 0;
+      smoothAutoScrollTimeoutRef.current = null;
+    }, SMOOTH_AUTO_SCROLL_TRACKING_MS);
+  }, []);
 
   const reactivateAutoScrollIfAtBottom = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -835,9 +864,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    if (behavior === 'smooth') {
+      trackSmoothAutoScroll();
+    } else {
+      clearSmoothAutoScrollTracking();
+    }
     container.scrollTo({ top: container.scrollHeight, behavior });
     setAutoScrollEnabled(true);
-  }, [scrollContainerRef, setAutoScrollEnabled]);
+  }, [clearSmoothAutoScrollTracking, scrollContainerRef, setAutoScrollEnabled, trackSmoothAutoScroll]);
 
   useLayoutEffect(() => {
     const lastMessage = messages[messages.length - 1];
@@ -853,7 +887,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       lastMessage.id !== previousLastId &&
       (lastMessage.sender === 'user' || lastMessage.isStreaming)
     ) {
-      scrollToBottomNow();
+      scrollToBottomNow(lastMessage.isStreaming ? 'smooth' : 'auto');
     }
   }, [messages, scrollToBottomNow]);
 
@@ -863,7 +897,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       return;
     }
 
-    scrollToBottomNow();
+    scrollToBottomNow('smooth');
   }, [scrollToBottomNow, setAutoScrollEnabled]);
 
   const scrollElementIntoView = useCallback((element: Element, offset: number = 16) => {
@@ -965,14 +999,30 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     setAutoScrollEnabled(isNearBottom(container));
 
     const handleScroll = () => {
+      if (
+        autoScrollEnabledRef.current &&
+        smoothAutoScrollDeadlineRef.current > performance.now()
+      ) {
+        return;
+      }
+
       setAutoScrollEnabled(isNearBottom(container));
     };
 
+    const handleUserScrollIntent = () => {
+      clearSmoothAutoScrollTracking();
+    };
+
     container.addEventListener('scroll', handleScroll, { passive: true });
+    container.addEventListener('wheel', handleUserScrollIntent, { passive: true });
+    container.addEventListener('touchmove', handleUserScrollIntent, { passive: true });
     return () => {
       container.removeEventListener('scroll', handleScroll);
+      container.removeEventListener('wheel', handleUserScrollIntent);
+      container.removeEventListener('touchmove', handleUserScrollIntent);
+      clearSmoothAutoScrollTracking();
     };
-  }, [scrollContainerRef, setAutoScrollEnabled]);
+  }, [clearSmoothAutoScrollTracking, scrollContainerRef, setAutoScrollEnabled]);
 
   const hasStreamingMessage = messages.some(m => m.isStreaming);
   const [copiedId, setCopiedId] = useState<string | null>(null);

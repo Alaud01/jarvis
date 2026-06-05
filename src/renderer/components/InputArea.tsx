@@ -35,6 +35,7 @@ interface InputAreaProps {
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'ollama': 'Ollama',
   'opencode-go': 'Go',
+  'openrouter': 'OpenRouter',
 };
 
 function getProviderDisplayName(providerId: string): string {
@@ -107,7 +108,7 @@ const ModelSelector: React.FC<{
     : models;
 
   const groupedModels = groupModelsByProvider(filteredModels);
-  const providerOrder = ['opencode-go', 'ollama'];
+  const providerOrder = ['opencode-go', 'openrouter', 'ollama'];
   const sortedProviders = [...groupedModels.keys()].sort((a, b) => {
     const ai = providerOrder.indexOf(a);
     const bi = providerOrder.indexOf(b);
@@ -151,7 +152,7 @@ const ModelSelector: React.FC<{
           'No models - retry'
         ) : selectedModelInfo ? (
           <>
-            <span className="truncate max-w-28">{selectedModelInfo.name}</span>
+            <span className="truncate max-w-28" title={selectedModelInfo.name}>{selectedModelInfo.name}</span>
             <span className="text-text-tertiary text-[0.5rem] normal-case tracking-normal">{getProviderDisplayName(selectedModelInfo.provider)}</span>
           </>
         ) : (
@@ -194,13 +195,14 @@ const ModelSelector: React.FC<{
                         setIsOpen(false);
                         setSearch('');
                       }}
+                      title={model.name}
                       className={`w-full text-left px-3 py-1.5 flex items-center justify-between gap-2 transition-colors duration-100 cursor-pointer ${
                         model.id === selectedModel
                           ? 'bg-bg-secondary text-text-primary'
                           : 'text-text-secondary hover:bg-bg-secondary hover:text-text-primary'
                       }`}
                     >
-                      <span className="font-mono text-xs truncate">{model.name}</span>
+                      <span className="font-mono text-xs truncate" title={model.name}>{model.name}</span>
                       <span className="text-text-tertiary text-[0.55rem] shrink-0">{getProviderDisplayName(model.provider)}</span>
                     </button>
                   ))}

@@ -408,6 +408,8 @@ declare global {
       storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
       storeLoadOpenCodeGoApiKey: () => Promise<string>;
       storeSaveOpenCodeGoApiKey: (key: string) => Promise<{ success: boolean }>;
+      storeLoadOpenRouterApiKey: () => Promise<string>;
+      storeSaveOpenRouterApiKey: (key: string) => Promise<{ success: boolean }>;
       storeLoadOpenTabIds: () => Promise<string[]>;
       storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
@@ -424,6 +426,7 @@ const App: React.FC = () => {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
+  const [unreadCompleteConversationIds, setUnreadCompleteConversationIds] = useState<Set<string>>(() => new Set());
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
@@ -659,6 +662,11 @@ const App: React.FC = () => {
     if (currentConversationId && !validIds.has(currentConversationId)) {
       setCurrentConversationId(conversations[0]?.id ?? null);
     }
+
+    setUnreadCompleteConversationIds(prev => {
+      const next = new Set([...prev].filter(id => validIds.has(id) && id !== currentConversationId));
+      return next.size === prev.size ? prev : next;
+    });
   }, [conversations, currentConversationId, hasHydratedStore]);
 
   useEffect(() => {
@@ -863,6 +871,22 @@ const App: React.FC = () => {
     streamingSessionsRef.current.set(assistantMessageId, { conversationId });
   }, []);
 
+  const markConversationCompleteUnread = useCallback((conversationId: string) => {
+    if (conversationId === currentConversationId) {
+      return;
+    }
+
+    setUnreadCompleteConversationIds(prev => {
+      if (prev.has(conversationId)) {
+        return prev;
+      }
+
+      const next = new Set(prev);
+      next.add(conversationId);
+      return next;
+    });
+  }, [currentConversationId]);
+
   const flushStreamChunkBuffer = useCallback((assistantMessageId: string) => {
     const timerId = streamFlushTimersRef.current.get(assistantMessageId);
     if (timerId !== undefined) {
@@ -912,8 +936,9 @@ const App: React.FC = () => {
       assistantMessageId,
       message => ({ ...message, isStreaming: false })
     );
+    markConversationCompleteUnread(conversationId);
     unregisterStreamSession(assistantMessageId);
-  }, [flushStreamChunkBuffer, unregisterStreamSession, updateMessageInConversation]);
+  }, [flushStreamChunkBuffer, markConversationCompleteUnread, unregisterStreamSession, updateMessageInConversation]);
 
   useEffect(() => {
     const handleChunk = (event: StreamChunkEvent) => {
@@ -947,6 +972,7 @@ const App: React.FC = () => {
           isStreaming: false,
         })
       );
+      markConversationCompleteUnread(event.conversationId);
       unregisterStreamSession(event.assistantMessageId);
     };
 
@@ -1008,7 +1034,7 @@ const App: React.FC = () => {
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
     };
-  }, [finishStreaming, flushStreamChunkBuffer, scheduleStreamFlush, unregisterStreamSession, updateMessageInConversation]);
+  }, [finishStreaming, flushStreamChunkBuffer, markConversationCompleteUnread, scheduleStreamFlush, unregisterStreamSession, updateMessageInConversation]);
 
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages || [];
@@ -1335,9 +1361,10 @@ const App: React.FC = () => {
             : c
         )
       );
+      markConversationCompleteUnread(conversation.id);
       unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversationId, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession]);
+  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession]);
 
   const handleRegenerateResponse = useCallback(async (messageId: string) => {
     if (!selectedModel) {
@@ -1416,9 +1443,10 @@ const App: React.FC = () => {
             : c
         )
       );
+      markConversationCompleteUnread(conversation.id);
       unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversationId, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession]);
+  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession]);
 
   const handleSendMessage = useCallback(async (text: string, attachments: FileAttachment[] = []) => {
     if (!selectedModel) {
@@ -1541,9 +1569,10 @@ const App: React.FC = () => {
             : c
         )
       );
+      markConversationCompleteUnread(conversationId);
       unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversation, currentConversationId, selectedModel, selectedProvider, messages, registerStreamSession, unregisterStreamSession]);
+  }, [currentConversation, currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, messages, registerStreamSession, unregisterStreamSession]);
 
   useEffect(() => {
     if (currentConversationId === null && pendingJarvisMessageRef.current) {
@@ -1592,6 +1621,8 @@ const App: React.FC = () => {
               title: c.title, 
               timestamp: c.timestamp,
               folderId: c.folderId,
+              isStreaming: c.messages.some(message => message.isStreaming),
+              hasUnreadComplete: unreadCompleteConversationIds.has(c.id),
             }))}
             folders={folders}
             currentConversationId={currentConversationId}

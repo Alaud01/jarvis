@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import os
 import tempfile
@@ -12,8 +14,11 @@ import soundfile as sf
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.responses import JSONResponse
-import onnx_asr
-import onnxruntime as rt
+
+# Local Parakeet ASR is intentionally disabled for now. Transcription uses
+# OpenRouter with the same model instead.
+# import onnx_asr
+# import onnxruntime as rt
 
 app = FastAPI(title="Voice Flow Service")
 
@@ -23,6 +28,17 @@ VAD_MIN_SPEECH_MS = 250
 OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
 OLLAMA_TIMEOUT_SECONDS = 3
 OLLAMA_REFINEMENT_KEEP_ALIVE = 0
+OPENROUTER_TRANSCRIPTION_URL = os.environ.get(
+    "OPENROUTER_TRANSCRIPTION_URL",
+    "https://openrouter.ai/api/v1/audio/transcriptions",
+)
+OPENROUTER_TRANSCRIPTION_MODEL = os.environ.get(
+    "OPENROUTER_TRANSCRIPTION_MODEL",
+    "nvidia/parakeet-tdt-0.6b-v3",
+)
+OPENROUTER_TIMEOUT_SECONDS = float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "60"))
+OPENROUTER_REFERER = os.environ.get("OPENROUTER_REFERER", "").strip()
+OPENROUTER_TITLE = os.environ.get("OPENROUTER_TITLE", "Jarvis").strip()
 TARGET_SAMPLE_RATE = 16000
 TRANSCRIBE_SEGMENT_PADDING_MS = 250
 TRANSCRIBE_SEGMENT_PADDING_SAMPLES = TARGET_SAMPLE_RATE * TRANSCRIBE_SEGMENT_PADDING_MS // 1000
@@ -33,35 +49,36 @@ MAX_RECORDING_SECONDS = float(os.environ.get("VOICE_MAX_RECORDING_SECONDS", "300
 MAX_COMPACT_TRANSCRIPTION_SECONDS = float(os.environ.get("VOICE_MAX_COMPACT_TRANSCRIPTION_SECONDS", "45"))
 MAX_COMPACT_TRANSCRIPTION_SAMPLES = int(TARGET_SAMPLE_RATE * MAX_COMPACT_TRANSCRIPTION_SECONDS)
 UPLOAD_COPY_CHUNK_BYTES = 1024 * 1024
-asr_model = None
 vad_model = None
 
 
 def load_models():
-    global asr_model, vad_model
+    global vad_model
     
-    print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX...")
-    sess_opts = rt.SessionOptions()
-    sess_opts.enable_mem_pattern = False
-    sess_opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
-    sess_opts.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-    available_providers = set(rt.get_available_providers())
-    asr_providers = ["CPUExecutionProvider"]
-    if "CoreMLExecutionProvider" in available_providers:
-        print("[VoiceService] CoreMLExecutionProvider available, but ASR uses CPU for dynamic utterance lengths")
-    else:
-        print("[VoiceService] CoreMLExecutionProvider unavailable, using CPUExecutionProvider")
-    
-    asr_model = onnx_asr.load_model(
-        "nemo-parakeet-tdt-0.6b-v3",
-        quantization="int8",
-        sess_options=sess_opts,
-        providers=asr_providers,
-        preprocessor_config={"use_numpy_preprocessors": True},
-        resampler_config={"providers": ["CPUExecutionProvider"]},
-    )
-    print("[VoiceService] Parakeet ONNX model loaded successfully")
+    # Local Parakeet startup is disabled while STT runs through OpenRouter.
+    # print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX...")
+    # sess_opts = rt.SessionOptions()
+    # sess_opts.enable_mem_pattern = False
+    # sess_opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
+    # sess_opts.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
+    #
+    # available_providers = set(rt.get_available_providers())
+    # asr_providers = ["CPUExecutionProvider"]
+    # if "CoreMLExecutionProvider" in available_providers:
+    #     print("[VoiceService] CoreMLExecutionProvider available, but ASR uses CPU for dynamic utterance lengths")
+    # else:
+    #     print("[VoiceService] CoreMLExecutionProvider unavailable, using CPUExecutionProvider")
+    #
+    # asr_model = onnx_asr.load_model(
+    #     "nemo-parakeet-tdt-0.6b-v3",
+    #     quantization="int8",
+    #     sess_options=sess_opts,
+    #     providers=asr_providers,
+    #     preprocessor_config={"use_numpy_preprocessors": True},
+    #     resampler_config={"providers": ["CPUExecutionProvider"]},
+    # )
+    # print("[VoiceService] Parakeet ONNX model loaded successfully")
+    print(f"[VoiceService] Local Parakeet ASR disabled; using OpenRouter model {OPENROUTER_TRANSCRIPTION_MODEL}")
     
     print("[VoiceService] Loading Silero VAD ONNX...")
     from silero_vad import load_silero_vad
@@ -299,9 +316,77 @@ def iter_transcription_chunks(
     return chunks, total_compact_samples / TARGET_SAMPLE_RATE
 
 
+def wav_to_base64_audio(wav: np.ndarray) -> str:
+    if wav.dtype != np.float32 or not wav.flags.c_contiguous:
+        wav = np.ascontiguousarray(wav, dtype=np.float32)
+
+    with io.BytesIO() as buffer:
+        sf.write(buffer, wav, TARGET_SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def transcribe_chunk_with_openrouter(wav: np.ndarray) -> str:
+    api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OPENROUTER_API_KEY is not configured",
+        )
+
+    payload = {
+        "model": OPENROUTER_TRANSCRIPTION_MODEL,
+        "input_audio": {
+            "data": wav_to_base64_audio(wav),
+            "format": "wav",
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if OPENROUTER_REFERER:
+        headers["HTTP-Referer"] = OPENROUTER_REFERER
+    if OPENROUTER_TITLE:
+        headers["X-OpenRouter-Title"] = OPENROUTER_TITLE
+
+    started_at = time.perf_counter()
+    req = urllib_request.Request(
+        OPENROUTER_TRANSCRIPTION_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=OPENROUTER_TIMEOUT_SECONDS) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise HTTPException(
+            status_code=e.code,
+            detail=f"OpenRouter transcription HTTP error {e.code}: {error_body}",
+        ) from e
+    except urllib_error.URLError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"OpenRouter transcription connection failed: {e}",
+        ) from e
+
+    transcription_ms = round((time.perf_counter() - started_at) * 1000)
+    print(f"[VoiceService] OpenRouter transcription completed in {transcription_ms}ms")
+
+    transcript = response_data.get("text", "")
+    if isinstance(transcript, str):
+        return transcript.strip()
+
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="OpenRouter transcription response did not include text",
+    )
+
+
 def transcribe_audio(wav: np.ndarray, speech_segments: list[tuple[int, int]]) -> str:
-    """Transcribe detected speech, chunking very long recordings to bound peak memory."""
-    global asr_model
+    """Transcribe detected speech through OpenRouter, chunking long recordings."""
 
     transcription_chunks, duration_seconds = iter_transcription_chunks(wav, speech_segments)
     if not transcription_chunks:
@@ -324,7 +409,7 @@ def transcribe_audio(wav: np.ndarray, speech_segments: list[tuple[int, int]]) ->
                 f"({chunk_seconds:.2f}s)"
             )
 
-        transcript = asr_model.recognize(transcription_audio, sample_rate=TARGET_SAMPLE_RATE).strip()
+        transcript = transcribe_chunk_with_openrouter(transcription_audio)
         if transcript:
             transcripts.append(transcript)
 
@@ -400,12 +485,19 @@ async def startup_event():
 
 @app.get("/health")
 async def health_check():
-    global asr_model, vad_model
+    global vad_model
     
-    if asr_model is None or vad_model is None:
+    if vad_model is None:
         raise HTTPException(status_code=503, detail="Models not loaded")
     
-    return {"status": "healthy", "models_loaded": True}
+    return {
+        "status": "healthy",
+        "models_loaded": True,
+        "vad_loaded": True,
+        "transcription_provider": "openrouter",
+        "transcription_model": OPENROUTER_TRANSCRIPTION_MODEL,
+        "openrouter_configured": bool(os.environ.get("OPENROUTER_API_KEY", "").strip()),
+    }
 
 
 @app.post("/process-flow")

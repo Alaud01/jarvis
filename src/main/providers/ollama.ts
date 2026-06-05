@@ -10,9 +10,10 @@ import type {
 } from './types';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
+const DEFAULT_CLOUD_TAGS_URL = 'https://ollama.com/api/tags';
 
 interface OllamaTagsResponse {
-  models: { name: string }[];
+  models: Array<{ name?: string; model?: string }>;
 }
 
 interface OllamaChatResponse {
@@ -38,13 +39,32 @@ interface OllamaStreamResponse {
   eval_duration?: number;
 }
 
+function getOllamaModelName(model: { name?: string; model?: string }): string {
+  return (model.name || model.model || '').trim();
+}
+
+function toLocalCloudModelName(modelName: string): string {
+  if (!modelName.includes(':')) {
+    return `${modelName}:cloud`;
+  }
+
+  const [baseName, tag] = modelName.split(':', 2);
+  if (!tag || tag === 'cloud' || tag.endsWith('-cloud')) {
+    return modelName;
+  }
+
+  return `${baseName}:${tag}-cloud`;
+}
+
 export class OllamaProvider implements Provider {
   readonly id = 'ollama';
   readonly name = 'Ollama';
   private baseUrl: string;
+  private cloudTagsUrl: string;
 
   constructor(baseUrl?: string) {
     this.baseUrl = baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_BASE_URL;
+    this.cloudTagsUrl = process.env.OLLAMA_CLOUD_TAGS_URL || DEFAULT_CLOUD_TAGS_URL;
   }
 
   getApiKey(): string | null {
@@ -52,21 +72,62 @@ export class OllamaProvider implements Provider {
   }
 
   async fetchModels(): Promise<ModelInfo[]> {
+    const modelsById = new Map<string, ModelInfo>();
+
     try {
       const response = await fetch(`${this.baseUrl}/api/tags`);
       if (!response.ok) {
         throw new Error(`Failed to fetch models: ${response.statusText}`);
       }
       const data = (await response.json()) as OllamaTagsResponse;
-      return (data.models || []).map((m) => ({
-        id: m.name,
-        name: m.name,
-        provider: this.id,
-      }));
+      for (const model of data.models || []) {
+        const name = getOllamaModelName(model);
+        if (!name) continue;
+        modelsById.set(name, {
+          id: name,
+          name,
+          provider: this.id,
+        });
+      }
     } catch (error) {
       console.error('[Ollama] Error fetching models:', error);
-      return [];
     }
+
+    const includeCloudModels = process.env.OLLAMA_INCLUDE_CLOUD_MODELS !== 'false';
+    if (includeCloudModels) {
+      try {
+        const headers: Record<string, string> = {};
+        const cloudApiKey = process.env.OLLAMA_API_KEY?.trim();
+        if (cloudApiKey) {
+          headers.Authorization = `Bearer ${cloudApiKey}`;
+        }
+
+        const response = await fetch(this.cloudTagsUrl, {
+          headers,
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch cloud models: ${response.statusText}`);
+        }
+
+        const data = (await response.json()) as OllamaTagsResponse;
+        for (const model of data.models || []) {
+          const name = getOllamaModelName(model);
+          if (!name) continue;
+          const cloudName = toLocalCloudModelName(name);
+          if (modelsById.has(cloudName)) continue;
+          modelsById.set(cloudName, {
+            id: cloudName,
+            name: cloudName,
+            provider: this.id,
+          });
+        }
+      } catch (error) {
+        console.error('[Ollama] Error fetching cloud models:', error);
+      }
+    }
+
+    return [...modelsById.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
   async sendChat(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string> {

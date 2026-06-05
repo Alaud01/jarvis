@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -16,6 +16,8 @@ interface Conversation {
   title: string;
   timestamp: Date;
   folderId: string | null;
+  isStreaming: boolean;
+  hasUnreadComplete: boolean;
 }
 
 interface Folder {
@@ -93,6 +95,18 @@ function estimateMoveMenuHeight(folderCount: number): number {
   return Math.min(320, Math.max(96, (folderCount + 1) * MENU_ITEM_HEIGHT + 16));
 }
 
+function getShortcutIndex(key: string): number | null {
+  if (key >= '1' && key <= '9') return parseInt(key, 10);
+  if (key === '0') return 10;
+  return null;
+}
+
+function shouldIgnoreSidebarShortcut(e: KeyboardEvent): boolean {
+  const el = e.target as HTMLElement;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
+}
+
 function getMoveMenuPosition(contextMenuX: number, contextMenuY: number, folderCount: number): MenuPosition {
   const canOpenRight = typeof window === 'undefined'
     ? true
@@ -127,6 +141,8 @@ function DraggableConversationItem({
     id: `conversation-${conversation.id}`,
     data: { type: 'conversation', id: conversation.id },
   });
+  const statusLabel = conversation.isStreaming ? 'Streaming response' : 'Unread completed response';
+  const showStatus = conversation.isStreaming || conversation.hasUnreadComplete;
 
   return (
     <div
@@ -144,6 +160,19 @@ function DraggableConversationItem({
       <span className="min-w-0 flex-1 whitespace-nowrap overflow-hidden text-ellipsis leading-snug select-none" title={conversation.title}>
         {conversation.title}
       </span>
+      {showStatus && (
+        <span
+          className="flex h-5 w-5 shrink-0 items-center justify-center"
+          title={statusLabel}
+          aria-label={statusLabel}
+        >
+          {conversation.isStreaming ? (
+            <span className="h-2.5 w-2.5 rounded-full border border-text-muted border-t-text-primary animate-spin" />
+          ) : (
+            <span className="h-2.5 w-2.5 rounded-full bg-text-primary" />
+          )}
+        </span>
+      )}
       <button
         type="button"
         className="shrink-0 rounded p-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-bg-hover"
@@ -391,6 +420,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onMoveConversation,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [focusedFolderId, setFocusedFolderId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>({
@@ -423,12 +453,50 @@ const Sidebar: React.FC<SidebarProps> = ({
       const next = new Set(prev);
       if (next.has(folderId)) {
         next.delete(folderId);
+        setFocusedFolderId(current => (current === folderId ? null : current));
       } else {
         next.add(folderId);
+        setFocusedFolderId(folderId);
       }
       return next;
     });
   }, []);
+
+  const rootConversations = useMemo(
+    () => conversations.filter(c => !c.folderId),
+    [conversations],
+  );
+  const sortedFolders = useMemo(
+    () => [...folders].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
+    [folders],
+  );
+
+  const rootShortcutTargets = useMemo(() => {
+    const targets: Array<{ type: 'folder' | 'conversation'; id: string }> = [];
+    for (const folder of sortedFolders) {
+      targets.push({ type: 'folder', id: folder.id });
+    }
+    for (const conv of rootConversations) {
+      targets.push({ type: 'conversation', id: conv.id });
+    }
+    return targets.slice(0, 10);
+  }, [sortedFolders, rootConversations]);
+
+  const folderShortcutConversations = useMemo(() => {
+    if (!focusedFolderId) return [];
+    return conversations.filter(c => c.folderId === focusedFolderId).slice(0, 10);
+  }, [focusedFolderId, conversations]);
+
+  const handleConversationSelectWithFocus = useCallback((id: string) => {
+    const conv = conversations.find(c => c.id === id);
+    if (conv?.folderId) {
+      setFocusedFolderId(conv.folderId);
+      setExpandedFolders(prev => new Set(prev).add(conv.folderId!));
+    } else {
+      setFocusedFolderId(null);
+    }
+    onConversationSelect(id);
+  }, [conversations, onConversationSelect]);
 
   const closeMenus = useCallback(() => {
     setContextMenu(prev => (prev.visible ? { ...prev, visible: false } : prev));
@@ -588,6 +656,67 @@ const Sidebar: React.FC<SidebarProps> = ({
     }
   }, [editingFolderId, folders]);
 
+  useEffect(() => {
+    if (focusedFolderId && !folders.some(folder => folder.id === focusedFolderId)) {
+      setFocusedFolderId(null);
+    }
+  }, [focusedFolderId, folders]);
+
+  useEffect(() => {
+    const handleSidebarShortcut = (e: KeyboardEvent) => {
+      if (!e.metaKey || e.shiftKey || e.altKey) {
+        return;
+      }
+      if (shouldIgnoreSidebarShortcut(e) || editingFolderId) {
+        return;
+      }
+
+      if (e.key === 'ArrowUp') {
+        if (focusedFolderId) {
+          e.preventDefault();
+          setFocusedFolderId(null);
+        }
+        return;
+      }
+
+      const index = getShortcutIndex(e.key);
+      if (!index) {
+        return;
+      }
+
+      e.preventDefault();
+
+      if (focusedFolderId) {
+        const conversation = folderShortcutConversations[index - 1];
+        if (conversation) {
+          handleConversationSelectWithFocus(conversation.id);
+        }
+        return;
+      }
+
+      const target = rootShortcutTargets[index - 1];
+      if (!target) {
+        return;
+      }
+
+      if (target.type === 'folder') {
+        setFocusedFolderId(target.id);
+        setExpandedFolders(prev => new Set(prev).add(target.id));
+      } else {
+        handleConversationSelectWithFocus(target.id);
+      }
+    };
+
+    window.addEventListener('keydown', handleSidebarShortcut);
+    return () => window.removeEventListener('keydown', handleSidebarShortcut);
+  }, [
+    editingFolderId,
+    focusedFolderId,
+    folderShortcutConversations,
+    handleConversationSelectWithFocus,
+    rootShortcutTargets,
+  ]);
+
   const handleMoveToFolder = useCallback((conversationId: string, folderId: string | null) => {
     onMoveConversation(conversationId, folderId);
     if (folderId) {
@@ -601,8 +730,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     onMoveConversation(conversationId, newFolderId);
   }, [handleCreateFolderRequest, onMoveConversation]);
 
-  const rootConversations = conversations.filter(c => !c.folderId);
-  const sortedFolders = [...folders].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   const contextConversation = contextMenu.targetType === 'conversation' && contextMenu.targetId
     ? conversations.find(conversation => conversation.id === contextMenu.targetId) ?? null
     : null;
@@ -686,7 +813,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                               key={conversation.id}
                               conversation={conversation}
                               isActive={currentConversationId === conversation.id}
-                              onSelect={onConversationSelect}
+                              onSelect={handleConversationSelectWithFocus}
                               onDelete={onConversationDelete}
                               onContextMenu={handleConversationContextMenu}
                             />
@@ -709,7 +836,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                   key={conversation.id}
                   conversation={conversation}
                   isActive={currentConversationId === conversation.id}
-                  onSelect={onConversationSelect}
+                  onSelect={handleConversationSelectWithFocus}
                   onDelete={onConversationDelete}
                   onContextMenu={handleConversationContextMenu}
                 />

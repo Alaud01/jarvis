@@ -5,7 +5,16 @@ FastAPI service for audio transcription with VAD and text refinement.
 ## Prerequisites
 
 - Python 3.14+
+- `OPENROUTER_API_KEY` for transcription with `nvidia/parakeet-tdt-0.6b-v3`
 - [Ollama](https://ollama.ai) with `gemma4:31b-cloud` model
+
+Optional OpenRouter settings:
+
+```bash
+export OPENROUTER_TRANSCRIPTION_MODEL="nvidia/parakeet-tdt-0.6b-v3"
+export OPENROUTER_REFERER="https://your-site.example"
+export OPENROUTER_TITLE="Jarvis"
+```
 
 ## Setup
 

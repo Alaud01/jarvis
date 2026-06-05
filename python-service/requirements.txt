@@ -1,6 +1,5 @@
 fastapi>=0.104.0
 uvicorn>=0.24.0
-onnx-asr[cpu,hub]>=0.11.0
 onnxruntime>=1.16.0
 silero-vad>=5.1.0
 soundfile>=0.12.1

@@ -8,7 +8,6 @@ import type { BrowserTraceAction, BrowserTraceEvent, BrowserTraceResult } from '
 
 const BROWSER_SERVICE_PORT = 8001;
 const BROWSER_SERVICE_HOST = '127.0.0.1';
-const BROWSER_TASK_TIMEOUT_MS = 12 * 60_000;
 const HEALTH_CHECK_TIMEOUT_MS = 3000;
 const BROWSER_SETUP_TIMEOUT_MS = 15 * 60_000;
 const BROWSER_SERVICE_IDLE_TIMEOUT_MS = Number.parseInt(
@@ -35,13 +34,6 @@ export interface BrowserTaskResult {
 interface SetupStamp {
   version: number;
   requirementsHash: string;
-}
-
-class BrowserTaskTimeoutError extends Error {
-  constructor() {
-    super('Browser task timed out.');
-    this.name = 'BrowserTaskTimeoutError';
-  }
 }
 
 class BrowserTaskAbortError extends Error {
@@ -408,7 +400,6 @@ function writeSetupStamp(requirementsHash: string): void {
 function postJsonToBrowserService<T>(
   pathname: string,
   body: unknown,
-  timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<BrowserServiceHttpResult<T>> {
   return new Promise((resolve, reject) => {
@@ -420,7 +411,6 @@ function postJsonToBrowserService<T>(
         return;
       }
       settled = true;
-      clearTimeout(timeout);
       signal?.removeEventListener('abort', onAbort);
       callback();
     };
@@ -462,13 +452,6 @@ function postJsonToBrowserService<T>(
         });
       },
     );
-
-    const timeout = setTimeout(() => {
-      finish(() => {
-        request.destroy();
-        reject(new BrowserTaskTimeoutError());
-      });
-    }, timeoutMs);
 
     const onAbort = () => {
       finish(() => {
@@ -743,12 +726,12 @@ export async function runBrowserTask(
   const previousTraceCallback = activeTraceCallback;
   const activeForThisRun = traceCallback ?? null;
   activeTraceCallback = activeForThisRun;
+  clearBrowserIdleTimer();
 
   try {
     const response = await postJsonToBrowserService<BrowserTaskResult>(
       '/browser-task',
       { task, model, provider, api_key: apiKey, planner_model: plannerModel, run_id: runId },
-      BROWSER_TASK_TIMEOUT_MS,
       signal,
     );
 
@@ -783,13 +766,6 @@ export async function runBrowserTask(
     };
   } catch (error) {
     console.error('[BrowserService] Error running browser task:', error);
-    if (error instanceof BrowserTaskTimeoutError) {
-      await cancelBrowserTask();
-      return {
-        success: false,
-        error: 'Browser task timed out and was cancelled.',
-      };
-    }
     if (error instanceof BrowserTaskAbortError) {
       await cancelBrowserTask();
       return {

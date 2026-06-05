@@ -96,16 +96,19 @@ def extract_json_from_response(text: str) -> str | None:
     return None
 
 
-def repair_evaluate_expression_schema(value: Any) -> tuple[Any, bool]:
+def repair_known_action_schema_mismatches(value: Any) -> tuple[Any, bool]:
     """
-    Repair the narrow browser-use schema mismatch seen from some models:
-    {"evaluate": {"expression": "..."}} should be {"evaluate": {"code": "..."}}.
+    Repair common browser-use action schema mismatches from LLM output:
+    - {"evaluate": {"expression": "..."}} -> {"evaluate": {"code": "..."}}
+    - {"input": {"index": N, "content": "..."}} -> {"input": {"index": N, "text": "..."}}
+    - {"wait": 5} -> {"wait": {"seconds": 5}}
+    - {"action": {"index": N, "text": "..."}} -> {"input": {"index": N, "text": "..."}}
     """
     if isinstance(value, list):
         repaired_items = []
         changed = False
         for item in value:
-            repaired_item, item_changed = repair_evaluate_expression_schema(item)
+            repaired_item, item_changed = repair_known_action_schema_mismatches(item)
             repaired_items.append(repaired_item)
             changed = changed or item_changed
         return repaired_items, changed
@@ -116,7 +119,7 @@ def repair_evaluate_expression_schema(value: Any) -> tuple[Any, bool]:
     repaired: dict[str, Any] = {}
     changed = False
     for key, child_value in value.items():
-        repaired_child, child_changed = repair_evaluate_expression_schema(child_value)
+        repaired_child, child_changed = repair_known_action_schema_mismatches(child_value)
         repaired[key] = repaired_child
         changed = changed or child_changed
 
@@ -131,6 +134,38 @@ def repair_evaluate_expression_schema(value: Any) -> tuple[Any, bool]:
         repaired["evaluate"] = evaluate_repair
         changed = True
 
+    input_value = repaired.get("input")
+    if isinstance(input_value, dict) and "content" in input_value and "text" not in input_value:
+        input_repair = dict(input_value)
+        input_repair["text"] = input_repair.pop("content")
+        repaired["input"] = input_repair
+        changed = True
+
+    action_value = repaired.get("action")
+    if (
+        isinstance(action_value, dict)
+        and "index" in action_value
+        and "input" not in repaired
+        and "navigate" not in repaired
+        and "click" not in repaired
+    ):
+        repaired["input"] = action_value
+        del repaired["action"]
+        changed = True
+
+    wait_value = repaired.get("wait")
+    if isinstance(wait_value, (int, float)) and not isinstance(wait_value, bool):
+        repaired["wait"] = {"seconds": int(wait_value)}
+        changed = True
+    elif isinstance(wait_value, dict) and "seconds" not in wait_value:
+        wait_repair = dict(wait_value)
+        for alt_key in ("duration", "time", "second", "timeout"):
+            if alt_key in wait_repair:
+                wait_repair["seconds"] = wait_repair.pop(alt_key)
+                repaired["wait"] = wait_repair
+                changed = True
+                break
+
     return repaired, changed
 
 
@@ -140,11 +175,102 @@ def repair_json_for_known_schema_mismatches(json_str: str) -> str | None:
     except (json.JSONDecodeError, ValueError):
         return None
 
-    repaired, changed = repair_evaluate_expression_schema(parsed)
+    repaired, changed = repair_known_action_schema_mismatches(parsed)
     if not changed:
         return None
 
     return json.dumps(repaired)
+
+
+def summarize_validation_error(error: ValidationError, *, max_items: int = 6) -> str:
+    """Return a short, actionable validation summary instead of a union-type dump."""
+    hints = [
+        'Use input.text (not input.content) for typing into fields.',
+        'Use evaluate.code (not evaluate.expression) for JavaScript.',
+        'Use wait as {"wait": {"seconds": 5}} (seconds must be an object field, not a bare number).',
+    ]
+    issues: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for item in error.errors():
+        loc = '.'.join(str(part) for part in item.get('loc', ()))
+        msg = str(item.get('msg', ''))
+        key = (loc, msg)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if loc.endswith('.content') and 'extra' in msg.lower():
+            issues.append(f'{loc}: use "text" instead of "content" for input actions')
+        elif loc.endswith('.expression') and 'extra' in msg.lower():
+            issues.append(f'{loc}: use "code" instead of "expression" for evaluate actions')
+        elif '.wait' in loc and 'extra' in msg.lower():
+            issues.append(f'{loc}: use {{"wait": {{"seconds": N}}}} for wait actions')
+        elif loc.endswith('.seconds') and item.get('type') == 'missing':
+            issues.append(f'{loc}: wait actions require a nested "seconds" integer')
+        elif loc.endswith('.text') and item.get('type') == 'missing':
+            issues.append(f'{loc}: required field is missing')
+        elif item.get('type') in {'extra_forbidden', 'missing'}:
+            issues.append(f'{loc}: {msg}')
+
+        if len(issues) >= max_items:
+            break
+
+    if not issues:
+        return str(error)[:500]
+
+    lines = ['Invalid browser action JSON. Fix the output schema:'] + [f'- {issue}' for issue in issues]
+    lines.extend(f'- {hint}' for hint in hints)
+    return '\n'.join(lines)
+
+
+def validate_structured_output(output_format: type[T], raw: str | Mapping[str, Any]) -> T:
+    """Validate model output, applying known schema repairs before failing."""
+    if isinstance(raw, str):
+        try:
+            parsed: Any = json.loads(raw)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValidationError.from_exception_data(
+                output_format.__name__,
+                [{'type': 'json_invalid', 'loc': (), 'msg': str(e), 'input': raw}],
+            ) from e
+    else:
+        parsed = dict(raw)
+
+    repaired, _changed = repair_known_action_schema_mismatches(parsed)
+    return output_format.model_validate(repaired)
+
+
+class RobustStructuredOutputLLM:
+    """Apply known browser-use schema repairs for providers that validate JSON directly."""
+
+    def __init__(self, inner_llm):
+        self._inner = inner_llm
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    async def ainvoke(
+        self, messages: list[BaseMessage], output_format: type[T] | None = None, **kwargs: Any
+    ) -> ChatInvokeCompletion[T] | ChatInvokeCompletion[str]:
+        if output_format is None:
+            return await self._inner.ainvoke(messages, output_format=None, **kwargs)
+
+        original_validate_json = output_format.model_validate_json
+
+        @classmethod
+        def validate_json_with_repairs(cls, json_data: str | bytes | bytearray, /, **kwargs: Any):
+            if isinstance(json_data, (bytes, bytearray)):
+                json_data = json_data.decode()
+            return validate_structured_output(cls, json_data)
+
+        output_format.model_validate_json = validate_json_with_repairs
+        try:
+            return await self._inner.ainvoke(messages, output_format=output_format, **kwargs)
+        finally:
+            output_format.model_validate_json = original_validate_json
 
 
 class RobustChatOllama:
@@ -233,27 +359,16 @@ class RobustChatOllama:
 
         # Validate against the pydantic model
         try:
-            parsed = output_format.model_validate_json(json_str)
+            parsed = validate_structured_output(output_format, json_str)
         except ValidationError as e:
-            repaired_json_str = repair_json_for_known_schema_mismatches(json_str)
-            if repaired_json_str is not None:
-                try:
-                    parsed = output_format.model_validate_json(repaired_json_str)
-                    print(
-                        f"[RobustChatOllama] Repaired known structured output schema mismatch "
-                        f"for model={self._inner.model}"
-                    )
-                    return ChatInvokeCompletion(completion=parsed, usage=None)
-                except ValidationError:
-                    pass
-
             from browser_use.llm.exceptions import ModelProviderError
+            summary = summarize_validation_error(e)
             print(
                 f"[RobustChatOllama] Pydantic validation failed for extracted JSON. "
-                f"Error: {e}. JSON (first 300 chars): {json_str[:300]}"
+                f"Error: {summary}. JSON (first 300 chars): {json_str[:300]}"
             )
             raise ModelProviderError(
-                message=str(e),
+                message=summary,
                 model=self._inner.model,
             ) from e
 
@@ -342,10 +457,15 @@ class OpenCodeGoChatAnthropic(ChatAnthropic):
                     if hasattr(content_block, 'type') and content_block.type == 'tool_use':
                         try:
                             return ChatInvokeCompletion(
-                                completion=output_format.model_validate(content_block.input),
+                                completion=validate_structured_output(output_format, content_block.input),
                                 usage=usage,
                                 stop_reason=response.stop_reason,
                             )
+                        except ValidationError as e:
+                            raise ModelProviderError(
+                                message=summarize_validation_error(e),
+                                model=self.name,
+                            ) from e
                         except Exception as e:
                             _input = content_block.input
                             if isinstance(_input, str):
@@ -363,8 +483,15 @@ class OpenCodeGoChatAnthropic(ChatAnthropic):
                                                 pass
                             else:
                                 raise
+                            try:
+                                parsed = validate_structured_output(output_format, _input)
+                            except ValidationError as validation_error:
+                                raise ModelProviderError(
+                                    message=summarize_validation_error(validation_error),
+                                    model=self.name,
+                                ) from validation_error
                             return ChatInvokeCompletion(
-                                completion=output_format.model_validate(_input),
+                                completion=parsed,
                                 usage=usage,
                                 stop_reason=response.stop_reason,
                             )

@@ -12,16 +12,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from llm_wrapper import RobustChatOllama
+from llm_wrapper import RobustChatOllama, RobustStructuredOutputLLM
 
 BROWSER_SERVICE_PORT = int(os.environ.get("BROWSER_SERVICE_PORT", "8001"))
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 MAX_AGENT_STEPS = int(os.environ.get("BROWSER_MAX_STEPS", "50"))
-DEFAULT_PLANNER_MODEL = os.environ.get("BROWSER_PLANNER_MODEL", "deepseek-v4-flash:cloud")
 MAIN_MODEL_KEEP_ALIVE = os.environ.get("BROWSER_MODEL_KEEP_ALIVE", "2m")
 PLANNER_MODEL_KEEP_ALIVE = os.environ.get("BROWSER_PLANNER_KEEP_ALIVE", "0")
-AGENT_LLM_TIMEOUT = int(os.environ.get("BROWSER_LLM_TIMEOUT", "180"))
-AGENT_STEP_TIMEOUT = max(int(os.environ.get("BROWSER_STEP_TIMEOUT", "300")), AGENT_LLM_TIMEOUT + 60)
 BROWSER_VISION_MODE = os.environ.get("BROWSER_USE_VISION", "auto").strip().lower()
 BROWSER_LLM_SCREENSHOT_WIDTH = int(os.environ.get("BROWSER_LLM_SCREENSHOT_WIDTH", "1024"))
 BROWSER_LLM_SCREENSHOT_HEIGHT = int(os.environ.get("BROWSER_LLM_SCREENSHOT_HEIGHT", "768"))
@@ -41,6 +38,7 @@ VISION_MODEL_PATTERNS = (
     "bakllava",
     "moondream",
     "minicpm-v",
+    "minimax-m3",
     "qwen-vl",
     "qwen2-vl",
     "qwen2.5-vl",
@@ -51,10 +49,14 @@ VISION_MODEL_PATTERNS = (
     "mistral-small-3.2",
 )
 BROWSER_AGENT_EXTEND_SYSTEM_MESSAGE = (
-    "Follow the browser-use action schema exactly. If using the evaluate action, "
-    "the JavaScript field is named code, not expression. Prefer built-in observe, "
-    "click, input, send_keys, search_page, and find_elements actions before "
-    "JavaScript evaluation, especially on interactive pages.\n\n"
+    "Follow the browser-use action schema exactly. Common field names:\n"
+    "- input actions use text (not content): {\"input\": {\"index\": 12, \"text\": \"value\"}}\n"
+    "- evaluate actions use code (not expression): {\"evaluate\": {\"code\": \"...\"}}\n"
+    "- wait actions use nested seconds: {\"wait\": {\"seconds\": 5}}\n"
+    "- On SPA pages that show loading skeletons, use wait before clicking job results.\n"
+    "- Autocomplete/combobox fields: wait for suggestions, then click the suggestion; do not press Enter.\n"
+    "Prefer built-in observe, click, input, send_keys, search_page, and find_elements "
+    "actions before JavaScript evaluation, especially on interactive pages.\n\n"
     "Browser task planning rules:\n"
     "- Treat the user's browser_task as the complete objective for this run. Do not stop after merely opening a page if the task asks to interact, play, submit, purchase, log in, or otherwise continue.\n"
     "- For multi-step browser work, output plan_update early with concrete browser actions, such as navigate, wait for load, dismiss blockers, click the target control, fill fields/type keys, submit, inspect feedback, and call done only after the requested end state is reached.\n"
@@ -124,7 +126,7 @@ def _action_to_trace(action) -> dict:
 
     if isinstance(action_dump, dict) and action_dump:
         if "input" in action_dump and len(action_dump) == 1:
-            return {"toolName": "action", "input": action_dump.get("input") or {}}
+            return {"toolName": "input", "input": action_dump.get("input") or {}}
 
         for key, value in action_dump.items():
             if isinstance(value, dict):
@@ -358,6 +360,70 @@ def get_llm_screenshot_size() -> tuple[int, int] | None:
     return (BROWSER_LLM_SCREENSHOT_WIDTH, BROWSER_LLM_SCREENSHOT_HEIGHT)
 
 
+def create_browser_llm(
+    model: str,
+    provider: str,
+    api_key: str | None = None,
+    *,
+    keep_alive: str | None = None,
+    role: str = "main",
+):
+    if provider == "ollama":
+        from browser_use.llm.ollama.chat import ChatOllama
+
+        effective_keep_alive = keep_alive if keep_alive is not None else MAIN_MODEL_KEEP_ALIVE
+        print(
+            f"[BrowserService] Creating ChatOllama ({role}) with model={model}, "
+            f"host={OLLAMA_BASE_URL}, temperature=0"
+        )
+        raw_llm = ChatOllama(
+            model=model,
+            host=OLLAMA_BASE_URL,
+            ollama_options={"temperature": 0},
+        )
+        llm = RobustChatOllama(raw_llm, keep_alive=parse_keep_alive(effective_keep_alive))
+        print(f"[BrowserService] RobustChatOllama ({role}) created successfully for model={model}")
+        return llm
+
+    if provider == "opencode-go":
+        from llm_wrapper import OpenCodeGoChatAnthropic
+
+        if not api_key:
+            raise ValueError("OpenCode Go API key is required for browser automation")
+        print(f"[BrowserService] Creating OpenCodeGoChatAnthropic ({role}) for opencode-go with model={model}")
+        llm = OpenCodeGoChatAnthropic(
+            model=model,
+            api_key=api_key,
+            base_url="https://opencode.ai/zen/go",
+            max_tokens=8192,
+        )
+        print(f"[BrowserService] OpenCodeGoChatAnthropic ({role}) created successfully for model={model}")
+        return llm
+
+    if provider == "openrouter":
+        from browser_use.llm.openrouter.chat import ChatOpenRouter
+
+        if not api_key:
+            raise ValueError("OpenRouter API key is required for browser automation")
+        print(f"[BrowserService] Creating ChatOpenRouter ({role}) with model={model}")
+        llm = ChatOpenRouter(
+            model=model,
+            api_key=api_key,
+            temperature=0,
+            http_referer=os.environ.get("OPENROUTER_REFERER") or os.environ.get("OPENROUTER_SITE_URL"),
+            default_headers={
+                "X-OpenRouter-Title": os.environ.get("OPENROUTER_TITLE")
+                or os.environ.get("OPENROUTER_SITE_NAME")
+                or "Jarvis",
+            },
+        )
+        llm = RobustStructuredOutputLLM(llm)
+        print(f"[BrowserService] ChatOpenRouter ({role}) created successfully for model={model}")
+        return llm
+
+    raise ValueError(f"Unsupported provider for browser automation: {provider}")
+
+
 async def run_browser_agent(
     task: str,
     model: str,
@@ -372,44 +438,13 @@ async def run_browser_agent(
 
     trace_run_id = run_id or str(uuid4())
 
-    if provider == "ollama":
-        from browser_use.llm.ollama.chat import ChatOllama
-        print(f"[BrowserService] Creating ChatOllama with model={model}, host={OLLAMA_BASE_URL}, temperature=0")
-        try:
-            raw_llm = ChatOllama(
-                model=model,
-                host=OLLAMA_BASE_URL,
-                timeout=300,
-                ollama_options={"temperature": 0},
-            )
-            llm = RobustChatOllama(raw_llm, keep_alive=parse_keep_alive(MAIN_MODEL_KEEP_ALIVE))
-            print(f"[BrowserService] RobustChatOllama wrapper created successfully for model={model}")
-        except Exception as e:
-            import traceback
-            print(f"[BrowserService] Failed to create LLM for model={model}: {e}")
-            print(f"[BrowserService] Traceback:\n{traceback.format_exc()}")
-            raise
-    elif provider == "opencode-go":
-        from llm_wrapper import OpenCodeGoChatAnthropic
-        if not api_key:
-            raise ValueError("OpenCode Go API key is required for browser automation")
-        print(f"[BrowserService] Creating OpenCodeGoChatAnthropic for opencode-go with model={model}")
-        try:
-            llm = OpenCodeGoChatAnthropic(
-                model=model,
-                api_key=api_key,
-                base_url="https://opencode.ai/zen/go",
-                timeout=300.0,
-                max_tokens=8192,
-            )
-            print(f"[BrowserService] OpenCodeGoChatAnthropic created successfully for model={model}")
-        except Exception as e:
-            import traceback
-            print(f"[BrowserService] Failed to create LLM for model={model}: {e}")
-            print(f"[BrowserService] Traceback:\n{traceback.format_exc()}")
-            raise
-    else:
-        raise ValueError(f"Unsupported provider for browser automation: {provider}")
+    try:
+        llm = create_browser_llm(model, provider, api_key, role="main")
+    except Exception as e:
+        import traceback
+        print(f"[BrowserService] Failed to create LLM for model={model}: {e}")
+        print(f"[BrowserService] Traceback:\n{traceback.format_exc()}")
+        raise
 
     session = await get_or_create_session()
 
@@ -419,21 +454,21 @@ async def run_browser_agent(
         await _reset_session()
         session = await get_or_create_session()
 
-    # Resolve planner model: explicit param > env var > default
-    effective_planner_model = planner_model or DEFAULT_PLANNER_MODEL
-    planner_llm = None
-    if effective_planner_model:
+    # Planner defaults to the same model/provider as the main browser agent.
+    effective_planner_model = planner_model or model
+    if effective_planner_model == model:
+        planner_llm = llm
+        print(f"[BrowserService] Using main model as planner: {effective_planner_model}")
+    else:
         try:
-            from browser_use.llm.ollama.chat import ChatOllama
-            print(f"[BrowserService] Creating planner ChatOllama with model={effective_planner_model}, temperature=0")
-            raw_planner = ChatOllama(
-                model=effective_planner_model,
-                host=OLLAMA_BASE_URL,
-                timeout=120,
-                ollama_options={"temperature": 0},
+            planner_llm = create_browser_llm(
+                effective_planner_model,
+                provider,
+                api_key,
+                keep_alive=PLANNER_MODEL_KEEP_ALIVE,
+                role="planner",
             )
-            planner_llm = RobustChatOllama(raw_planner, keep_alive=parse_keep_alive(PLANNER_MODEL_KEEP_ALIVE))
-            print(f"[BrowserService] Using planner model: {effective_planner_model}")
+            print(f"[BrowserService] Using separate planner model: {effective_planner_model}")
         except Exception as e:
             print(f"[BrowserService] Warning: Could not initialize planner model '{effective_planner_model}': {e}")
             planner_llm = None
@@ -503,8 +538,6 @@ async def run_browser_agent(
         use_vision=use_vision,
         browser_session=session,
         llm_screenshot_size=llm_screenshot_size,
-        step_timeout=AGENT_STEP_TIMEOUT,
-        llm_timeout=AGENT_LLM_TIMEOUT,
         extend_system_message=BROWSER_AGENT_EXTEND_SYSTEM_MESSAGE,
         register_new_step_callback=on_new_step,
         register_should_stop_callback=_should_stop_callback,
@@ -565,7 +598,7 @@ async def run_browser_agent(
         error_text = "\n".join(_recent_result_errors(result)) or ""
 
     if not is_success and not final_result and error_text:
-        final_result = f"Task failed with errors:\n{error_text}"
+        final_result = f"Task failed with errors:\n{_truncate_text(error_text)}"
 
     if not is_success:
         await _reset_session()
@@ -592,8 +625,9 @@ async def run_browser_agent(
 
     return {
         "success": is_success,
-        "result": final_result,
+        "result": _truncate_text(final_result) if final_result else final_result,
         "steps": steps,
+        "error": _truncate_text(error_text) if error_text else None,
     }
 
 
