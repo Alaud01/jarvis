@@ -5,13 +5,14 @@ let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 let overlayThemeIsDark = true;
 
 const OVERLAY_MAX_WIDTH = 500;
-const OVERLAY_HEIGHT = 56;
-const OVERLAY_EXIT_MS = 160;
-const PROCESSING_FILL_MS = 180;
-const COMPLETE_FILL_MS = 220;
 const OVERLAY_X_PADDING = 18;
 const OVERLAY_CONTENT_GAP = 12;
 const PIXEL_SPINNER_SIZE = 20;
+const OVERLAY_Y_PADDING = 10;
+const OVERLAY_HEIGHT = (OVERLAY_Y_PADDING * 2) + PIXEL_SPINNER_SIZE;
+const OVERLAY_EXIT_MS = 160;
+const PROCESSING_FILL_MS = 180;
+const COMPLETE_FILL_MS = 220;
 
 type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
 type OverlayVisualStage = OverlayState | 'processing-fill' | 'complete-fill';
@@ -147,6 +148,72 @@ const COMPLETE_OPACITIES: PixelOpacityMap = {
   15: [0.5, 0.25, 0.15, 1],
 };
 
+const ERROR_OPACITIES: PixelOpacityMap = {
+  0: [1, 0.25, 0.15, 0, 1],
+  1: [0.25, 1, 0.25, 0.15, 0],
+  2: [1, 0.5, 1, 0.5, 1],
+  3: [0.15, 0.25, 1, 0.25, 0.15],
+  4: [1, 0.15, 0, 0.15, 1],
+  5: [0.5, 1, 0.5, 1, 0.5],
+  6: [1, 0.5, 1, 0.5, 1],
+  7: [0, 0.15, 1, 0.25, 1],
+  8: [1, 0.25, 0.15, 0.25, 1],
+  9: [0.5, 1, 0.5, 1, 0.5],
+  10: [1, 0.5, 1, 0.5, 1],
+  11: [0.15, 0.25, 1, 0.25, 0.15],
+  12: [1, 0.15, 0, 0, 1],
+  13: [1, 1, 0.5, 1, 1],
+  14: [0.5, 0.15, 0.5, 0.15, 0.5],
+  15: [1, 0.25, 0.15, 0, 1],
+};
+
+type PixelStageColors = { from: string; to: string; glow: string };
+
+const PIXEL_STAGE_COLORS: Record<'recording' | 'processing' | 'complete' | 'error', PixelStageColors> = {
+  recording: { from: '#ff416c', to: '#ff4b2b', glow: '#ff416c' },
+  processing: { from: '#f6d365', to: '#fda085', glow: '#f6d365' },
+  complete: { from: '#1aad4f', to: '#33ff5c', glow: '#1aad4f' },
+  error: { from: '#7f1d1d', to: '#ef4444', glow: '#7f1d1d' },
+};
+
+function pixelCellBackground(colors: PixelStageColors): string {
+  return `linear-gradient(135deg, ${colors.from}, ${colors.to})`;
+}
+
+function pixelCellGlow(colors: PixelStageColors): string {
+  return `0 0 4px ${colors.glow}, 0 0 10px ${colors.glow}80, 0 0 19px ${colors.glow}55`;
+}
+
+function buildPixelStageColorRule(stage: string, colors: PixelStageColors): string {
+  return `.pixel-spinner.stage-${stage} .cell {
+      background: ${pixelCellBackground(colors)};
+      box-shadow: ${pixelCellGlow(colors)};
+    }`;
+}
+
+function buildPixelCellAnimationRules(stage: string, opacitiesByCell: PixelOpacityMap): string {
+  return Object.keys(opacitiesByCell)
+    .sort((a, b) => Number(a) - Number(b))
+    .map((cell) => `.pixel-spinner.stage-${stage} .cell-${cell} { animation-name: ${stage}-ps-${cell}; }`)
+    .join('\n    ');
+}
+
+const PIXEL_STAGE_STYLES = [
+  buildPixelStageColorRule('recording', PIXEL_STAGE_COLORS.recording),
+  buildPixelStageColorRule('processing', PIXEL_STAGE_COLORS.processing),
+  buildPixelStageColorRule('complete', PIXEL_STAGE_COLORS.complete),
+  buildPixelStageColorRule('error', PIXEL_STAGE_COLORS.error),
+  buildPixelStageColorRule('processing-fill', PIXEL_STAGE_COLORS.processing),
+  buildPixelStageColorRule('complete-fill', PIXEL_STAGE_COLORS.complete),
+].join('\n    ');
+
+const PIXEL_CELL_ANIMATION_RULES = [
+  buildPixelCellAnimationRules('recording', RECORDING_OPACITIES),
+  buildPixelCellAnimationRules('processing', PROCESSING_OPACITIES),
+  buildPixelCellAnimationRules('complete', COMPLETE_OPACITIES),
+  buildPixelCellAnimationRules('error', ERROR_OPACITIES),
+].join('\n    ');
+
 function buildPixelKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): string {
   return Object.entries(opacitiesByCell)
     .sort(([a], [b]) => Number(a) - Number(b))
@@ -161,27 +228,11 @@ function buildPixelKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): 
     .join('\n');
 }
 
-function buildPixelStepKeyframes(prefix: string, opacitiesByCell: PixelOpacityMap): string {
-  return Object.entries(opacitiesByCell)
-    .sort(([a], [b]) => Number(a) - Number(b))
-    .map(([cell, opacities]) => {
-      const stepSize = 100 / opacities.length;
-      const steps = opacities
-        .map((opacity, index) => {
-          const start = index * stepSize;
-          const end = (index + 1) * stepSize - 0.01;
-          return `      ${start.toFixed(2)}%, ${end.toFixed(2)}% { opacity: ${opacity}; }`;
-        })
-        .join('\n');
-      return `    @keyframes ${prefix}-ps-${cell} {\n${steps}\n    }`;
-    })
-    .join('\n');
-}
-
 const PIXEL_SPINNER_KEYFRAMES = [
   buildPixelKeyframes('recording', RECORDING_OPACITIES),
   buildPixelKeyframes('processing', PROCESSING_OPACITIES),
-  buildPixelStepKeyframes('complete', COMPLETE_OPACITIES),
+  buildPixelKeyframes('complete', COMPLETE_OPACITIES),
+  buildPixelKeyframes('error', ERROR_OPACITIES),
 ].join('\n');
 
 function createOverlayHTML(state: OverlayState, transcript?: string, errorMessage?: string): string {
@@ -192,13 +243,15 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
 <head>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html {
+      background: transparent;
+      height: ${OVERLAY_HEIGHT}px;
+      width: ${payload.width}px;
+    }
     body {
       --overlay-bg: ${themeColors.background};
-      --overlay-border: ${themeColors.border};
       --overlay-text: ${themeColors.text};
-      --overlay-shadow: ${themeColors.shadow};
-      --overlay-width: ${payload.width}px;
-      background: transparent;
+      background: var(--overlay-bg);
       overflow: hidden;
       -webkit-app-region: no-drag;
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
@@ -206,7 +259,9 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       width: ${payload.width}px;
       display: flex;
       align-items: center;
-      justify-content: center;
+      transform-origin: center center;
+      animation: overlayIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+      transition: width 210ms cubic-bezier(0.16, 1, 0.3, 1);
     }
     @keyframes overlayIn {
       from {
@@ -232,23 +287,12 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       display: flex;
       align-items: center;
       gap: ${OVERLAY_CONTENT_GAP}px;
-      padding: 10px ${OVERLAY_X_PADDING}px;
-      background: var(--overlay-bg);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      border-radius: 999px;
-      border: 1px solid var(--overlay-border);
-      box-shadow: var(--overlay-shadow);
-      width: var(--overlay-width);
-      max-width: 500px;
-      transform-origin: top center;
-      animation: overlayIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
-      transition: width 210ms cubic-bezier(0.16, 1, 0.3, 1);
-      will-change: opacity, transform;
-      contain: layout paint;
-      transform: translateZ(0);
+      flex: 1;
+      min-width: 0;
+      height: 100%;
+      padding: ${OVERLAY_Y_PADDING}px ${OVERLAY_X_PADDING}px;
     }
-    body.exiting .overlay {
+    body.exiting {
       animation: overlayOut ${OVERLAY_EXIT_MS}ms cubic-bezier(0.4, 0, 1, 1) both;
     }
     .pixel-spinner {
@@ -264,11 +308,6 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       animation-duration: 1200ms;
       animation-iteration-count: infinite;
       animation-timing-function: linear;
-      background: linear-gradient(135deg, #ff416c, #ff4b2b);
-      box-shadow:
-        0 0 4px #ff416c,
-        0 0 10px #ff416c80,
-        0 0 19px #ff416c55;
       transition:
         opacity 180ms ease,
         background 220ms ease,
@@ -276,6 +315,7 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
         transform 180ms ease;
       will-change: opacity, transform;
     }
+${PIXEL_STAGE_STYLES}
     .pixel-spinner.stage-processing-fill .cell {
       animation: none;
     }
@@ -295,96 +335,8 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     }
     .pixel-spinner.stage-complete-fill .cell {
       animation: pixel-complete-fill ${COMPLETE_FILL_MS}ms cubic-bezier(0.16, 1, 0.3, 1) both;
-      background: linear-gradient(135deg, #134e5e, #33ff5c);
-      box-shadow:
-        0 0 4px #33ff5c,
-        0 0 12px #33ff5ca6,
-        0 0 24px #33ff5c70;
     }
-    .pixel-spinner.stage-processing .cell {
-      animation-duration: 800ms;
-      background: linear-gradient(135deg, #f6d365, #fda085);
-      box-shadow:
-        0 0 4px #fda085,
-        0 0 10px #fda08580,
-        0 0 19px #fda08555;
-    }
-    .pixel-spinner.stage-complete .cell {
-      animation-duration: 800ms;
-      animation-timing-function: steps(1, end);
-      background: linear-gradient(135deg, #134e5e, #33ff5c);
-      box-shadow:
-        0 0 4px #33ff5c,
-        0 0 10px #33ff5c80,
-        0 0 19px #33ff5c55;
-    }
-    .pixel-spinner.stage-error .cell {
-      animation: pixel-error-pulse 900ms ease-in-out infinite alternate;
-      background: linear-gradient(135deg, #7f1d1d, #ef4444);
-      box-shadow:
-        0 0 4px #ef4444,
-        0 0 10px #ef444480,
-        0 0 19px #ef444455;
-      opacity: 0.45;
-    }
-    .pixel-spinner.stage-error .cell-0,
-    .pixel-spinner.stage-error .cell-3,
-    .pixel-spinner.stage-error .cell-5,
-    .pixel-spinner.stage-error .cell-6,
-    .pixel-spinner.stage-error .cell-9,
-    .pixel-spinner.stage-error .cell-10,
-    .pixel-spinner.stage-error .cell-12,
-    .pixel-spinner.stage-error .cell-15 {
-      animation-delay: 120ms;
-    }
-    .pixel-spinner.stage-recording .cell-0 { animation-name: recording-ps-0; }
-    .pixel-spinner.stage-recording .cell-1 { animation-name: recording-ps-1; }
-    .pixel-spinner.stage-recording .cell-2 { animation-name: recording-ps-2; }
-    .pixel-spinner.stage-recording .cell-3 { animation-name: recording-ps-3; }
-    .pixel-spinner.stage-recording .cell-4 { animation-name: recording-ps-4; }
-    .pixel-spinner.stage-recording .cell-7 { animation-name: recording-ps-7; }
-    .pixel-spinner.stage-recording .cell-8 { animation-name: recording-ps-8; }
-    .pixel-spinner.stage-recording .cell-11 { animation-name: recording-ps-11; }
-    .pixel-spinner.stage-recording .cell-12 { animation-name: recording-ps-12; }
-    .pixel-spinner.stage-recording .cell-13 { animation-name: recording-ps-13; }
-    .pixel-spinner.stage-recording .cell-14 { animation-name: recording-ps-14; }
-    .pixel-spinner.stage-recording .cell-15 { animation-name: recording-ps-15; }
-    .pixel-spinner.stage-processing .cell-0 { animation-name: processing-ps-0; }
-    .pixel-spinner.stage-processing .cell-1 { animation-name: processing-ps-1; }
-    .pixel-spinner.stage-processing .cell-2 { animation-name: processing-ps-2; }
-    .pixel-spinner.stage-processing .cell-3 { animation-name: processing-ps-3; }
-    .pixel-spinner.stage-processing .cell-4 { animation-name: processing-ps-4; }
-    .pixel-spinner.stage-processing .cell-5 { animation-name: processing-ps-5; }
-    .pixel-spinner.stage-processing .cell-6 { animation-name: processing-ps-6; }
-    .pixel-spinner.stage-processing .cell-7 { animation-name: processing-ps-7; }
-    .pixel-spinner.stage-processing .cell-8 { animation-name: processing-ps-8; }
-    .pixel-spinner.stage-processing .cell-9 { animation-name: processing-ps-9; }
-    .pixel-spinner.stage-processing .cell-10 { animation-name: processing-ps-10; }
-    .pixel-spinner.stage-processing .cell-11 { animation-name: processing-ps-11; }
-    .pixel-spinner.stage-processing .cell-12 { animation-name: processing-ps-12; }
-    .pixel-spinner.stage-processing .cell-13 { animation-name: processing-ps-13; }
-    .pixel-spinner.stage-processing .cell-14 { animation-name: processing-ps-14; }
-    .pixel-spinner.stage-processing .cell-15 { animation-name: processing-ps-15; }
-    .pixel-spinner.stage-complete .cell-0 { animation-name: complete-ps-0; }
-    .pixel-spinner.stage-complete .cell-1 { animation-name: complete-ps-1; }
-    .pixel-spinner.stage-complete .cell-2 { animation-name: complete-ps-2; }
-    .pixel-spinner.stage-complete .cell-3 { animation-name: complete-ps-3; }
-    .pixel-spinner.stage-complete .cell-4 { animation-name: complete-ps-4; }
-    .pixel-spinner.stage-complete .cell-5 { animation-name: complete-ps-5; }
-    .pixel-spinner.stage-complete .cell-6 { animation-name: complete-ps-6; }
-    .pixel-spinner.stage-complete .cell-7 { animation-name: complete-ps-7; }
-    .pixel-spinner.stage-complete .cell-8 { animation-name: complete-ps-8; }
-    .pixel-spinner.stage-complete .cell-9 { animation-name: complete-ps-9; }
-    .pixel-spinner.stage-complete .cell-10 { animation-name: complete-ps-10; }
-    .pixel-spinner.stage-complete .cell-11 { animation-name: complete-ps-11; }
-    .pixel-spinner.stage-complete .cell-12 { animation-name: complete-ps-12; }
-    .pixel-spinner.stage-complete .cell-13 { animation-name: complete-ps-13; }
-    .pixel-spinner.stage-complete .cell-14 { animation-name: complete-ps-14; }
-    .pixel-spinner.stage-complete .cell-15 { animation-name: complete-ps-15; }
-    @keyframes pixel-error-pulse {
-      from { opacity: 0.35; }
-      to { opacity: 1; }
-    }
+${PIXEL_CELL_ANIMATION_RULES}
     @keyframes pixel-complete-fill {
       from {
         opacity: 0.35;
@@ -405,6 +357,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
       flex: 1;
       min-width: 0;
       font-size: 13px;
+      line-height: ${PIXEL_SPINNER_SIZE}px;
       font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
@@ -449,8 +402,8 @@ ${PIXEL_SPINNER_KEYFRAMES}
         spinner.className = 'pixel-spinner stage-' + stage;
       }
       function setOverlayWidth(width) {
+        document.documentElement.style.width = width + 'px';
         document.body.style.width = width + 'px';
-        document.body.style.setProperty('--overlay-width', width + 'px');
       }
       function applyPayload(payload) {
         state = payload.state;
@@ -489,9 +442,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
       };
       window.updateOverlayTheme = function(colors) {
         document.body.style.setProperty('--overlay-bg', colors.background);
-        document.body.style.setProperty('--overlay-border', colors.border);
         document.body.style.setProperty('--overlay-text', colors.text);
-        document.body.style.setProperty('--overlay-shadow', colors.shadow);
       };
     })();
   </script>
@@ -544,9 +495,7 @@ export function setOverlayThemeBackground(isDark: boolean): void {
       window.updateOverlayTheme(${JSON.stringify(colors)});
     } else {
       document.body.style.setProperty('--overlay-bg', ${JSON.stringify(colors.background)});
-      document.body.style.setProperty('--overlay-border', ${JSON.stringify(colors.border)});
       document.body.style.setProperty('--overlay-text', ${JSON.stringify(colors.text)});
-      document.body.style.setProperty('--overlay-shadow', ${JSON.stringify(colors.shadow)});
     }
   `).catch(() => {
     // The overlay may be between data URL loads; the next show call will pick up the theme.
