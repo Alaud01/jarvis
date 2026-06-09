@@ -472,17 +472,25 @@ ipcMain.handle('get-providers', async () => {
   return getAvailableProviders();
 });
 
-ipcMain.handle('pick-attachments', async () => {
+ipcMain.handle('pick-attachment-paths', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile', 'multiSelections'],
     filters: ATTACHMENT_DIALOG_FILTERS,
   });
 
   if (result.canceled) {
-    return { attachments: [], errors: [] };
+    return [];
   }
 
-  return readAttachments(result.filePaths);
+  return result.filePaths;
+});
+
+ipcMain.handle('read-attachments', async (_event, filePaths: unknown) => {
+  if (!Array.isArray(filePaths) || filePaths.some(filePath => typeof filePath !== 'string')) {
+    return { attachments: [], errors: ['Invalid attachment request.'] };
+  }
+
+  return readAttachments(filePaths);
 });
 
 ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRequest) => {

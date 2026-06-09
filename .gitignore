@@ -1,5 +1,6 @@
 node_modules/
 dist/
+build/
 .vite/
 .pnpm-store/
 .tmp-electron-user-data/

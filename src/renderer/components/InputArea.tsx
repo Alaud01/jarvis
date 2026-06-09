@@ -169,7 +169,7 @@ const ModelSelector: React.FC<{
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search models..."
-              className="w-full bg-transparent border border-border-secondary px-2 py-1 font-mono text-xs text-text-primary placeholder:text-text-tertiary placeholder:italic focus:outline-none focus:border-text-primary"
+              className="w-full bg-transparent border border-border-secondary px-2 py-1 font-mono text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-text-primary"
             />
           </div>
           <div ref={listRef} className="overflow-y-auto flex-1">
@@ -234,7 +234,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
-  const [isPickingAttachments, setIsPickingAttachments] = useState(false);
+  const [isReadingAttachments, setIsReadingAttachments] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastComposeFocusKeyRef = useRef<number | null>(null);
   const lastHandledVoiceIdRef = useRef<string | null>(null);
@@ -315,18 +315,29 @@ const InputArea: React.FC<InputAreaProps> = ({
   };
 
   const handleAttach = async () => {
-    if (!window.assistant?.pickAttachments || isPickingAttachments) return;
+    if (
+      !window.assistant?.pickAttachmentPaths
+      || !window.assistant?.readAttachments
+      || isReadingAttachments
+    ) {
+      return;
+    }
 
-    setIsPickingAttachments(true);
     setAttachmentError('');
     try {
-      const result = await window.assistant.pickAttachments();
+      const paths = await window.assistant.pickAttachmentPaths();
+      if (paths.length === 0) {
+        return;
+      }
+
+      setIsReadingAttachments(true);
+      const result = await window.assistant.readAttachments(paths);
       setAttachments(current => [...current, ...result.attachments]);
       setAttachmentError(result.errors.join(' '));
     } catch (error) {
       setAttachmentError(error instanceof Error ? error.message : 'Unable to attach files.');
     } finally {
-      setIsPickingAttachments(false);
+      setIsReadingAttachments(false);
     }
   };
 
@@ -389,7 +400,7 @@ const InputArea: React.FC<InputAreaProps> = ({
           )}
           <textarea
             ref={textareaRef}
-            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary placeholder:italic placeholder:font-serif overflow-y-auto"
+            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -411,11 +422,11 @@ const InputArea: React.FC<InputAreaProps> = ({
               <button
                 className="py-1 px-3 border border-text-primary bg-transparent text-text-primary font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-150 hover:bg-text-primary hover:text-bg-primary disabled:opacity-30 disabled:cursor-not-allowed"
                 onClick={handleAttach}
-                disabled={isDisabled || isPickingAttachments}
+                disabled={isDisabled || isReadingAttachments}
                 title="Attach PDF, Office, text, or code files"
                 type="button"
               >
-                {isPickingAttachments ? 'Reading' : 'Attach'}
+                {isReadingAttachments ? 'Reading…' : 'Attach'}
               </button>
               <button
                 className={`py-1 px-3 border font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-150 ${

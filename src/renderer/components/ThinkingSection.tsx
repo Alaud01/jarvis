@@ -30,7 +30,7 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   isStreaming = false,
   streamingLabel = 'Thinking...',
   finishedLabel = 'Thought process',
-  contentClassName = 'italic text-text-tertiary',
+  contentClassName = 'text-text-tertiary',
   onAutoScrollCancel,
   onAutoScrollReactivate,
 }) => {

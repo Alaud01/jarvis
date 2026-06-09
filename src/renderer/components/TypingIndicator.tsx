@@ -8,7 +8,7 @@ const TypingIndicator: React.FC<TypingIndicatorProps> = ({ sender = 'assistant' 
   return (
     <div className="py-8 border-b border-border-primary">
       <div className="flex items-baseline gap-3 mb-2">
-        <span className="font-serif text-[1.15rem] text-text-primary">
+        <span className="font-sans text-[1.15rem] text-text-primary">
           {sender === 'user' ? 'Author' : 'Editor'}
         </span>
       </div>

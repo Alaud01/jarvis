@@ -674,7 +674,13 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (e.key === 'ArrowUp') {
         if (focusedFolderId) {
           e.preventDefault();
+          const folderId = focusedFolderId;
           setFocusedFolderId(null);
+          setExpandedFolders(prev => {
+            const next = new Set(prev);
+            next.delete(folderId);
+            return next;
+          });
         }
         return;
       }
@@ -804,7 +810,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                         isDragOver={dragOverFolderId === folder.id}
                       >
                         {folderConversations.length === 0 ? (
-                          <div className="py-2 pl-1 text-[0.75rem] italic text-text-tertiary">
+                          <div className="py-2 pl-1 text-[0.75rem] text-text-tertiary">
                             Drop chats here or create one from a chat menu.
                           </div>
                         ) : (

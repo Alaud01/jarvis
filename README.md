@@ -1,47 +1,46 @@
 # Jarvis
 
-Electron menu bar assistant powered by Ollama.
+macOS menu bar AI assistant with chat, voice input, web search, and browser automation.
 
 ## Stack
 
-- **Electron** - Desktop framework
-- **React + TypeScript** - UI
-- **Vite** - Build tool
+- **Electron** — Desktop shell (tray, windows, IPC)
+- **React + TypeScript** — Chat UI
+- **Vite + Tailwind CSS** — Renderer build
+- **python-service** — Voice pipeline (VAD, OpenRouter STT, Ollama refinement)
+- **browser-service** — Playwright + browser-use agent
 
 ## Structure
 
 ```
 jarvis/
-├── assets/              # Icons, images
+├── assets/              # Icons and fonts
+├── browser-service/     # Browser automation sidecar (port 8001)
+├── python-service/      # Voice flow sidecar (port 8765)
 ├── src/
-│   ├── main/           # Electron main process
-│   │   └── index.ts
-│   ├── preload/        # Secure bridge
-│   │   └── index.ts
-│   └── renderer/       # React UI
-│       ├── index.html
-│       ├── main.tsx
-│       ├── App.tsx
-│       ├── components/
-│       └── styles/
+│   ├── main/            # Electron main process
+│   ├── preload/         # Secure IPC bridge
+│   ├── renderer/        # React UI
+│   └── shared/          # Shared types
 ├── package.json
-├── tsconfig.json
 └── vite.config.ts
 ```
 
 ## Setup
 
 ```bash
-cd jarvis
 pnpm install
 ```
+
+Set required environment variables (see Environment below).
 
 ## Development
 
 ```bash
-pnpm dev       # Launch Electron with the Vite dev server
-pnpm dev:vite  # Start only the renderer dev server
-pnpm start     # Launch a production build in Electron
+pnpm dev              # Vite dev server + Electron
+pnpm start:python     # Voice service only
+pnpm start:browser    # Browser service only
+pnpm start            # Production build in Electron
 ```
 
 ## Build
@@ -50,15 +49,19 @@ pnpm start     # Launch a production build in Electron
 pnpm build
 ```
 
+## Environment
+
+| Variable | Service | Purpose |
+|----------|---------|---------|
+| `OPENROUTER_API_KEY` | python-service | Audio transcription |
+| `TAVILY_API_KEY` | main | Web search |
+| `OLLAMA_CHAT_URL` | python-service | Text refinement (default: local Ollama) |
+
+Voice hotkey: **Cmd+Shift+Space** (registered via Electron global shortcuts).
+
 ## Architecture
 
-- **Main process** (Node.js): Tray icon, window management, system integration
-- **Renderer process** (React): Chat UI
-- **Preload**: Secure bridge exposing APIs to renderer
-
-## Next Steps
-
-1. Add icon to `assets/icon.png` (16x16 or larger PNG)
-2. Implement Ollama API integration in `ChatWindow.tsx`
-3. Add streaming response support
-4. Implement conversation history
+- **Main process** — Tray, providers (Ollama, OpenRouter, OpenCode Go), service orchestration
+- **Renderer** — Chat UI with streaming, attachments, browser traces
+- **python-service** — Spawned on app start for voice dictation
+- **browser-service** — Spawned on first browser automation task

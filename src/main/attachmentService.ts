@@ -1,11 +1,17 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { OfficeConverter } from 'officeparser';
+import { OfficeParser } from 'officeparser';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_EXTRACTED_CHARS = 120_000;
 const MAX_ATTACHMENTS_PER_PICK = 10;
+const EXTRACTION_TIMEOUT_MS = 60_000;
+
+const TEXT_EXTRACTION_PARSER_CONFIG = {
+  extractAttachments: false,
+  ocr: false,
+} as const;
 
 const OFFICE_EXTENSIONS = new Set([
   '.docx',
@@ -60,17 +66,34 @@ function truncateContent(content: string): Pick<FileAttachment, 'content' | 'tru
   };
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function extractText(filePath: string, extension: string): Promise<string> {
   if (TEXT_EXTENSIONS.has(extension) || TEXT_FILE_NAMES.has(path.basename(filePath).toLowerCase())) {
     return fs.readFile(filePath, 'utf8');
   }
 
   if (OFFICE_EXTENSIONS.has(extension)) {
-    const result = await OfficeConverter.convert(filePath, 'md');
-    if (typeof result.value !== 'string') {
-      throw new Error('Document parser did not return readable text.');
-    }
-    return result.value;
+    const ast = await withTimeout(
+      OfficeParser.parseOffice(filePath, TEXT_EXTRACTION_PARSER_CONFIG),
+      EXTRACTION_TIMEOUT_MS,
+      `Reading ${path.basename(filePath)} timed out. The file may be too large or complex.`,
+    );
+    return ast.toText();
   }
 
   throw new Error(`Unsupported file type: ${extension || 'unknown'}`);

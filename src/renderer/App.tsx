@@ -374,7 +374,8 @@ declare global {
       getModels: () => Promise<ModelInfo[]>;
       getModelsForProvider: (providerId: string) => Promise<ModelInfo[]>;
       getProviders: () => Promise<ProviderInfo[]>;
-      pickAttachments: () => Promise<AttachmentSelectionResult>;
+      pickAttachmentPaths: () => Promise<string[]>;
+      readAttachments: (filePaths: string[]) => Promise<AttachmentSelectionResult>;
       sendMessageStream: (request: SendMessageStreamRequest) => Promise<{ success: boolean; aborted?: boolean }>;
       stopStream: (request: StopStreamRequest) => Promise<{ success: boolean }>;
       getVoiceShortcut: () => Promise<string>;

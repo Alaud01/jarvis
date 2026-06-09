@@ -41,7 +41,9 @@ contextBridge.exposeInMainWorld('assistant', {
   getModels: () => ipcRenderer.invoke('get-models'),
   getModelsForProvider: (providerId: string) => ipcRenderer.invoke('get-models-for-provider', providerId),
   getProviders: () => ipcRenderer.invoke('get-providers'),
-  pickAttachments: (): Promise<AttachmentSelectionResult> => ipcRenderer.invoke('pick-attachments'),
+  pickAttachmentPaths: (): Promise<string[]> => ipcRenderer.invoke('pick-attachment-paths'),
+  readAttachments: (filePaths: string[]): Promise<AttachmentSelectionResult> =>
+    ipcRenderer.invoke('read-attachments', filePaths),
   sendMessageStream: (request: SendMessageStreamRequest) =>
     ipcRenderer.invoke('send-message-stream', request),
   stopStream: (request: StopStreamRequest) => ipcRenderer.invoke('stop-stream', request),

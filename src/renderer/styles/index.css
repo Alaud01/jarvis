@@ -85,10 +85,8 @@
 }
 
 @theme {
-  --font-playfair: 'Playfair Display', Georgia, serif;
-  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-readable: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-opensans: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-readable: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
   
   --color-bg-primary: #ffffff;
@@ -120,20 +118,6 @@
   
   --animate-fade-in: fadeIn 0.3s ease forwards;
   --animate-typing-bounce: bounce 1.4s infinite ease-in-out both;
-}
-
-@font-face {
-  font-family: 'Playfair Display';
-  src: url('../../../assets/Playfair_Display/PlayfairDisplay-VariableFont_wght.ttf') format('truetype');
-  font-weight: 400 900;
-  font-style: normal;
-}
-
-@font-face {
-  font-family: 'Playfair Display';
-  src: url('../../../assets/Playfair_Display/PlayfairDisplay-Italic-VariableFont_wght.ttf') format('truetype');
-  font-weight: 400 900;
-  font-style: italic;
 }
 
 :root {
@@ -201,7 +185,7 @@ html {
 }
 
 body {
-  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--font-sans);
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
   line-height: 1.6;
@@ -210,13 +194,13 @@ body {
 }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--font-sans);
   font-weight: 650;
 }
 
 ::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -268,6 +252,12 @@ h1, h2, h3, h4, h5, h6 {
 .message-scroll-container {
   overflow-anchor: auto;
   overflow-x: hidden;
+  margin-inline: 2px;
+  box-sizing: border-box;
+}
+
+.message-scroll-container::-webkit-scrollbar-track {
+  margin-right: 2px;
 }
 
 .thinking-panel-toggle-label {
@@ -509,7 +499,7 @@ select option {
 }
 
 .marktext-content em {
-  font-style: italic;
+  font-style: normal;
 }
 
 .marktext-content hr {
@@ -562,11 +552,15 @@ select option {
 
 .marktext-content .table-scroll {
   margin: 1.15rem 0;
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
 }
 
 .marktext-content table {
   border-collapse: collapse;
+  font-size: 0.9rem;
+  line-height: 1.55;
   min-width: 100%;
 }
 
@@ -577,6 +571,7 @@ select option {
 .marktext-content th,
 .marktext-content td {
   border: 1px solid var(--color-border-secondary);
+  min-width: calc(6ch + 1.5rem);
   padding: 0.55rem 0.75rem;
   text-align: left;
   vertical-align: top;
@@ -740,7 +735,7 @@ select option {
 }
 
 .trail-markdown-preview em {
-  font-style: italic;
+  font-style: normal;
 }
 
 .trail-markdown-preview code {

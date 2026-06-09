@@ -15,10 +15,7 @@ import soundfile as sf
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.responses import JSONResponse
 
-# Local Parakeet ASR is intentionally disabled for now. Transcription uses
-# OpenRouter with the same model instead.
-# import onnx_asr
-# import onnxruntime as rt
+# Transcription uses OpenRouter (local Parakeet ONNX is not loaded).
 
 app = FastAPI(title="Voice Flow Service")
 
@@ -54,32 +51,8 @@ vad_model = None
 
 def load_models():
     global vad_model
-    
-    # Local Parakeet startup is disabled while STT runs through OpenRouter.
-    # print("[VoiceService] Loading Parakeet TDT 0.6b-v3 ONNX...")
-    # sess_opts = rt.SessionOptions()
-    # sess_opts.enable_mem_pattern = False
-    # sess_opts.execution_mode = rt.ExecutionMode.ORT_SEQUENTIAL
-    # sess_opts.graph_optimization_level = rt.GraphOptimizationLevel.ORT_ENABLE_ALL
-    #
-    # available_providers = set(rt.get_available_providers())
-    # asr_providers = ["CPUExecutionProvider"]
-    # if "CoreMLExecutionProvider" in available_providers:
-    #     print("[VoiceService] CoreMLExecutionProvider available, but ASR uses CPU for dynamic utterance lengths")
-    # else:
-    #     print("[VoiceService] CoreMLExecutionProvider unavailable, using CPUExecutionProvider")
-    #
-    # asr_model = onnx_asr.load_model(
-    #     "nemo-parakeet-tdt-0.6b-v3",
-    #     quantization="int8",
-    #     sess_options=sess_opts,
-    #     providers=asr_providers,
-    #     preprocessor_config={"use_numpy_preprocessors": True},
-    #     resampler_config={"providers": ["CPUExecutionProvider"]},
-    # )
-    # print("[VoiceService] Parakeet ONNX model loaded successfully")
-    print(f"[VoiceService] Local Parakeet ASR disabled; using OpenRouter model {OPENROUTER_TRANSCRIPTION_MODEL}")
-    
+
+    print(f"[VoiceService] Using OpenRouter model {OPENROUTER_TRANSCRIPTION_MODEL}")
     print("[VoiceService] Loading Silero VAD ONNX...")
     from silero_vad import load_silero_vad
     vad_model = load_silero_vad(onnx=True)
@@ -205,15 +178,6 @@ def describe_audio(wav: np.ndarray) -> dict[str, float]:
         "peak": peak,
         "rms": rms,
     }
-
-
-def build_transcription_audio(
-    wav: np.ndarray,
-    speech_segments: list[tuple[int, int]],
-    total_samples: int,
-) -> np.ndarray:
-    """Build one compact speech buffer for ASR without chunking boundaries."""
-    return build_transcription_chunk(wav, merge_padded_speech_segments(speech_segments, total_samples))
 
 
 def merge_padded_speech_segments(

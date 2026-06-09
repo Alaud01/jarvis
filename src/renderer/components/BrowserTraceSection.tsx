@@ -56,7 +56,7 @@ const StepBlock: React.FC<{ step: BrowserLLMTraceStep }> = ({ step }) => {
       )}
 
       {step.thinking && (
-        <div className="mb-3 italic text-text-tertiary">
+        <div className="mb-3 text-text-tertiary">
           <MarkdownRenderer content={step.thinking} />
         </div>
       )}

@@ -1062,8 +1062,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         <div className="py-8">
           <div className="max-w-[800px] mx-auto px-6">
             <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
-              <p className="font-playfair text-[2.5rem] text-text-primary mb-2">
-                A <span className="italic">Blank</span> Page
+              <p className="font-sans text-[2.5rem] text-text-primary mb-2">
+                A Blank Page
               </p>
               <p className="font-mono text-[0.7rem] text-text-tertiary uppercase tracking-[2px]">
                 Begin your discourse
@@ -1073,7 +1073,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         </div>
       ) : (
       <div className="py-4">
-        <div ref={messagesColumnRef} className="max-w-[836px] mx-auto pl-9">
+        <div ref={messagesColumnRef} className="max-w-[838px] mx-auto pl-[38px]">
           {shouldVirtualize && virtualRange.topPadding > 0 && (
             <div aria-hidden="true" style={{ height: virtualRange.topPadding }} />
           )}
