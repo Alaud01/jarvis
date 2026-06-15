@@ -11,6 +11,8 @@ import type { BrowserLLMTraceStep, BrowserToolRun, BrowserTraceEvent } from '../
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
+import type { CreateDictionaryEntryInput, DictionaryEntry, UpdateDictionaryEntryInput } from '../shared/dictionary';
+import PersonalDictionary from './components/PersonalDictionary';
 
 interface Message {
   id: string;
@@ -242,6 +244,7 @@ interface ModelInfo {
   id: string;
   name: string;
   provider: string;
+  contextLength?: number;
 }
 
 interface ProviderInfo {
@@ -415,6 +418,10 @@ declare global {
       storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
       storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
+      dictionaryList: () => Promise<DictionaryEntry[]>;
+      dictionaryCreate: (input: CreateDictionaryEntryInput) => Promise<DictionaryEntry>;
+      dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => Promise<DictionaryEntry>;
+      dictionaryDelete: (id: string) => Promise<{ success: boolean }>;
       generateTitle: (message: string, model: string, provider: string) => Promise<string>;
       setThemeBackground: (isDark: boolean) => void;
     };
@@ -436,6 +443,7 @@ const App: React.FC = () => {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [voiceTranscript, setVoiceTranscript] = useState<PendingVoiceTranscript | null>(null);
   const [voiceShortcut, setVoiceShortcut] = useState<string>('');
+  const [workspaceView, setWorkspaceView] = useState<'chat' | 'dictionary'>('chat');
   
   const streamingSessionsRef = useRef<Map<string, { conversationId: string }>>(new Map());
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
@@ -804,6 +812,7 @@ const App: React.FC = () => {
     const cleanup = window.assistant.onVoiceTranscript((payload) => {
       if (payload?.text) {
         if (payload.newChat && payload.autoSubmit) {
+          setWorkspaceView('chat');
           pendingJarvisMessageRef.current = payload.text;
           setCurrentConversationId(null);
           setNewChatTrigger(prev => prev + 1);
@@ -1078,11 +1087,13 @@ const App: React.FC = () => {
   };
 
   const handleNewChat = useCallback(() => {
+    setWorkspaceView('chat');
     setCurrentConversationId(null);
     setNewChatTrigger(prev => prev + 1);
   }, []);
 
   const handleConversationSelect = useCallback((id: string) => {
+    setWorkspaceView('chat');
     conversationAccessRef.current.set(id, Date.now());
     setCurrentConversationId(id);
     setOpenTabIds(prev => {
@@ -1326,6 +1337,20 @@ const App: React.FC = () => {
           : c
       )
     );
+
+    if (messageIndex === 0) {
+      window.assistant.generateTitle(newText, selectedModel, selectedProvider)
+        .then((title) => {
+          setConversations(prev =>
+            prev.map(c =>
+              c.id === conversation.id
+                ? { ...c, title }
+                : c
+            )
+          );
+        })
+        .catch(() => {});
+    }
 
     registerStreamSession(conversation.id, assistantMessageId);
 
@@ -1634,9 +1659,14 @@ const App: React.FC = () => {
             onRenameFolder={handleRenameFolder}
             onDeleteFolder={handleDeleteFolder}
             onMoveConversation={handleMoveConversation}
+            activeWorkspace={workspaceView}
+            onDictionaryOpen={() => setWorkspaceView('dictionary')}
           />
           
           <main className="relative flex flex-col flex-1 min-w-0 bg-bg-primary">
+            {workspaceView === 'dictionary' ? (
+              <PersonalDictionary />
+            ) : <>
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageList 
                 ref={messageListRef} 
@@ -1672,6 +1702,7 @@ const App: React.FC = () => {
               onRefreshModels={refreshModels}
               composeFocusKey={newChatTrigger}
             />
+            </>}
           </main>
         </div>
       </div>

@@ -7,7 +7,7 @@ macOS menu bar AI assistant with chat, voice input, web search, and browser auto
 - **Electron** — Desktop shell (tray, windows, IPC)
 - **React + TypeScript** — Chat UI
 - **Vite + Tailwind CSS** — Renderer build
-- **python-service** — Voice pipeline (VAD, OpenRouter STT, Ollama refinement)
+- **python-service** — Voice pipeline (VAD, OpenRouter STT and refinement)
 - **browser-service** — Playwright + browser-use agent
 
 ## Structure
@@ -53,9 +53,8 @@ pnpm build
 
 | Variable | Service | Purpose |
 |----------|---------|---------|
-| `OPENROUTER_API_KEY` | python-service | Audio transcription |
+| `OPENROUTER_API_KEY` | python-service | Audio transcription and text refinement |
 | `TAVILY_API_KEY` | main | Web search |
-| `OLLAMA_CHAT_URL` | python-service | Text refinement (default: local Ollama) |
 
 Voice hotkey: **Cmd+Shift+Space** (registered via Electron global shortcuts).
 

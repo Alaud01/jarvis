@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import { prepareMarkdownMath } from '../utils/markdownMath';
 
 interface Message {
   id: string;
@@ -49,7 +50,7 @@ interface ActiveTrailTarget {
 const MAX_PREVIEW_HEADERS = 9;
 const ACTIVE_READING_OFFSET = 56;
 const TRAIL_COLLAPSE_ANIMATION_MS = 220;
-const TRAIL_HOVER_RECHECK_MS = 700;
+const TRAIL_HOVER_RECHECK_MS = 300;
 
 const parseHeaders = (text: string): HeaderEntry[] => {
   let cleanText = text;
@@ -141,7 +142,7 @@ const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> =
         li: ({ children }) => <span>{children}</span>,
       }}
     >
-      {content}
+      {prepareMarkdownMath(content)}
     </ReactMarkdown>
   </span>
 );
@@ -171,7 +172,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
             >
               <div className="flex items-center justify-start min-h-2.5 cursor-pointer group/bar">
                 <div
-                  className="w-5 h-[3px] bg-border-secondary rounded-[1px] transition-all duration-200 ease-in-out
+                  className="w-5 h-[3px] bg-border-secondary rounded-[1px] transition-[width,background-color] duration-200 ease-in-out
                     group-hover/bar:w-6 group-hover/bar:bg-text-tertiary"
                 />
               </div>
@@ -188,7 +189,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
                     }}
                   >
                     <div
-                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary rounded-[1px] transition-all duration-200 ease-in-out
+                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary rounded-[1px] transition-[width,background-color] duration-200 ease-in-out
                         ${HEADER_HOVER_WIDTHS[header.level]} group-hover/bar:bg-text-tertiary`}
                     />
                   </div>
@@ -205,7 +206,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
             onClick={() => onScrollToMessage(message.id)}
           >
             <div
-              className={`w-3 h-[3px] bg-border-secondary transition-all duration-200 ease-in-out relative
+              className={`w-3 h-[3px] bg-border-secondary transition-[width,background-color] duration-200 ease-in-out relative
                 rounded-sm
                 group-hover:w-4 group-hover:bg-text-tertiary`}
             />
@@ -342,7 +343,9 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   const [activeTarget, setActiveTarget] = useState<ActiveTrailTarget | null>(null);
   const collapseTimeoutRef = useRef<number | null>(null);
   const hoverRecheckTimeoutRef = useRef<number | null>(null);
+  const collapseFinishedRef = useRef(false);
   const expandedPanelRef = useRef<HTMLDivElement>(null);
+  const collapsedBarsRef = useRef<HTMLDivElement>(null);
   const collapsedHoverRef = useRef<HTMLDivElement>(null);
   const isExpandedRef = useRef(isExpanded);
   isExpandedRef.current = isExpanded;
@@ -445,19 +448,43 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   }, [clearHoverRecheck]);
 
   const collapseTrail = useCallback(() => {
-    if (!isExpandedRef.current) return;
+    if (!isExpandedRef.current || isCollapsing) return;
 
     clearHoverRecheck();
     setIsCollapsing(true);
-    if (collapseTimeoutRef.current !== null) {
-      window.clearTimeout(collapseTimeoutRef.current);
-    }
-    collapseTimeoutRef.current = window.setTimeout(() => {
+  }, [clearHoverRecheck, isCollapsing]);
+
+  useEffect(() => {
+    if (!isCollapsing) return;
+
+    const wrapper = collapsedBarsRef.current;
+    if (!wrapper) return;
+
+    collapseFinishedRef.current = false;
+
+    const finishCollapse = () => {
+      if (collapseFinishedRef.current) return;
+      collapseFinishedRef.current = true;
       setIsExpanded(false);
       setIsCollapsing(false);
-      collapseTimeoutRef.current = null;
-    }, TRAIL_COLLAPSE_ANIMATION_MS);
-  }, [clearHoverRecheck]);
+      if (collapseTimeoutRef.current !== null) {
+        window.clearTimeout(collapseTimeoutRef.current);
+        collapseTimeoutRef.current = null;
+      }
+    };
+
+    const handleAnimationEnd = (event: AnimationEvent) => {
+      if (event.target !== wrapper || event.animationName !== 'messageTrailBarsEnter') return;
+      finishCollapse();
+    };
+
+    wrapper.addEventListener('animationend', handleAnimationEnd);
+    collapseTimeoutRef.current = window.setTimeout(finishCollapse, TRAIL_COLLAPSE_ANIMATION_MS);
+
+    return () => {
+      wrapper.removeEventListener('animationend', handleAnimationEnd);
+    };
+  }, [isCollapsing]);
 
   const collapseTrailIfNotHovered = useCallback(() => {
     requestAnimationFrame(() => {
@@ -532,7 +559,10 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
 
   if (messages.length === 0) return null;
 
-  const shouldRenderExpandedTrail = isExpanded || isCollapsing;
+  const showPanel = isExpanded || isCollapsing;
+  const barsAnimationClass = showPanel
+    ? (isCollapsing ? 'message-trail-bars-enter' : 'message-trail-bars-exit')
+    : '';
   const handleTrailBlur = (event: React.FocusEvent<HTMLElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget)) {
       collapseTrail();
@@ -545,58 +575,50 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
       aria-label="Message headers"
       className="relative z-[200] w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
     >
-      {shouldRenderExpandedTrail ? (
-        <>
+      <div
+        ref={collapsedBarsRef}
+        className={`h-full max-h-full min-w-full overflow-y-auto px-1 py-2 flex items-center ${barsAnimationClass} ${
+          isExpanded && !isCollapsing ? 'pointer-events-none' : ''
+        }`}
+      >
+        <div
+          ref={collapsedHoverRef}
+          className="min-w-full"
+          onMouseEnter={expandTrail}
+          onMouseLeave={!isExpanded ? collapseTrail : undefined}
+          onFocusCapture={expandTrail}
+          onBlurCapture={handleTrailBlur}
+        >
+          <CollapsedTrail
+            messages={messages}
+            assistantEntries={assistantEntries}
+            onScrollToMessage={onScrollToMessage}
+          />
+        </div>
+      </div>
+
+      {showPanel ? (
+        <div
+          ref={expandedPanelRef}
+          className="fixed right-3 top-1/2 z-[200] max-h-[calc(100vh-2rem)] w-[280px] -translate-y-1/2"
+          onMouseEnter={expandTrail}
+          onMouseLeave={scheduleHoverRecheck}
+          onFocusCapture={expandTrail}
+          onBlurCapture={handleTrailBlur}
+        >
           <div
-            className={`h-full max-h-full overflow-y-auto px-1 py-2 pointer-events-none flex items-center ${
-              isCollapsing ? 'message-trail-bars-enter' : 'message-trail-bars-exit'
+            className={`max-h-[inherit] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
+              isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
             }`}
           >
-            <CollapsedTrail
-              messages={messages}
-              assistantEntries={assistantEntries}
-              onScrollToMessage={onScrollToMessage}
-            />
-          </div>
-          <div
-            ref={expandedPanelRef}
-            className="fixed right-3 top-1/2 z-[200] max-h-[calc(100vh-2rem)] w-[280px] -translate-y-1/2"
-            onMouseEnter={expandTrail}
-            onMouseLeave={scheduleHoverRecheck}
-            onFocusCapture={expandTrail}
-            onBlurCapture={handleTrailBlur}
-          >
-            <div
-              className={`max-h-[inherit] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
-                isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
-              }`}
-            >
-              <ExpandedTrail
-                trailEntries={trailEntries}
-                activeTarget={activeTarget}
-                onScrollToMessage={onScrollToMessage}
-              />
-            </div>
-          </div>
-        </>
-      ) : (
-        <div className="h-full max-h-full overflow-y-auto px-1 py-2 flex items-center">
-          <div
-            ref={collapsedHoverRef}
-            className="min-w-full"
-            onMouseEnter={expandTrail}
-            onMouseLeave={collapseTrail}
-            onFocusCapture={expandTrail}
-            onBlurCapture={handleTrailBlur}
-          >
-            <CollapsedTrail
-              messages={messages}
-              assistantEntries={assistantEntries}
+            <ExpandedTrail
+              trailEntries={trailEntries}
+              activeTarget={activeTarget}
               onScrollToMessage={onScrollToMessage}
             />
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 };

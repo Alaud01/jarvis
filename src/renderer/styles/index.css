@@ -263,7 +263,7 @@ h1, h2, h3, h4, h5, h6 {
 .thinking-panel-toggle-label {
   color: var(--color-text-tertiary);
   font-family: var(--font-mono);
-  font-size: 0.625rem;
+  font-size: 0.5rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -271,12 +271,12 @@ h1, h2, h3, h4, h5, h6 {
 .thinking-panel-toggle-hint {
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: 0.625rem;
+  font-size: 0.5rem;
 }
 
 .thinking-scroll-container {
   overflow-anchor: auto;
-  font-size: 0.8125rem;
+  font-size: 0.6875rem;
   line-height: 1.6;
 }
 
@@ -305,29 +305,29 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .thinking-scroll-container .marktext-content h1 {
-  font-size: 1.15rem;
+  font-size: 1.025rem;
   margin: 1.1rem 0 0.5rem;
 }
 
 .thinking-scroll-container .marktext-content h2 {
-  font-size: 1.02rem;
+  font-size: 0.895rem;
   margin: 1rem 0 0.45rem;
 }
 
 .thinking-scroll-container .marktext-content h3 {
-  font-size: 0.94rem;
+  font-size: 0.815rem;
   margin: 0.85rem 0 0.4rem;
 }
 
 .thinking-scroll-container .marktext-content h4,
 .thinking-scroll-container .marktext-content h5,
 .thinking-scroll-container .marktext-content h6 {
-  font-size: 0.875rem;
+  font-size: 0.75rem;
   margin: 0.75rem 0 0.35rem;
 }
 
 .thinking-scroll-container .marktext-content pre code {
-  font-size: 0.78rem;
+  font-size: 0.655rem;
 }
 
 .thinking-scroll-container .marktext-content pre {
@@ -347,7 +347,7 @@ select option {
 .marktext-content {
   color: var(--color-text-primary);
   font-family: var(--font-readable);
-  font-size: 1rem;
+  font-size: 0.875rem;
   font-weight: 400;
   line-height: 1.78;
   letter-spacing: 0.003em;
@@ -384,26 +384,26 @@ select option {
 }
 
 .marktext-content h1 {
-  font-size: 1.7rem;
+  font-size: 1.575rem;
   margin: 1.9rem 0 0.85rem;
 }
 
 .marktext-content h2 {
   border-bottom: 1px solid var(--color-border-primary);
-  font-size: 1.38rem;
+  font-size: 1.255rem;
   margin: 1.7rem 0 0.75rem;
   padding-bottom: 0.35rem;
 }
 
 .marktext-content h3 {
-  font-size: 1.16rem;
+  font-size: 1.035rem;
   margin: 1.4rem 0 0.55rem;
 }
 
 .marktext-content h4,
 .marktext-content h5,
 .marktext-content h6 {
-  font-size: 1rem;
+  font-size: 0.875rem;
   margin: 1.2rem 0 0.45rem;
 }
 
@@ -532,7 +532,7 @@ select option {
   border: 0;
   border-radius: 0;
   display: block;
-  font-size: 0.88rem;
+  font-size: 0.755rem;
   padding: 0;
   white-space: pre;
 }
@@ -559,7 +559,7 @@ select option {
 
 .marktext-content table {
   border-collapse: collapse;
-  font-size: 0.9rem;
+  font-size: inherit;
   line-height: 1.55;
   min-width: 100%;
 }
@@ -571,7 +571,7 @@ select option {
 .marktext-content th,
 .marktext-content td {
   border: 1px solid var(--color-border-secondary);
-  min-width: calc(6ch + 1.5rem);
+  min-width: calc(8ch + 1.5rem);
   padding: 0.55rem 0.75rem;
   text-align: left;
   vertical-align: top;
@@ -606,19 +606,19 @@ select option {
 }
 
 .message-trail-bars-exit {
-  animation: messageTrailBarsExit 150ms ease-in forwards;
+  animation: messageTrailBarsExit 180ms ease-in forwards;
 }
 
 .message-trail-panel-enter {
-  animation: messageTrailPanelEnter 190ms ease-out 135ms both;
+  animation: messageTrailPanelEnter 180ms ease-out 100ms both;
 }
 
 .message-trail-bars-enter {
-  animation: messageTrailBarsEnter 180ms ease-out 35ms both;
+  animation: messageTrailBarsEnter 180ms ease-out 40ms both;
 }
 
 .message-trail-panel-exit {
-  animation: messageTrailPanelExit 170ms ease-in both;
+  animation: messageTrailPanelExit 160ms ease-in both;
 }
 
 @keyframes messageTrailBarsExit {

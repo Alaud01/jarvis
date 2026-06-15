@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import type { RecordedAudio } from './audioRecorder';
+import type { VoiceContext } from '../shared/voice';
 
 const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
@@ -200,20 +201,28 @@ function getAudioUploadParts(audio: UploadableAudio): {
   };
 }
 
-function createMultipartUpload(audio: UploadableAudio): {
+export function createMultipartUpload(audio: UploadableAudio, context?: VoiceContext): {
   boundary: string;
   contentLength: number;
   body: AsyncIterable<Uint8Array>;
 } {
   const { chunks, byteLength, filename, contentType } = getAudioUploadParts(audio);
   const boundary = `----WebKitFormBoundary${Math.random().toString(16).slice(2)}`;
-  const header = Buffer.from(
+  const contextPart = context
+    ? Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="context"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(context)}\r\n`
+    )
+    : Buffer.alloc(0);
+  const fileHeader = Buffer.from(
     `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`
   );
   const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
 
   async function* body(): AsyncIterable<Uint8Array> {
-    yield header;
+    if (contextPart.byteLength > 0) {
+      yield contextPart;
+    }
+    yield fileHeader;
     for (const chunk of chunks) {
       yield chunk;
     }
@@ -222,22 +231,24 @@ function createMultipartUpload(audio: UploadableAudio): {
 
   return {
     boundary,
-    contentLength: header.byteLength + byteLength + footer.byteLength,
+    contentLength: contextPart.byteLength + fileHeader.byteLength + byteLength + footer.byteLength,
     body: body(),
   };
 }
 
-export async function processVoiceFlow(audioBuffer: UploadableAudio): Promise<{
+export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: VoiceContext): Promise<{
   text: string;
   raw_text?: string;
   speech_duration_ms?: number;
+  refinement_mode?: string;
+  applied_edits?: string[];
   success: boolean;
   error?: string;
 }> {
   const url = `http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/process-flow`;
   
   try {
-    const upload = createMultipartUpload(audioBuffer);
+    const upload = createMultipartUpload(audioBuffer, context);
     
     const response = await fetch(url, {
       method: 'POST',
@@ -254,6 +265,8 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio): Promise<{
       text?: string; 
       raw_text?: string; 
       speech_duration_ms?: number;
+      refinement_mode?: string;
+      applied_edits?: string[];
       success?: boolean; 
       error?: string;
     };
@@ -262,6 +275,8 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio): Promise<{
       text: data.text || '',
       raw_text: data.raw_text,
       speech_duration_ms: data.speech_duration_ms,
+      refinement_mode: data.refinement_mode,
+      applied_edits: data.applied_edits,
       success: data.success ?? false,
       error: data.error,
     };

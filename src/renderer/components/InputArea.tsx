@@ -14,6 +14,7 @@ interface ModelInfo {
   id: string;
   name: string;
   provider: string;
+  contextLength?: number;
 }
 
 interface InputAreaProps {
@@ -400,7 +401,7 @@ const InputArea: React.FC<InputAreaProps> = ({
           )}
           <textarea
             ref={textareaRef}
-            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-base leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
+            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-[0.875rem] leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -420,7 +421,7 @@ const InputArea: React.FC<InputAreaProps> = ({
             </div>
             <div className="flex items-center gap-2">
               <button
-                className="py-1 px-3 border border-text-primary bg-transparent text-text-primary font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-150 hover:bg-text-primary hover:text-bg-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                className="py-1 px-3 border border-text-primary bg-transparent text-text-primary font-mono text-[0.575rem] uppercase tracking-widest cursor-pointer transition-all duration-150 hover:bg-text-primary hover:text-bg-primary disabled:opacity-30 disabled:cursor-not-allowed"
                 onClick={handleAttach}
                 disabled={isDisabled || isReadingAttachments}
                 title="Attach PDF, Office, text, or code files"
@@ -429,7 +430,7 @@ const InputArea: React.FC<InputAreaProps> = ({
                 {isReadingAttachments ? 'Reading…' : 'Attach'}
               </button>
               <button
-                className={`py-1 px-3 border font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-150 ${
+                className={`py-1 px-3 border font-mono text-[0.575rem] uppercase tracking-widest cursor-pointer transition-all duration-150 ${
                   voiceState === 'recording'
                     ? 'border-red-500 bg-red-500 text-white animate-pulse'
                     : voiceState === 'processing'
@@ -453,7 +454,7 @@ const InputArea: React.FC<InputAreaProps> = ({
                 {voiceState === 'recording' ? 'Stop' : voiceState === 'processing' ? 'Wait' : 'Mic'}
               </button>
               <button
-                className="py-1 px-4 border border-text-primary bg-text-primary text-bg-primary font-mono text-[0.7rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:not-disabled:bg-transparent hover:not-disabled:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                className="py-1 px-4 border border-text-primary bg-text-primary text-bg-primary font-mono text-[0.575rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:not-disabled:bg-transparent hover:not-disabled:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
                 onClick={isLoading ? onStopStreaming : handleSend}
                 disabled={!isLoading && ((!input.trim() && attachments.length === 0) || disabled)}
               >

@@ -40,8 +40,16 @@ import type { BrowserTraceEvent } from '../shared/browser';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import { initializeProviders, getProvider, getAvailableProviders, getAllModels, getModelsForProvider, setOpenCodeGoApiKey, setOpenRouterApiKey } from './providers/registry';
-import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo } from './providers/types';
+import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo, ModelInfo } from './providers/types';
 import { ATTACHMENT_DIALOG_FILTERS, readAttachments } from './attachmentService';
+import {
+  createDictionaryEntry,
+  deleteDictionaryEntry,
+  listDictionaryEntries,
+  updateDictionaryEntry,
+} from './dictionaryService';
+import type { CreateDictionaryEntryInput, UpdateDictionaryEntryInput } from '../shared/dictionary';
+import { compactMessagesIfNeeded, estimateTotalTokens, getContextThresholdTokens } from './contextCompaction';
 
 dotenv.config({ quiet: true });
 
@@ -51,8 +59,8 @@ let activeStreams = new Map<string, AbortController>();
 let isQuitting = false;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
-const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 2;
-const MAX_FETCH_URL_CALLS_PER_TURN = 2;
+const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 5;
+const MAX_FETCH_URL_CALLS_PER_TURN = 5;
 const CHAT_MODEL_KEEP_ALIVE = '2m';
 const ONE_OFF_MODEL_KEEP_ALIVE = 0;
 
@@ -588,7 +596,43 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
     let tavilySearchCallsThisTurn = 0;
     let fetchUrlCallsThisTurn = 0;
 
+    let allModels: ModelInfo[] = [];
+    try {
+      allModels = await getAllModels();
+    } catch (error) {
+      console.error('[Context Compaction] Failed to load model list for context limit lookup:', error);
+    }
+    const selectedModelInfo = allModels.find((m) => m.id === request.model);
+    const modelContextLength = selectedModelInfo?.contextLength;
+    const contextThresholdTokens = getContextThresholdTokens(modelContextLength);
+
     while (true) {
+      const estimatedTokens = estimateTotalTokens(baseMessages);
+      if (estimatedTokens > contextThresholdTokens) {
+        logMainProcess('LLM', 'Context window approaching limit; compacting conversation history', {
+          conversationId: request.conversationId,
+          model: request.model,
+          estimatedTokens,
+          contextThresholdTokens,
+          modelContextLength: modelContextLength ?? 'default (128k)',
+        });
+        const preCompactionCount = baseMessages.length;
+        const compacted = await compactMessagesIfNeeded(baseMessages, {
+          provider,
+          model: request.model,
+          modelContextLength,
+        });
+        if (compacted.length < baseMessages.length || estimateTotalTokens(compacted) < estimatedTokens) {
+          baseMessages.splice(0, baseMessages.length, ...compacted);
+          logMainProcess('LLM', 'Conversation history compacted', {
+            conversationId: request.conversationId,
+            previousMessageCount: preCompactionCount,
+            compactedMessageCount: compacted.length,
+            estimatedTokensAfter: estimateTotalTokens(baseMessages),
+          });
+        }
+      }
+
       const turnResult = await provider.streamChat(
         request.model,
         baseMessages,
@@ -781,9 +825,25 @@ ipcMain.handle('send-message-stream', async (event, request: SendMessageStreamRe
           model: request.model,
           toolCallCount: toolCalls.length,
         });
+        let synthesisMessages = buildToolResultSynthesisMessages(baseMessages, assistantMessage, toolResultMessages);
+        const synthesisEstimatedTokens = estimateTotalTokens(synthesisMessages);
+        if (synthesisEstimatedTokens > contextThresholdTokens) {
+          logMainProcess('LLM', 'Synthesis messages near context limit; compacting before fallback', {
+            conversationId: request.conversationId,
+            model: request.model,
+            synthesisEstimatedTokens,
+            contextThresholdTokens,
+          });
+          const compactedSynthesis = await compactMessagesIfNeeded(synthesisMessages, {
+            provider,
+            model: request.model,
+            modelContextLength,
+          });
+          synthesisMessages = compactedSynthesis;
+        }
         const synthesisResult = await provider.streamChat(
           request.model,
-          buildToolResultSynthesisMessages(baseMessages, assistantMessage, toolResultMessages),
+          synthesisMessages,
           abortController,
           emitStreamChunk,
           { tools: null, keepAlive: CHAT_MODEL_KEEP_ALIVE },
@@ -935,6 +995,23 @@ ipcMain.handle('store:load-current-conversation-id', async () => {
 
 ipcMain.handle('store:save-current-conversation-id', async (_event, id: string | null) => {
   saveCurrentConversationId(id);
+  return { success: true };
+});
+
+ipcMain.handle('dictionary:list', async () => {
+  return listDictionaryEntries();
+});
+
+ipcMain.handle('dictionary:create', async (_event, input: CreateDictionaryEntryInput) => {
+  return createDictionaryEntry(input);
+});
+
+ipcMain.handle('dictionary:update', async (_event, id: string, input: UpdateDictionaryEntryInput) => {
+  return updateDictionaryEntry(id, input);
+});
+
+ipcMain.handle('dictionary:delete', async (_event, id: string) => {
+  deleteDictionaryEntry(id);
   return { success: true };
 });
 

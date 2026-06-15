@@ -3,6 +3,7 @@ import type { BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
+import type { CreateDictionaryEntryInput, UpdateDictionaryEntryInput } from '../shared/dictionary';
 
 type TransferableMessagePort = NonNullable<Parameters<typeof ipcRenderer.postMessage>[2]>[number];
 
@@ -21,6 +22,7 @@ type ModelInfo = {
   id: string;
   name: string;
   provider: string;
+  contextLength?: number;
 };
 
 type ProviderInfo = {
@@ -116,6 +118,10 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),
   storeSaveCurrentConversationId: (id: string | null) => ipcRenderer.invoke('store:save-current-conversation-id', id),
+  dictionaryList: () => ipcRenderer.invoke('dictionary:list'),
+  dictionaryCreate: (input: CreateDictionaryEntryInput) => ipcRenderer.invoke('dictionary:create', input),
+  dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => ipcRenderer.invoke('dictionary:update', id, input),
+  dictionaryDelete: (id: string) => ipcRenderer.invoke('dictionary:delete', id),
   generateTitle: (message: string, model: string, provider: string) => ipcRenderer.invoke('generate-title', message, model, provider),
   setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

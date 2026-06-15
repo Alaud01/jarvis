@@ -39,6 +39,8 @@ interface SidebarProps {
   onRenameFolder: (id: string, name: string) => void;
   onDeleteFolder: (id: string) => void;
   onMoveConversation: (conversationId: string, folderId: string | null) => void;
+  activeWorkspace: 'chat' | 'dictionary';
+  onDictionaryOpen: () => void;
 }
 
 interface ContextMenuState {
@@ -141,13 +143,15 @@ function DraggableConversationItem({
     id: `conversation-${conversation.id}`,
     data: { type: 'conversation', id: conversation.id },
   });
-  const statusLabel = conversation.isStreaming ? 'Streaming response' : 'Unread completed response';
+  const statusLabel = conversation.isStreaming
+    ? 'Streaming response'
+    : 'Unread completed response';
   const showStatus = conversation.isStreaming || conversation.hasUnreadComplete;
 
   return (
     <div
       ref={setNodeRef}
-      className={`group flex items-center gap-1 px-2 py-[0.4rem] text-[0.85rem] transition-all duration-150 cursor-grab active:cursor-grabbing ${
+      className={`group flex items-center gap-1 px-2 py-[0.4rem] text-[0.75rem] transition-all duration-150 cursor-grab active:cursor-grabbing ${
         isActive
           ? 'bg-bg-active text-text-primary'
           : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
@@ -160,32 +164,34 @@ function DraggableConversationItem({
       <span className="min-w-0 flex-1 whitespace-nowrap overflow-hidden text-ellipsis leading-snug select-none" title={conversation.title}>
         {conversation.title}
       </span>
-      {showStatus && (
-        <span
-          className="flex h-5 w-5 shrink-0 items-center justify-center"
-          title={statusLabel}
-          aria-label={statusLabel}
+      <span className="relative h-5 w-5 shrink-0">
+        {showStatus ? (
+          <span
+            className="absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0"
+            title={statusLabel}
+            aria-label={statusLabel}
+          >
+            {conversation.isStreaming ? (
+              <span className="h-2.5 w-2.5 rounded-full border border-text-muted border-t-text-primary animate-spin" />
+            ) : (
+              <span className="h-2.5 w-2.5 rounded-full bg-text-primary" />
+            )}
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="absolute inset-0 flex items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 hover:bg-bg-hover"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(conversation.id);
+          }}
+          title="Delete conversation (Cmd Shift Backspace)"
         >
-          {conversation.isStreaming ? (
-            <span className="h-2.5 w-2.5 rounded-full border border-text-muted border-t-text-primary animate-spin" />
-          ) : (
-            <span className="h-2.5 w-2.5 rounded-full bg-text-primary" />
-          )}
-        </span>
-      )}
-      <button
-        type="button"
-        className="shrink-0 rounded p-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-bg-hover"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(conversation.id);
-        }}
-        title="Delete conversation (Cmd Shift Backspace)"
-      >
-        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-        </svg>
-      </button>
+          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        </button>
+      </span>
     </div>
   );
 }
@@ -289,7 +295,7 @@ function DroppableFolderItem({
   return (
     <div ref={setNodeRef}>
       <div
-        className={`group flex items-center gap-1 px-1 py-[0.4rem] text-[0.85rem] transition-all duration-150 ${
+        className={`group flex items-center gap-1 px-1 py-[0.4rem] text-[0.75rem] transition-all duration-150 ${
           highlighted || showAsSelected
             ? 'bg-bg-active text-text-primary'
             : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
@@ -311,7 +317,7 @@ function DroppableFolderItem({
         {isEditing ? (
           <input
             ref={inputRef}
-            className="min-w-0 flex-1 border border-border-primary bg-bg-secondary px-1.5 py-0.5 text-[0.85rem] text-text-primary outline-none rounded"
+            className="min-w-0 flex-1 border border-border-primary bg-bg-secondary px-1.5 py-0.5 text-[0.75rem] text-text-primary outline-none rounded"
             value={editName}
             onChange={(e) => setEditName(e.target.value)}
             onBlur={handleFinishEdit}
@@ -418,6 +424,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   onRenameFolder,
   onDeleteFolder,
   onMoveConversation,
+  activeWorkspace,
+  onDictionaryOpen,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [focusedFolderId, setFocusedFolderId] = useState<string | null>(null);
@@ -767,7 +775,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               New Chat
             </button>
           </div>
-          <div className="mt-8 flex flex-col gap-1">
+          <div className="mt-2 flex flex-col gap-1">
             <div>
               <div className="group/label mb-2 flex items-center justify-between px-2">
                 <span className="font-mono text-[0.6rem] uppercase tracking-[2px] text-text-muted">
@@ -853,7 +861,17 @@ const Sidebar: React.FC<SidebarProps> = ({
 
         <div className="flex shrink-0 items-center gap-3 border-t border-border-primary px-5 py-3">
           <ThemeSwitcher />
-          <span className="ml-auto font-mono text-[0.65rem] text-text-tertiary">v1.0</span>
+          <button
+            type="button"
+            className={`ml-auto flex h-6 w-6 items-center justify-center transition-all duration-[150ms] ${activeWorkspace === 'dictionary' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:text-text-secondary'}`}
+            title="Personal dictionary"
+            onClick={onDictionaryOpen}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            </svg>
+          </button>
         </div>
       </aside>
 

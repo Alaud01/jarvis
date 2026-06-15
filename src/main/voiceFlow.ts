@@ -3,7 +3,10 @@ import { startRecording, stopRecording, requestMicrophoneAccess, cleanupAudioCap
 import { getVoiceShortcutLabel, setupGlobalHotkey, setupLocalHotkey, teardownGlobalHotkey } from './hotkeyManager';
 import { processVoiceFlow } from './pythonService';
 import { typeTextInActiveApp, getFrontmostApp, activateApp, type FrontmostApp } from './textInserter';
-import { showOverlay, hideOverlay, destroyOverlay } from './overlayWindow';
+import { showOverlay, hideOverlay, destroyOverlay, preloadOverlay } from './overlayWindow';
+import { captureVoiceContext } from './voiceContext';
+import { EMPTY_VOICE_CONTEXT, type VoiceContext } from '../shared/voice';
+import { cancelCorrectionObservation, observePostInsertionCorrection } from './correctionObserver';
 
 type VoiceFlowState = 'idle' | 'recording' | 'processing';
 type VoiceTranscriptPayload = {
@@ -17,6 +20,8 @@ let voiceFlowState: VoiceFlowState = 'idle';
 export type VoiceFlowResult = {
   text: string;
   raw_text?: string;
+  refinement_mode?: string;
+  applied_edits?: string[];
   success: boolean;
   error?: string;
 };
@@ -41,6 +46,8 @@ function sendErrorToRenderer(error: string): void {
 
 let preRecordingApp: FrontmostApp | null = null;
 let preRecordingProjectFocused = false;
+let preRecordingContext: VoiceContext = EMPTY_VOICE_CONTEXT;
+let preRecordingCapturePromise: Promise<void> = Promise.resolve();
 
 function isProjectWindowFocused(): boolean {
   return BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.isFocused());
@@ -70,9 +77,11 @@ async function resolveTargetApp(): Promise<FrontmostApp | null> {
 }
 
 async function capturePreRecordingApp(): Promise<void> {
+  cancelCorrectionObservation();
   preRecordingProjectFocused = isProjectWindowFocused();
   if (preRecordingProjectFocused) {
     preRecordingApp = null;
+    preRecordingContext = await captureVoiceContext(null, true);
     console.log('[VoiceFlow] Pre-recording target: project window');
     return;
   }
@@ -84,13 +93,24 @@ async function capturePreRecordingApp(): Promise<void> {
     console.log('[VoiceFlow] Could not get frontmost app:', err);
     preRecordingApp = null;
   }
+  preRecordingContext = await captureVoiceContext(preRecordingApp);
+  console.log('[VoiceFlow] Voice context captured:', {
+    app: preRecordingContext.app,
+    destination: preRecordingContext.destination,
+    accessibilityStatus: preRecordingContext.accessibilityStatus,
+    fieldRole: preRecordingContext.field?.role ?? null,
+    fieldSubrole: preRecordingContext.field?.subrole ?? null,
+  });
+}
+
+function beginPreRecordingCapture(): void {
+  preRecordingCapturePromise = capturePreRecordingApp();
 }
 
 async function handleVoiceShortcut(): Promise<void> {
   console.log('[VoiceFlow] handleVoiceShortcut state:', voiceFlowState);
 
   if (voiceFlowState === 'idle') {
-    await capturePreRecordingApp();
     await startVoiceRecording();
   } else if (voiceFlowState === 'recording') {
     await stopAndProcess();
@@ -107,10 +127,14 @@ async function startVoiceRecording(): Promise<void> {
   voiceFlowState = 'recording';
   sendStateToRenderer('recording');
   showOverlay('recording');
+  beginPreRecordingCapture();
 
   const result = await startRecording();
 
   if (!result.success) {
+    preRecordingApp = null;
+    preRecordingProjectFocused = false;
+    preRecordingContext = EMPTY_VOICE_CONTEXT;
     voiceFlowState = 'idle';
     sendStateToRenderer('idle');
     sendErrorToRenderer(result.error || 'Failed to start recording');
@@ -131,6 +155,7 @@ async function stopAndProcess(): Promise<void> {
   showOverlay('processing');
 
   try {
+    await preRecordingCapturePromise;
     const audioBuffer = await stopRecording();
     if (audioBuffer.durationMs < 250 || audioBuffer.peak < 0.001) {
       const errorMessage = `Microphone captured silence (${Math.round(audioBuffer.durationMs)}ms, peak ${audioBuffer.peak.toFixed(4)})`;
@@ -139,7 +164,7 @@ async function stopAndProcess(): Promise<void> {
       return;
     }
 
-    const result = await processVoiceFlow(audioBuffer);
+    const result = await processVoiceFlow(audioBuffer, preRecordingContext);
 
     if (result.success && result.text) {
       showOverlay('complete', result.text);
@@ -185,6 +210,9 @@ async function stopAndProcess(): Promise<void> {
         }
 
         await typeTextInActiveApp(result.text);
+        if (targetApp) {
+          void observePostInsertionCorrection(targetApp, result.text);
+        }
       }
     } else if (!result.success && result.error) {
       showOverlay('error', undefined, result.error);
@@ -202,6 +230,7 @@ async function stopAndProcess(): Promise<void> {
     hideOverlay();
     preRecordingApp = null;
     preRecordingProjectFocused = false;
+    preRecordingContext = EMPTY_VOICE_CONTEXT;
     voiceFlowState = 'idle';
     sendStateToRenderer('idle');
   }
@@ -223,14 +252,13 @@ export async function initializeVoiceFlow(): Promise<void> {
   }
 
   await requestMicrophoneAccess();
+  preloadOverlay();
 }
 
 export async function startVoiceRecordingFromUI(): Promise<{ success: boolean; error?: string }> {
   if (voiceFlowState !== 'idle') {
     return { success: false, error: `Already ${voiceFlowState}` };
   }
-
-  await capturePreRecordingApp();
 
   await startVoiceRecording();
 

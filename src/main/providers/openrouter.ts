@@ -15,6 +15,7 @@ const DEFAULT_TITLE = 'Jarvis';
 interface OpenRouterModel {
   id: string;
   name?: string;
+  context_length?: number;
   architecture?: {
     modality?: string;
     input_modalities?: string[];
@@ -198,6 +199,7 @@ export class OpenRouterProvider implements Provider {
           id: model.id,
           name: model.name || model.id,
           provider: this.id,
+          contextLength: model.context_length,
         }));
     } catch (error) {
       console.error('[OpenRouter] Error fetching models:', error);

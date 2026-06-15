@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { BrowserToolRun } from '../shared/browser';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
+import type { DictionaryEntry } from '../shared/dictionary';
 
 export interface SerializedMessage {
   id: string;
@@ -48,6 +49,7 @@ interface StoreSchema {
   currentConversationId: string | null;
   opencodeGoApiKey: string;
   openRouterApiKey: string;
+  dictionaryEntries: DictionaryEntry[];
 }
 
 const store = new Store<StoreSchema>({
@@ -64,6 +66,7 @@ const store = new Store<StoreSchema>({
     currentConversationId: null,
     opencodeGoApiKey: '',
     openRouterApiKey: '',
+    dictionaryEntries: [],
   },
 }) as any;
 
@@ -296,6 +299,14 @@ export function loadCurrentConversationId(): string | null {
 
 export function saveCurrentConversationId(id: string | null): void {
   store.set('currentConversationId', id);
+}
+
+export function loadDictionaryEntries(): DictionaryEntry[] {
+  return store.get('dictionaryEntries', []) as DictionaryEntry[];
+}
+
+export function saveDictionaryEntries(entries: DictionaryEntry[]): void {
+  store.set('dictionaryEntries', entries);
 }
 
 export default store;

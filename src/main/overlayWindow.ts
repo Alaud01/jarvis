@@ -2,6 +2,14 @@ import { BrowserWindow, screen } from 'electron';
 
 let overlayWindow: BrowserWindow | null = null;
 let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+let overlayWidthAnimationTimer: ReturnType<typeof setInterval> | null = null;
+let overlayReady = false;
+let pendingOverlayPayload: {
+  payload: ReturnType<typeof getOverlayPayload>;
+  state: OverlayState;
+  transcript?: string;
+  errorMessage?: string;
+} | null = null;
 let overlayThemeIsDark = true;
 
 const OVERLAY_MAX_WIDTH = 500;
@@ -10,9 +18,17 @@ const OVERLAY_CONTENT_GAP = 12;
 const PIXEL_SPINNER_SIZE = 20;
 const OVERLAY_Y_PADDING = 10;
 const OVERLAY_HEIGHT = (OVERLAY_Y_PADDING * 2) + PIXEL_SPINNER_SIZE;
-const OVERLAY_EXIT_MS = 160;
-const PROCESSING_FILL_MS = 180;
-const COMPLETE_FILL_MS = 220;
+const OVERLAY_EXIT_MS = 180;
+const OVERLAY_WIDTH_MS = 340;
+const OVERLAY_LABEL_MS = 220;
+const PROCESSING_FILL_MS = 260;
+const COMPLETE_FILL_MS = 300;
+
+const OVERLAY_EASE = 'cubic-bezier(0.22, 1, 0.36, 1)';
+
+function easeOutCubic(t: number): number {
+  return 1 - (1 - t) ** 3;
+}
 
 type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
 type OverlayVisualStage = OverlayState | 'processing-fill' | 'complete-fill';
@@ -247,6 +263,7 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       background: transparent;
       height: ${OVERLAY_HEIGHT}px;
       width: ${payload.width}px;
+      transition: width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE};
     }
     body {
       --overlay-bg: ${themeColors.background};
@@ -260,13 +277,13 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       display: flex;
       align-items: center;
       transform-origin: center center;
-      animation: overlayIn 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
-      transition: width 210ms cubic-bezier(0.16, 1, 0.3, 1);
+      animation: overlayIn 220ms ${OVERLAY_EASE} both;
+      transition: width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE};
     }
     @keyframes overlayIn {
       from {
         opacity: 0;
-        transform: translateY(-8px) scale(0.98);
+        transform: translateY(-6px) scale(0.985);
       }
       to {
         opacity: 1;
@@ -280,7 +297,7 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       }
       to {
         opacity: 0;
-        transform: translateY(-6px) scale(0.98);
+        transform: translateY(-4px) scale(0.985);
       }
     }
     .overlay {
@@ -309,15 +326,20 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       animation-iteration-count: infinite;
       animation-timing-function: linear;
       transition:
-        opacity 180ms ease,
-        background 220ms ease,
-        box-shadow 220ms ease,
-        transform 180ms ease;
+        opacity 260ms ${OVERLAY_EASE},
+        background 320ms ${OVERLAY_EASE},
+        box-shadow 320ms ${OVERLAY_EASE},
+        transform 260ms ${OVERLAY_EASE};
       will-change: opacity, transform;
     }
 ${PIXEL_STAGE_STYLES}
     .pixel-spinner.stage-processing-fill .cell {
       animation: none;
+      transition:
+        opacity ${PROCESSING_FILL_MS}ms ${OVERLAY_EASE},
+        background 320ms ${OVERLAY_EASE},
+        box-shadow 320ms ${OVERLAY_EASE},
+        transform ${PROCESSING_FILL_MS}ms ${OVERLAY_EASE};
     }
     .pixel-spinner.stage-processing-fill .cell-0,
     .pixel-spinner.stage-processing-fill .cell-1,
@@ -334,17 +356,17 @@ ${PIXEL_STAGE_STYLES}
       opacity: 1;
     }
     .pixel-spinner.stage-complete-fill .cell {
-      animation: pixel-complete-fill ${COMPLETE_FILL_MS}ms cubic-bezier(0.16, 1, 0.3, 1) both;
+      animation: pixel-complete-fill ${COMPLETE_FILL_MS}ms ${OVERLAY_EASE} both;
     }
 ${PIXEL_CELL_ANIMATION_RULES}
     @keyframes pixel-complete-fill {
       from {
-        opacity: 0.35;
-        transform: scale(0.86);
+        opacity: 0.4;
+        transform: scale(0.9);
       }
-      55% {
+      45% {
         opacity: 1;
-        transform: scale(1.12);
+        transform: scale(1.08);
       }
       to {
         opacity: 1;
@@ -363,12 +385,14 @@ ${PIXEL_SPINNER_KEYFRAMES}
       overflow: hidden;
       text-overflow: ellipsis;
       max-width: 460px;
-      transition: opacity 150ms ease, transform 150ms ease;
+      transition:
+        opacity ${OVERLAY_LABEL_MS}ms ${OVERLAY_EASE},
+        transform ${OVERLAY_LABEL_MS}ms ${OVERLAY_EASE};
       will-change: opacity, transform;
     }
     .label.is-changing {
       opacity: 0;
-      transform: translateY(-2px);
+      transform: translateY(3px);
     }
   </style>
 </head>
@@ -386,6 +410,9 @@ ${PIXEL_SPINNER_KEYFRAMES}
       var labelTimer = null;
       var spinner = document.getElementById('spinner');
       var label = document.getElementById('label');
+      var labelFadeMs = ${OVERLAY_LABEL_MS};
+      var labelSwapMs = Math.round(labelFadeMs * 0.45);
+
       function setLabel(nextLabel) {
         if (!label || label.textContent === nextLabel) return;
         if (labelTimer) clearTimeout(labelTimer);
@@ -393,9 +420,11 @@ ${PIXEL_SPINNER_KEYFRAMES}
         labelTimer = setTimeout(function() {
           label.textContent = nextLabel;
           requestAnimationFrame(function() {
-            label.classList.remove('is-changing');
+            requestAnimationFrame(function() {
+              label.classList.remove('is-changing');
+            });
           });
-        }, 95);
+        }, labelSwapMs);
       }
       function setStage(stage) {
         if (!spinner) return;
@@ -419,9 +448,12 @@ ${PIXEL_SPINNER_KEYFRAMES}
         }
 
         if (state === 'recording' && payload.state === 'processing') {
+          setOverlayWidth(payload.width);
+          setLabel(payload.label);
           setStage('processing-fill');
           fillTimer = setTimeout(function() {
-            applyPayload(payload);
+            setStage(payload.stage);
+            state = payload.state;
             fillTimer = null;
           }, ${PROCESSING_FILL_MS});
           return;
@@ -432,7 +464,8 @@ ${PIXEL_SPINNER_KEYFRAMES}
           setLabel(payload.label);
           setStage('complete-fill');
           fillTimer = setTimeout(function() {
-            applyPayload(payload);
+            setStage(payload.stage);
+            state = payload.state;
             fillTimer = null;
           }, ${COMPLETE_FILL_MS});
           return;
@@ -467,6 +500,176 @@ function getOverlayPosition(width: number): { x: number; y: number } {
     x: wa.x + Math.floor((screenWidth - width) / 2),
     y: wa.y + 8,
   };
+}
+
+function stopOverlayWidthAnimation(): void {
+  if (overlayWidthAnimationTimer) {
+    clearInterval(overlayWidthAnimationTimer);
+    overlayWidthAnimationTimer = null;
+  }
+}
+
+function animateOverlayBounds(targetWidth: number): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  stopOverlayWidthAnimation();
+
+  const startBounds = overlayWindow.getBounds();
+  const startWidth = startBounds.width;
+  const centerX = startBounds.x + startWidth / 2;
+
+  if (startWidth === targetWidth) {
+    overlayWindow.setBounds({
+      x: Math.round(centerX - targetWidth / 2),
+      y: startBounds.y,
+      width: targetWidth,
+      height: OVERLAY_HEIGHT,
+    });
+    return;
+  }
+
+  const startTime = Date.now();
+
+  overlayWidthAnimationTimer = setInterval(() => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      stopOverlayWidthAnimation();
+      return;
+    }
+
+    const elapsed = Date.now() - startTime;
+    const progress = Math.min(1, elapsed / OVERLAY_WIDTH_MS);
+    const eased = easeOutCubic(progress);
+    const currentWidth = Math.round(startWidth + (targetWidth - startWidth) * eased);
+    const currentX = Math.round(centerX - currentWidth / 2);
+
+    overlayWindow.setBounds({
+      x: currentX,
+      y: startBounds.y,
+      width: currentWidth,
+      height: OVERLAY_HEIGHT,
+    });
+
+    if (progress >= 1) {
+      stopOverlayWidthAnimation();
+    }
+  }, 16);
+}
+
+function applyOverlayPayload(
+  payload: ReturnType<typeof getOverlayPayload>,
+  state: OverlayState,
+  transcript?: string,
+  errorMessage?: string,
+): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  hideOverlayWindowButtons(overlayWindow);
+  overlayWindow.webContents.executeJavaScript(`
+    if (window.updateOverlayState) {
+      window.updateOverlayState(${JSON.stringify(payload)});
+    }
+  `).catch(() => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.loadURL(
+        `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
+      );
+    }
+  });
+  animateOverlayBounds(payload.width);
+}
+
+function revealOverlay(
+  payload: ReturnType<typeof getOverlayPayload>,
+  state: OverlayState,
+  transcript?: string,
+  errorMessage?: string,
+): void {
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  applyOverlayPayload(payload, state, transcript, errorMessage);
+
+  if (!overlayWindow.isVisible()) {
+    const pos = getOverlayPosition(payload.width);
+    overlayWindow.setBounds({ x: pos.x, y: pos.y, width: payload.width, height: OVERLAY_HEIGHT });
+    showOverlayWithoutFocus(overlayWindow);
+  }
+}
+
+function createOverlayWindow(
+  state: OverlayState,
+  transcript?: string,
+  errorMessage?: string,
+  revealOnReady = true,
+): void {
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    return;
+  }
+
+  overlayReady = false;
+  const payload = getOverlayPayload(state, transcript, errorMessage);
+  const pos = getOverlayPosition(payload.width);
+
+  overlayWindow = new BrowserWindow({
+    width: payload.width,
+    height: OVERLAY_HEIGHT,
+    x: pos.x,
+    y: pos.y,
+    transparent: true,
+    frame: false,
+    alwaysOnTop: true,
+    resizable: false,
+    closable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    focusable: false,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayWindow.setIgnoreMouseEvents(true);
+  overlayWindow.setAlwaysOnTop(true, 'floating', 1);
+  hideOverlayWindowButtons(overlayWindow);
+
+  overlayWindow.webContents.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
+  );
+
+  overlayWindow.once('ready-to-show', () => {
+    if (!overlayWindow || overlayWindow.isDestroyed()) {
+      return;
+    }
+
+    overlayReady = true;
+    hideOverlayWindowButtons(overlayWindow);
+
+    const pending = pendingOverlayPayload;
+    if (pending) {
+      pendingOverlayPayload = null;
+      revealOverlay(pending.payload, pending.state, pending.transcript, pending.errorMessage);
+      return;
+    }
+
+    if (revealOnReady) {
+      revealOverlay(payload, state, transcript, errorMessage);
+    }
+  });
+}
+
+export function preloadOverlay(): void {
+  createOverlayWindow('recording', undefined, undefined, false);
 }
 
 function showOverlayWithoutFocus(win: BrowserWindow): void {
@@ -504,73 +707,27 @@ export function setOverlayThemeBackground(isDark: boolean): void {
 
 export function showOverlay(state: OverlayState, transcript?: string, errorMessage?: string): void {
   const payload = getOverlayPayload(state, transcript, errorMessage);
-  const pos = getOverlayPosition(payload.width);
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
   }
 
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    hideOverlayWindowButtons(overlayWindow);
-    overlayWindow.webContents.executeJavaScript(`
-      if (window.updateOverlayState) {
-        window.updateOverlayState(${JSON.stringify(payload)});
-      }
-    `).catch(() => {
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.loadURL(
-          `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
-        );
-      }
-    });
-    overlayWindow.setBounds({ x: pos.x, y: pos.y, width: payload.width, height: OVERLAY_HEIGHT }, false);
-    if (!overlayWindow.isVisible()) {
-      showOverlayWithoutFocus(overlayWindow);
-    }
+  if (!overlayWindow || overlayWindow.isDestroyed()) {
+    pendingOverlayPayload = { payload, state, transcript, errorMessage };
+    createOverlayWindow(state, transcript, errorMessage);
     return;
   }
 
-  overlayWindow = new BrowserWindow({
-    width: payload.width,
-    height: OVERLAY_HEIGHT,
-    x: pos.x,
-    y: pos.y,
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
-    resizable: false,
-    closable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    focusable: false,
-    show: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
-  });
+  if (!overlayReady) {
+    pendingOverlayPayload = { payload, state, transcript, errorMessage };
+    return;
+  }
 
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.setIgnoreMouseEvents(true);
-  overlayWindow.setAlwaysOnTop(true, 'floating', 1);
-  hideOverlayWindowButtons(overlayWindow);
-
-  overlayWindow.webContents.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
-  );
-
-  overlayWindow.once('ready-to-show', () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      hideOverlayWindowButtons(overlayWindow);
-      showOverlayWithoutFocus(overlayWindow);
-    }
-  });
+  revealOverlay(payload, state, transcript, errorMessage);
 }
 
 export function hideOverlay(): void {
+  stopOverlayWidthAnimation();
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.executeJavaScript("document.body.classList.add('exiting');").catch(() => {
       if (overlayWindow && !overlayWindow.isDestroyed()) {
@@ -587,6 +744,7 @@ export function hideOverlay(): void {
 }
 
 export function destroyOverlay(): void {
+  stopOverlayWidthAnimation();
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
@@ -595,4 +753,6 @@ export function destroyOverlay(): void {
     overlayWindow.close();
   }
   overlayWindow = null;
+  overlayReady = false;
+  pendingOverlayPayload = null;
 }

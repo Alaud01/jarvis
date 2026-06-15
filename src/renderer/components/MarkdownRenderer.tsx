@@ -12,6 +12,7 @@ import css from 'highlight.js/lib/languages/css';
 import json from 'highlight.js/lib/languages/json';
 import bash from 'highlight.js/lib/languages/bash';
 import markdown from 'highlight.js/lib/languages/markdown';
+import { prepareMarkdownMath } from '../utils/markdownMath';
 
 hljs.registerLanguage('python', python);
 hljs.registerLanguage('javascript', javascript);
@@ -31,24 +32,6 @@ interface CodeProps {
 interface MarkdownRendererProps {
   content: string;
 }
-
-const containsTexCommand = (value: string): boolean => /\\[a-zA-Z]+/.test(value);
-
-const normalizeMathDelimiters = (value: string): string => (
-  value
-    .replace(/\\\[((?:.|\n)*?)\\\]/g, (_match, math) => `$$${math.trim()}$$`)
-    .split('\n')
-    .map((line) => {
-      const match = /^(\s*)\[\s*(.+?)\s*\](\s*)$/.exec(line);
-
-      if (!match || !containsTexCommand(match[2])) {
-        return line;
-      }
-
-      return `${match[1]}$$${match[2]}$$${match[3]}`;
-    })
-    .join('\n')
-);
 
 const CopyIcon: React.FC = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -97,7 +80,7 @@ const PreBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
         {copied ? <CheckIcon /> : <CopyIcon />}
       </button>
       {language && (
-        <div className="absolute top-2 right-10 font-mono text-[0.65rem] text-text-muted uppercase tracking-wider opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="absolute top-2 right-10 font-mono text-[0.525rem] text-text-muted uppercase tracking-wider opacity-0 group-hover:opacity-100 transition-opacity">
           {language}
         </div>
       )}
@@ -134,7 +117,7 @@ const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props 
 };
 
 const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
-  const normalizedContent = normalizeMathDelimiters(content);
+  const normalizedContent = prepareMarkdownMath(content);
 
   return (
     <div className="marktext-content markdown-content text-text-primary">

@@ -55,6 +55,7 @@ export interface ModelInfo {
   id: string;
   name: string;
   provider: string;
+  contextLength?: number;
 }
 
 export interface ProviderInfo {
