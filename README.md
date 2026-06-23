@@ -7,15 +7,14 @@ macOS menu bar AI assistant with chat, voice input, web search, and browser auto
 - **Electron** — Desktop shell (tray, windows, IPC)
 - **React + TypeScript** — Chat UI
 - **Vite + Tailwind CSS** — Renderer build
+- **Browser Control** — Electron-owned local browser control loop with default-browser handoff
 - **python-service** — Voice pipeline (VAD, OpenRouter STT and refinement)
-- **browser-service** — Legacy Playwright + browser-use autonomous fallback
 
 ## Structure
 
 ```
 jarvis/
 ├── assets/              # Icons and fonts
-├── browser-service/     # Legacy browser-use sidecar (port 8001)
 ├── python-service/      # Voice flow sidecar (port 8765)
 ├── src/
 │   ├── main/            # Electron main process
@@ -39,7 +38,6 @@ Set required environment variables (see Environment below).
 ```bash
 pnpm dev              # Vite dev server + Electron
 pnpm start:python     # Voice service only
-pnpm start:browser    # Browser service only
 pnpm start            # Production build in Electron
 ```
 
@@ -61,6 +59,6 @@ Voice hotkey: **Cmd+Shift+Space** (registered via Electron global shortcuts).
 ## Architecture
 
 - **Main process** — Tray, providers (Ollama, OpenRouter, OpenCode Go), service orchestration
-- **Renderer** — Chat UI with streaming, attachments, browser traces
+- **Browser Control** — Local Chromium workspace controlled through Electron; default-browser handoff preserves the user's own browser session without granting Jarvis control of it
+- **Renderer** — Chat UI with streaming, attachments, and tool result context
 - **python-service** — Spawned on app start for voice dictation
-- **browser-service** — Legacy fallback spawned on first autonomous browser task

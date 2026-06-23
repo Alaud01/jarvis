@@ -1,9 +1,7 @@
 import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHandle, forwardRef, useState, useMemo } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
-import BrowserTraceSection from './BrowserTraceSection';
 import TypingIndicator from './TypingIndicator';
-import type { BrowserToolRun } from '../../shared/browser';
 import type { SearchSource, SearchSourceGroup } from '../../shared/search';
 import type { FileAttachment } from '../../shared/attachments';
 
@@ -13,7 +11,6 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
-  browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
 }
@@ -45,12 +42,7 @@ export interface MessageSegment {
 }
 
 type MessageRenderItem =
-  | (MessageSegment & { renderType: 'segment'; key: string })
-  | { renderType: 'browserRun'; key: string; run: BrowserToolRun; startOffset: number };
-
-const getSegmentEndOffset = (segment: MessageSegment) => (
-  segment.startOffset + (segment.text?.length ?? 0)
-);
+  MessageSegment & { renderType: 'segment'; key: string };
 
 const createSegmentItem = (
   segment: MessageSegment,
@@ -71,96 +63,11 @@ const createSegmentItem = (
   };
 };
 
-const buildMessageRenderItems = (
-  segments: MessageSegment[],
-  runs: BrowserToolRun[] = []
-): MessageRenderItem[] => {
-  const sortedRuns = [...runs].sort((a, b) => {
-    const offsetA = a.textOffset ?? Number.MAX_SAFE_INTEGER;
-    const offsetB = b.textOffset ?? Number.MAX_SAFE_INTEGER;
-    if (offsetA !== offsetB) return offsetA - offsetB;
-    return a.startedAt.localeCompare(b.startedAt);
-  });
-  const items: MessageRenderItem[] = [];
-  let runIndex = 0;
-
-  const pushRunsUntil = (offset: number) => {
-    while (
-      runIndex < sortedRuns.length
-      && (sortedRuns[runIndex].textOffset ?? Number.MAX_SAFE_INTEGER) <= offset
-    ) {
-      const run = sortedRuns[runIndex];
-      items.push({
-        renderType: 'browserRun',
-        key: `browser-${run.id}`,
-        run,
-        startOffset: run.textOffset ?? Number.MAX_SAFE_INTEGER,
-      });
-      runIndex += 1;
-    }
-  };
-
-  segments.forEach((segment, segmentIndex) => {
-    const text = segment.text ?? '';
-    const segmentStart = segment.startOffset;
-    const segmentEnd = getSegmentEndOffset(segment);
-    let cursor = segmentStart;
-
-    pushRunsUntil(segmentStart);
-
-    while (
-      runIndex < sortedRuns.length
-      && (sortedRuns[runIndex].textOffset ?? Number.MAX_SAFE_INTEGER) > cursor
-      && (sortedRuns[runIndex].textOffset ?? Number.MAX_SAFE_INTEGER) < segmentEnd
-    ) {
-      const run = sortedRuns[runIndex];
-      const runOffset = run.textOffset ?? segmentEnd;
-      const beforeText = text.slice(cursor - segmentStart, runOffset - segmentStart);
-      const beforeItem = createSegmentItem(
-        segment,
-        `segment-${segmentIndex}-${cursor}`,
-        beforeText,
-        cursor
-      );
-      if (beforeItem) {
-        items.push(beforeItem);
-      }
-
-      items.push({
-        renderType: 'browserRun',
-        key: `browser-${run.id}`,
-        run,
-        startOffset: runOffset,
-      });
-      runIndex += 1;
-      cursor = runOffset;
-    }
-
-    const remainingText = text.slice(cursor - segmentStart);
-    const remainingItem = createSegmentItem(
-      segment,
-      `segment-${segmentIndex}-${cursor}`,
-      remainingText,
-      cursor
-    );
-    if (remainingItem) {
-      items.push(remainingItem);
-    }
-  });
-
-  while (runIndex < sortedRuns.length) {
-    const run = sortedRuns[runIndex];
-    items.push({
-      renderType: 'browserRun',
-      key: `browser-${run.id}`,
-      run,
-      startOffset: run.textOffset ?? Number.MAX_SAFE_INTEGER,
-    });
-    runIndex += 1;
-  }
-
-  return items;
-};
+const buildMessageRenderItems = (segments: MessageSegment[]): MessageRenderItem[] => (
+  segments
+    .map((segment, segmentIndex) => createSegmentItem(segment, `segment-${segmentIndex}`))
+    .filter((item): item is MessageRenderItem => item !== null)
+);
 
 const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegment[] => {
   const rawSegments: MessageSegment[] = [];
@@ -293,7 +200,6 @@ const PARSED_MESSAGE_CACHE_LIMIT = 300;
 const parsedMessageCache = new Map<string, {
   text: string;
   isStreaming?: boolean;
-  browserRuns?: BrowserToolRun[];
   items: MessageRenderItem[];
 }>();
 
@@ -303,7 +209,6 @@ const getCachedMessageRenderItems = (message: Message): MessageRenderItem[] => {
     cached
     && cached.text === message.text
     && cached.isStreaming === message.isStreaming
-    && cached.browserRuns === message.browserRuns
   ) {
     parsedMessageCache.delete(message.id);
     parsedMessageCache.set(message.id, cached);
@@ -311,11 +216,10 @@ const getCachedMessageRenderItems = (message: Message): MessageRenderItem[] => {
   }
 
   const segments = parseMessageSegments(message.text, message.isStreaming);
-  const items = buildMessageRenderItems(segments, message.browserRuns);
+  const items = buildMessageRenderItems(segments);
   parsedMessageCache.set(message.id, {
     text: message.text,
     isStreaming: message.isStreaming,
-    browserRuns: message.browserRuns,
     items,
   });
 
@@ -692,7 +596,7 @@ const MessageRow = React.memo(({
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+              if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 onResubmit(message.id);
               }
@@ -705,7 +609,7 @@ const MessageRow = React.memo(({
           />
           <div className="flex items-center justify-end gap-2">
             <span className="font-mono text-[0.525rem] text-text-tertiary mr-auto">
-              Cmd + Enter to submit · Esc to cancel
+              Enter to submit · Shift + Enter for newline · Esc to cancel
             </span>
             <MessageActionButton
               onClick={() => onCopy(message.id, editText)}
@@ -728,17 +632,6 @@ const MessageRow = React.memo(({
       ) : (
         <>
           {renderItems.map((item) => {
-            if (item.renderType === 'browserRun') {
-              return (
-                <BrowserTraceSection
-                  key={item.key}
-                  run={item.run}
-                  onAutoScrollCancel={onAutoScrollCancel}
-                  onAutoScrollReactivate={onAutoScrollReactivate}
-                />
-              );
-            }
-
             const segment = item;
             if (segment.type === 'thinking' && segment.text) {
               return (
@@ -825,10 +718,9 @@ interface ScrollSnapshot {
 
 const estimateMessageHeight = (message: Message): number => {
   const lineEstimate = Math.ceil(message.text.length / 88);
-  const toolEstimate = (message.browserRuns?.length ?? 0) * 120;
   const sourcesEstimate = message.searchSources?.length ? 44 : 0;
   const baseHeight = message.sender === 'user' ? 74 : 112;
-  return Math.max(baseHeight, baseHeight + lineEstimate * 28 + toolEstimate + sourcesEstimate);
+  return Math.max(baseHeight, baseHeight + lineEstimate * 28 + sourcesEstimate);
 };
 
 const findOffsetIndex = (offsets: number[], target: number): number => {

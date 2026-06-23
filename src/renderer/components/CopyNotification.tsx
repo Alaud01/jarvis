@@ -4,23 +4,14 @@ const CopyNotification: React.FC = () => {
   const [show, setShow] = useState(false);
 
   useEffect(() => {
-    const handleSelection = () => {
-      const selection = window.getSelection();
-      const text = selection?.toString().trim();
-
-      if (text && text.length > 0) {
-        navigator.clipboard.writeText(text).then(() => {
-          setShow(true);
-        }).catch(err => {
-          console.error('Failed to copy:', err);
-        });
-      }
+    const handleCopy = () => {
+      setShow(true);
     };
 
-    document.addEventListener('mouseup', handleSelection);
+    document.addEventListener('copy', handleCopy);
 
     return () => {
-      document.removeEventListener('mouseup', handleSelection);
+      document.removeEventListener('copy', handleCopy);
     };
   }, []);
 

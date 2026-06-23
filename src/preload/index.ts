@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
@@ -70,11 +69,6 @@ contextBridge.exposeInMainWorld('assistant', {
     const listener = (_event: unknown, payload: StreamErrorEvent) => callback(payload);
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
-  },
-  onBrowserTraceEvent: (callback: (event: BrowserTraceEvent) => void) => {
-    const listener = (_event: any, event: BrowserTraceEvent) => callback(event);
-    ipcRenderer.on('browser-trace-event', listener);
-    return () => ipcRenderer.removeListener('browser-trace-event', listener);
   },
   onSearchSources: (callback: (event: SearchSourcesEvent) => void) => {
     const listener = (_event: any, event: SearchSourcesEvent) => callback(event);

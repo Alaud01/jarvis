@@ -7,7 +7,6 @@ import CopyNotification from './components/CopyNotification';
 import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
 import { ThemeProvider } from './context/ThemeContext';
-import type { BrowserLLMTraceStep, BrowserToolRun, BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
@@ -27,7 +26,6 @@ interface Message {
   sender: 'user' | 'assistant';
   timestamp: Date;
   isStreaming?: boolean;
-  browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
 }
@@ -52,7 +50,6 @@ interface SerializedMessage {
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
-  browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
 }
@@ -97,7 +94,6 @@ function serializeConversation(c: Conversation): SerializedConversation {
       text: m.text,
       sender: m.sender,
       timestamp: m.timestamp.toISOString(),
-      browserRuns: m.browserRuns,
       searchSources: m.searchSources,
       attachments: m.attachments,
     })),
@@ -124,7 +120,6 @@ function deserializeConversation(c: SerializedConversation): Conversation {
       text: m.text,
       sender: m.sender,
       timestamp: new Date(m.timestamp),
-      browserRuns: m.browserRuns,
       searchSources: m.searchSources,
       attachments: m.attachments,
     })),
@@ -208,7 +203,6 @@ function getConversationRevision(conversation: Conversation): string {
       messageHash
     );
     nextHash = hashString(message.text, nextHash);
-    nextHash = hashUnknown(message.browserRuns, nextHash);
     nextHash = hashUnknown(message.searchSources, nextHash);
     nextHash = hashUnknown(message.attachments, nextHash);
     return nextHash;
@@ -288,96 +282,6 @@ function toStreamMessage(message: Pick<Message, 'sender' | 'text' | 'attachments
   };
 }
 
-function mergeTraceStep(
-  steps: BrowserLLMTraceStep[],
-  incomingStep: BrowserLLMTraceStep
-): BrowserLLMTraceStep[] {
-  const existingIndex = steps.findIndex(step => step.stepIndex === incomingStep.stepIndex);
-  if (existingIndex === -1) {
-    return [...steps, incomingStep].sort((a, b) => a.stepIndex - b.stepIndex);
-  }
-
-  return steps.map((step, index) => (
-    index === existingIndex
-      ? {
-          ...step,
-          ...incomingStep,
-          actions: incomingStep.actions ?? step.actions,
-          results: incomingStep.results ?? step.results,
-        }
-      : step
-  ));
-}
-
-function applyBrowserTraceEventToRuns(
-  runs: BrowserToolRun[] | undefined,
-  event: BrowserTraceEvent,
-  textOffset: number
-): BrowserToolRun[] {
-  const existingRuns = runs ?? [];
-  const startedAt = event.event === 'started' ? event.timestamp : new Date().toISOString();
-  const existingRun = existingRuns.find(run => run.id === event.runId);
-  const run: BrowserToolRun = existingRun ?? {
-    id: event.runId,
-    status: event.status,
-    instruction: event.instruction ?? 'Browser task',
-    model: event.model,
-    mode: 'dom',
-    textOffset,
-    startedAt,
-    llmTrace: {
-      model: event.model ?? 'unknown',
-      provider: event.provider,
-      plannerModel: event.plannerModel,
-      useVision: event.useVision,
-      llmScreenshotSize: event.llmScreenshotSize,
-      instruction: event.instruction ?? 'Browser task',
-      startedAt,
-      steps: [],
-    },
-  };
-
-  const currentSteps = run.llmTrace?.steps ?? [];
-  const nextSteps = event.step ? mergeTraceStep(currentSteps, event.step) : currentSteps;
-  const lastStep = event.step ?? nextSteps[nextSteps.length - 1];
-  const isFinished = event.status !== 'running';
-
-  const nextRun: BrowserToolRun = {
-    ...run,
-    status: event.status,
-    instruction: event.instruction ?? run.instruction,
-    summary: event.summary ?? run.summary,
-    error: event.error ?? run.error,
-    model: event.model ?? run.model,
-    currentUrl: lastStep?.url ?? run.currentUrl,
-    pageTitle: lastStep?.pageTitle ?? run.pageTitle,
-    actionsTaken: event.steps ?? nextSteps.length,
-    textOffset: run.textOffset ?? textOffset,
-    startedAt: run.startedAt,
-    finishedAt: isFinished ? event.timestamp : run.finishedAt,
-    llmTrace: {
-      model: event.model ?? run.llmTrace?.model ?? 'unknown',
-      mode: run.llmTrace?.mode,
-      provider: event.provider ?? run.llmTrace?.provider,
-      plannerModel: event.plannerModel ?? run.llmTrace?.plannerModel,
-      useVision: event.useVision ?? run.llmTrace?.useVision,
-      llmScreenshotSize: event.llmScreenshotSize ?? run.llmTrace?.llmScreenshotSize,
-      systemPrompt: run.llmTrace?.systemPrompt,
-      instruction: event.instruction ?? run.llmTrace?.instruction ?? run.instruction,
-      startedAt: run.llmTrace?.startedAt ?? run.startedAt,
-      finishedAt: isFinished ? event.timestamp : run.llmTrace?.finishedAt,
-      steps: nextSteps,
-      error: event.error ?? run.llmTrace?.error,
-    },
-  };
-
-  const updatedRuns = existingRuns.some(existing => existing.id === event.runId)
-    ? existingRuns.map(existing => existing.id === event.runId ? nextRun : existing)
-    : [...existingRuns, nextRun];
-
-  return updatedRuns;
-}
-
 declare global {
   interface Window {
     assistant: {
@@ -392,7 +296,6 @@ declare global {
       onChunk: (callback: (event: StreamChunkEvent) => void) => () => void;
       onDone: (callback: (event: StreamEventContext) => void) => () => void;
       onError: (callback: (event: StreamErrorEvent) => void) => () => void;
-      onBrowserTraceEvent: (callback: (event: BrowserTraceEvent) => void) => () => void;
       onSearchSources: (callback: (event: SearchSourcesEvent) => void) => () => void;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
@@ -1001,26 +904,6 @@ const App: React.FC = () => {
       return streamingSessionsRef.current.get(assistantMessageId)?.conversationId ?? null;
     };
 
-    const handleBrowserTraceEvent = (event: BrowserTraceEvent) => {
-      if (!event.assistantMessageId) {
-        return;
-      }
-
-      const conversationId = getConversationIdForMessage(event.assistantMessageId);
-      if (!conversationId) {
-        return;
-      }
-
-      updateMessageInConversation(
-        conversationId,
-        event.assistantMessageId,
-        message => ({
-          ...message,
-          browserRuns: applyBrowserTraceEventToRuns(message.browserRuns, event, message.text.length),
-        })
-      );
-    };
-
     const handleSearchSources = (event: SearchSourcesEvent) => {
       const conversationId = getConversationIdForMessage(event.assistantMessageId);
       if (!conversationId) {
@@ -1047,10 +930,9 @@ const App: React.FC = () => {
     const chunkCleanup = window.assistant.onChunk(handleChunk);
     const doneCleanup = window.assistant.onDone(handleDone);
     const errorCleanup = window.assistant.onError(handleError);
-    const browserTraceCleanup = window.assistant.onBrowserTraceEvent(handleBrowserTraceEvent);
     const searchSourcesCleanup = window.assistant.onSearchSources(handleSearchSources);
 
-    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, browserTraceCleanup, searchSourcesCleanup];
+    cleanupFunctionsRef.current = [chunkCleanup, doneCleanup, errorCleanup, searchSourcesCleanup];
 
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
@@ -1244,6 +1126,7 @@ const App: React.FC = () => {
   }, [handleNewChat, handleDeleteConversation, currentConversationId]);
 
   const handleTabClose = useCallback((id: string, e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     setOpenTabIds(prev => {
       const newTabs = prev.filter(tabId => tabId !== id);
@@ -1273,11 +1156,21 @@ const App: React.FC = () => {
       return;
     }
 
+    flushStreamChunkBuffer(streamingMessage.id);
+    updateMessageInConversation(
+      currentConversationId,
+      streamingMessage.id,
+      message => ({ ...message, isStreaming: false })
+    );
+    unregisterStreamSession(streamingMessage.id);
+
     await window.assistant.stopStream({
       conversationId: currentConversationId,
       assistantMessageId: streamingMessage.id,
+    }).catch((error) => {
+      console.error('Error stopping stream:', error);
     });
-  }, [conversations, currentConversationId]);
+  }, [conversations, currentConversationId, flushStreamChunkBuffer, unregisterStreamSession, updateMessageInConversation]);
 
   const handleScrollToMessage = useCallback((messageId: string, headerIndex?: number) => {
     if (headerIndex !== undefined) {

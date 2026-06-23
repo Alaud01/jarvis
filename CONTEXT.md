@@ -66,7 +66,7 @@ _Avoid_: Polling window, edit history
 
 **Browser Control**:
 Jarvis capability for using a web browser as an interactive workspace under assistant direction.
-_Avoid_: browser-use, browser task
+_Avoid_: autonomous browser sidecar, browser task
 
 ## Relationships
 
@@ -109,4 +109,4 @@ _Avoid_: browser-use, browser task
 - "Dictionary entry" previously meant both recognition vocabulary and deterministic replacement; these are now distinct concepts.
 - "Correction" does not include ordinary rewrites for automatic learning; common-word and sentence-level changes require manual entry.
 - "Observed app" is evidence about where vocabulary appears, not ownership of the Vocabulary Entry.
-- "browser-use" previously referred both to the Python package and the product capability; the capability is now **Browser Control**.
+- The retired autonomous browser sidecar previously shared terminology with **Browser Control**; the product capability is now **Browser Control**.

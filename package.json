@@ -13,8 +13,7 @@
     "dev:all": "concurrently \"pnpm dev:vite\" \"pnpm dev:electron\"",
     "dev:vite": "vite",
     "dev:electron": "tsc -p tsconfig.node.json && wait-on http://localhost:5174 && electron .",
-    "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8765 --reload",
-    "start:browser": "cd browser-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8001 --reload"
+    "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8765 --reload"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -70,18 +69,6 @@
       "category": "public.app-category.productivity",
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
-    },
-    "extraResources": [
-      {
-        "from": "browser-service",
-        "to": "browser-service",
-        "filter": [
-          "**/*",
-          "!venv/**",
-          "!__pycache__/**",
-          "!*.pyc"
-        ]
-      }
-    ]
+    }
   }
 }

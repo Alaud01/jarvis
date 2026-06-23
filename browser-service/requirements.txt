@@ -1,7 +1,0 @@
-# Legacy Browser Use Service dependencies. Browser Control should move to
-# Electron/TypeScript orchestration; keep these only for the fallback path.
-browser-use>=0.12.9
-fastapi>=0.104.0
-uvicorn>=0.24.0
-python-multipart>=0.0.6
-playwright

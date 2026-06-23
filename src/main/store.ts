@@ -1,7 +1,6 @@
 import Store from 'electron-store';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BrowserToolRun } from '../shared/browser';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
 import type {
@@ -17,7 +16,6 @@ export interface SerializedMessage {
   text: string;
   sender: 'user' | 'assistant';
   timestamp: string;
-  browserRuns?: BrowserToolRun[];
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
 }
