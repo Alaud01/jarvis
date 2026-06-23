@@ -4,7 +4,13 @@ import path from 'node:path';
 import type { BrowserToolRun } from '../shared/browser';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
-import type { DictionaryEntry } from '../shared/dictionary';
+import type {
+  CorrectionObservation,
+  LegacyDictionaryEntry,
+  ReplacementRule,
+  VocabularyCandidate,
+  VocabularyEntry,
+} from '../shared/dictionary';
 
 export interface SerializedMessage {
   id: string;
@@ -49,7 +55,11 @@ interface StoreSchema {
   currentConversationId: string | null;
   opencodeGoApiKey: string;
   openRouterApiKey: string;
-  dictionaryEntries: DictionaryEntry[];
+  dictionaryEntries: LegacyDictionaryEntry[];
+  vocabularyEntries: VocabularyEntry[];
+  replacementRules: ReplacementRule[];
+  vocabularyCandidates: VocabularyCandidate[];
+  correctionObservations: CorrectionObservation[];
 }
 
 const store = new Store<StoreSchema>({
@@ -67,6 +77,10 @@ const store = new Store<StoreSchema>({
     opencodeGoApiKey: '',
     openRouterApiKey: '',
     dictionaryEntries: [],
+    vocabularyEntries: [],
+    replacementRules: [],
+    vocabularyCandidates: [],
+    correctionObservations: [],
   },
 }) as any;
 
@@ -103,6 +117,64 @@ function deleteConversationFile(id: string): void {
   } catch (error) {
     console.error(`Failed to delete conversation ${id}:`, error);
   }
+}
+
+function pruneConversationFiles(validIds: Set<string>): void {
+  try {
+    if (!fs.existsSync(conversationStorageDir)) {
+      return;
+    }
+
+    const validFileNames = new Set([...validIds].map(id => `${encodeURIComponent(id)}.json`));
+    for (const entry of fs.readdirSync(conversationStorageDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json') || validFileNames.has(entry.name)) {
+        continue;
+      }
+      fs.rmSync(path.join(conversationStorageDir, entry.name), { force: true });
+    }
+  } catch (error) {
+    console.error('Failed to prune orphaned conversation files:', error);
+  }
+}
+
+function pruneConversationMessageMap(validIds: Set<string>): void {
+  const messages = store.get('conversationMessages', {}) as Record<string, SerializedMessage[]>;
+  const nextMessages = Object.fromEntries(
+    Object.entries(messages).filter(([id]) => validIds.has(id)),
+  ) as Record<string, SerializedMessage[]>;
+
+  if (Object.keys(nextMessages).length !== Object.keys(messages).length) {
+    store.set('conversationMessages', nextMessages);
+  }
+}
+
+function pruneLegacyConversations(validIds: Set<string>): void {
+  const legacyConversations = loadLegacyConversations();
+  const nextConversations = legacyConversations.filter(conversation => validIds.has(conversation.id));
+
+  if (nextConversations.length !== legacyConversations.length) {
+    store.set('conversations', nextConversations);
+  }
+}
+
+function pruneConversationReferences(validIds: Set<string>): void {
+  const openTabIds = loadOpenTabIds();
+  const nextOpenTabIds = openTabIds.filter(id => validIds.has(id));
+  if (nextOpenTabIds.length !== openTabIds.length) {
+    store.set('openTabIds', nextOpenTabIds);
+  }
+
+  const currentConversationId = loadCurrentConversationId();
+  if (currentConversationId && !validIds.has(currentConversationId)) {
+    store.set('currentConversationId', nextOpenTabIds[0] ?? null);
+  }
+}
+
+function pruneDeletedConversationState(validIds: Set<string>): void {
+  pruneConversationFiles(validIds);
+  pruneConversationMessageMap(validIds);
+  pruneLegacyConversations(validIds);
+  pruneConversationReferences(validIds);
 }
 
 function conversationToMetadata(conversation: SerializedConversation): SerializedConversationMetadata {
@@ -157,6 +229,7 @@ function ensureConversationStorageMigrated(): void {
   store.set('conversationMessages', {});
   store.set('conversations', []);
   store.set('conversationMessageFilesMigrated', true);
+  pruneDeletedConversationState(new Set(nextMetadata.map(conversation => conversation.id)));
 }
 
 export function loadConversationMetadata(): SerializedConversationMetadata[] {
@@ -193,7 +266,9 @@ export function loadConversations(ids?: string[]): SerializedConversation[] {
 
 export function saveConversationMetadata(metadata: SerializedConversationMetadata[]): void {
   ensureConversationStorageMigrated();
+  const validIds = new Set(metadata.map(conversation => conversation.id));
   store.set('conversationMetadata', metadata);
+  pruneDeletedConversationState(validIds);
 }
 
 export function saveConversation(conversation: SerializedConversation): void {
@@ -212,21 +287,29 @@ export function loadLegacyConversations(): SerializedConversation[] {
 }
 
 export function saveConversations(conversations: SerializedConversation[]): void {
+  const validIds = new Set(conversations.map(conversation => conversation.id));
   store.set('conversationMetadata', conversations.map(conversationToMetadata));
   conversations.forEach(writeConversationFile);
   store.set('conversationMessages', {});
   store.set('conversations', []);
   store.set('conversationMessageFilesMigrated', true);
+  pruneDeletedConversationState(validIds);
 }
 
 export function deleteConversation(id: string): void {
   ensureConversationStorageMigrated();
   const metadata = loadConversationMetadata();
   const legacyConversations = loadLegacyConversations();
+  const conversationMessages = store.get('conversationMessages', {}) as Record<string, SerializedMessage[]>;
+  const nextMetadata = metadata.filter(c => c.id !== id);
+  const validIds = new Set(nextMetadata.map(conversation => conversation.id));
 
   deleteConversationFile(id);
-  store.set('conversationMetadata', metadata.filter(c => c.id !== id));
+  delete conversationMessages[id];
+  store.set('conversationMetadata', nextMetadata);
   store.set('conversations', legacyConversations.filter(c => c.id !== id));
+  store.set('conversationMessages', conversationMessages);
+  pruneConversationReferences(validIds);
 }
 
 export function loadFolders(): SerializedFolder[] {
@@ -242,13 +325,19 @@ export function deleteFolderAndConversations(id: string): void {
   const metadata = loadConversationMetadata();
   const deletedIds = new Set(metadata.filter(c => c.folderId === id).map(c => c.id));
   const legacyConversations = loadLegacyConversations();
+  const conversationMessages = store.get('conversationMessages', {}) as Record<string, SerializedMessage[]>;
+  const nextMetadata = metadata.filter(c => c.folderId !== id);
+  const validIds = new Set(nextMetadata.map(conversation => conversation.id));
 
   deletedIds.forEach(conversationId => {
     deleteConversationFile(conversationId);
+    delete conversationMessages[conversationId];
   });
 
-  store.set('conversationMetadata', metadata.filter(c => c.folderId !== id));
+  store.set('conversationMetadata', nextMetadata);
   store.set('conversations', legacyConversations.filter(c => c.folderId !== id));
+  store.set('conversationMessages', conversationMessages);
+  pruneConversationReferences(validIds);
   const folders: SerializedFolder[] = store.get('folders', []);
   store.set('folders', folders.filter(f => f.id !== id));
 }
@@ -301,12 +390,44 @@ export function saveCurrentConversationId(id: string | null): void {
   store.set('currentConversationId', id);
 }
 
-export function loadDictionaryEntries(): DictionaryEntry[] {
-  return store.get('dictionaryEntries', []) as DictionaryEntry[];
+export function loadDictionaryEntries(): LegacyDictionaryEntry[] {
+  return store.get('dictionaryEntries', []) as LegacyDictionaryEntry[];
 }
 
-export function saveDictionaryEntries(entries: DictionaryEntry[]): void {
+export function saveDictionaryEntries(entries: LegacyDictionaryEntry[]): void {
   store.set('dictionaryEntries', entries);
+}
+
+export function loadVocabularyEntries(): VocabularyEntry[] {
+  return store.get('vocabularyEntries', []) as VocabularyEntry[];
+}
+
+export function saveVocabularyEntries(entries: VocabularyEntry[]): void {
+  store.set('vocabularyEntries', entries);
+}
+
+export function loadReplacementRules(): ReplacementRule[] {
+  return store.get('replacementRules', []) as ReplacementRule[];
+}
+
+export function saveReplacementRules(rules: ReplacementRule[]): void {
+  store.set('replacementRules', rules);
+}
+
+export function loadVocabularyCandidates(): VocabularyCandidate[] {
+  return store.get('vocabularyCandidates', []) as VocabularyCandidate[];
+}
+
+export function saveVocabularyCandidates(candidates: VocabularyCandidate[]): void {
+  store.set('vocabularyCandidates', candidates);
+}
+
+export function loadCorrectionObservations(): CorrectionObservation[] {
+  return store.get('correctionObservations', []) as CorrectionObservation[];
+}
+
+export function saveCorrectionObservations(observations: CorrectionObservation[]): void {
+  store.set('correctionObservations', observations);
 }
 
 export default store;

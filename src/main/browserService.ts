@@ -1,3 +1,6 @@
+// Legacy Browser Use Service bridge.
+// New Browser Control should be owned by Electron/TypeScript with granular
+// browser tools. This bridge remains only for the autonomous fallback path.
 import { spawn, ChildProcess } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';

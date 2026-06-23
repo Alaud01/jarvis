@@ -121,16 +121,19 @@ class RefinementTests(unittest.TestCase):
         self.assertIn("preserve their spelling and casing", messages[0]["content"])
 
     def test_dictionary_replacement_preserves_exact_casing_and_boundaries(self):
-        entries = [main.VoiceDictionaryEntry(preferred="OpenAI", aliases=["open ai"])]
-        text, applied = main.apply_dictionary_entries("open ai and open air", entries)
+        entries = [main.VoiceDictionaryEntry(id="rule-openai", preferred="OpenAI", aliases=["open ai"])]
+        text, applied_rules = main.apply_dictionary_entries("open ai and open air", entries)
         self.assertEqual(text, "OpenAI and open air")
-        self.assertTrue(applied)
+        self.assertEqual(len(applied_rules), 1)
+        self.assertEqual(applied_rules[0].ruleId, "rule-openai")
+        self.assertEqual(applied_rules[0].start, 0)
+        self.assertEqual(applied_rules[0].end, len("OpenAI"))
 
-    def test_preferred_term_without_alias_enforces_casing(self):
+    def test_preferred_term_without_alias_is_vocabulary_not_replacement(self):
         entries = [main.VoiceDictionaryEntry(preferred="Jarvis", aliases=[])]
-        text, applied = main.apply_dictionary_entries("ask jarvis", entries)
-        self.assertEqual(text, "ask Jarvis")
-        self.assertTrue(applied)
+        text, applied_rules = main.apply_dictionary_entries("ask jarvis", entries)
+        self.assertEqual(text, "ask jarvis")
+        self.assertEqual(applied_rules, [])
 
     def test_dictionary_prefers_longest_alias(self):
         entries = [
@@ -139,7 +142,7 @@ class RefinementTests(unittest.TestCase):
         ]
         text, applied = main.apply_dictionary_entries("use wispr flow", entries)
         self.assertEqual(text, "use Wispr Flow")
-        self.assertTrue(applied)
+        self.assertEqual(len(applied), 1)
 
     def test_dictionary_edit_is_reported_on_refinement_fallback(self):
         context = main.VoiceContext(
@@ -186,7 +189,7 @@ class RefinementTests(unittest.TestCase):
         self.assertEqual(result.refinement_mode, "rule_fallback")
         self.assertEqual(result.applied_edits, ["self_correction"])
 
-    def test_openrouter_refinement_prioritizes_speed_without_reasoning_override(self):
+    def test_openrouter_refinement_uses_mercury_nitro_with_low_reasoning(self):
         response = FakeResponse(
             {
                 "choices": [
@@ -212,8 +215,8 @@ class RefinementTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
 
         self.assertEqual(result.text, "Hello, world.")
-        self.assertEqual(payload["model"], "openai/gpt-oss-120b")
-        self.assertNotIn("reasoning", payload)
+        self.assertEqual(payload["model"], "inception/mercury-2:nitro")
+        self.assertEqual(payload["reasoning"], {"effort": "low"})
         self.assertEqual(payload["provider"]["sort"], "latency")
         self.assertEqual(
             payload["provider"]["preferred_min_throughput"],

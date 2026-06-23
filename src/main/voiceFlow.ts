@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ipcMain, BrowserWindow } from 'electron';
 import { startRecording, stopRecording, requestMicrophoneAccess, cleanupAudioCapture } from './audioRecorder';
 import { getVoiceShortcutLabel, setupGlobalHotkey, setupLocalHotkey, teardownGlobalHotkey } from './hotkeyManager';
@@ -22,6 +23,20 @@ export type VoiceFlowResult = {
   raw_text?: string;
   refinement_mode?: string;
   applied_edits?: string[];
+  applied_rules?: Array<{
+    ruleId: string;
+    source: string;
+    replacement: string;
+    start: number;
+    end: number;
+  }>;
+  transcription_metadata?: {
+    provider?: string;
+    model?: string;
+    used_vocabulary_guidance?: boolean;
+    fallback_used?: boolean;
+    fallback_reason?: string | null;
+  };
   success: boolean;
   error?: string;
 };
@@ -165,6 +180,7 @@ async function stopAndProcess(): Promise<void> {
     }
 
     const result = await processVoiceFlow(audioBuffer, preRecordingContext);
+    const dictationId = randomUUID();
 
     if (result.success && result.text) {
       showOverlay('complete', result.text);
@@ -211,7 +227,11 @@ async function stopAndProcess(): Promise<void> {
 
         await typeTextInActiveApp(result.text);
         if (targetApp) {
-          void observePostInsertionCorrection(targetApp, result.text);
+          void observePostInsertionCorrection(targetApp, result.text, {
+            dictationId,
+            appliedRules: result.applied_rules,
+            transcriptionMetadata: result.transcription_metadata,
+          });
         }
       }
     } else if (!result.success && result.error) {

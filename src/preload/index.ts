@@ -3,7 +3,13 @@ import type { BrowserTraceEvent } from '../shared/browser';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
-import type { CreateDictionaryEntryInput, UpdateDictionaryEntryInput } from '../shared/dictionary';
+import type {
+  CreateDictionaryEntryInput,
+  CreateReplacementRuleInput,
+  UpdateDictionaryEntryInput,
+  UpdateReplacementRuleInput,
+  UpdateVocabularyCandidateInput,
+} from '../shared/dictionary';
 
 type TransferableMessagePort = NonNullable<Parameters<typeof ipcRenderer.postMessage>[2]>[number];
 
@@ -122,6 +128,11 @@ contextBridge.exposeInMainWorld('assistant', {
   dictionaryCreate: (input: CreateDictionaryEntryInput) => ipcRenderer.invoke('dictionary:create', input),
   dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => ipcRenderer.invoke('dictionary:update', id, input),
   dictionaryDelete: (id: string) => ipcRenderer.invoke('dictionary:delete', id),
+  dictionaryRuleCreate: (input: CreateReplacementRuleInput) => ipcRenderer.invoke('dictionary:rule-create', input),
+  dictionaryRuleUpdate: (id: string, input: UpdateReplacementRuleInput) => ipcRenderer.invoke('dictionary:rule-update', id, input),
+  dictionaryRuleDelete: (id: string) => ipcRenderer.invoke('dictionary:rule-delete', id),
+  dictionaryCandidateUpdate: (id: string, input: UpdateVocabularyCandidateInput) =>
+    ipcRenderer.invoke('dictionary:candidate-update', id, input),
   generateTitle: (message: string, model: string, provider: string) => ipcRenderer.invoke('generate-title', message, model, provider),
   setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

@@ -146,10 +146,10 @@ const PROCESSING_OPACITIES: PixelOpacityMap = {
 };
 
 const COMPLETE_OPACITIES: PixelOpacityMap = {
-  0: [0.25, 0.15, 1, 0.5],
-  1: [0.5, 0.25, 0.15, 1],
-  2: [1, 0.5, 0.25, 0.15],
-  3: [0.15, 1, 0.5, 0.25],
+  0: [0.25, 0, 1, 0.5],
+  1: [0.5, 0.25, 0, 1],
+  2: [1, 0.5, 0.25, 0],
+  3: [0, 1, 0.5, 0.25],
   4: [0.5, 1, 1, 1],
   5: [1, 0.5, 1, 1],
   6: [1, 1, 0.5, 1],
@@ -158,10 +158,10 @@ const COMPLETE_OPACITIES: PixelOpacityMap = {
   9: [1, 1, 0.5, 0.25],
   10: [0.25, 1, 1, 0.5],
   11: [0.5, 0.25, 1, 1],
-  12: [1, 0.5, 0.25, 0.15],
-  13: [0.15, 1, 0.5, 0.25],
-  14: [0.25, 0.15, 1, 0.5],
-  15: [0.5, 0.25, 0.15, 1],
+  12: [1, 0.5, 0.25, 0],
+  13: [0, 1, 0.5, 0.25],
+  14: [0.25, 0, 1, 0.5],
+  15: [0.5, 0.25, 0, 1],
 };
 
 const ERROR_OPACITIES: PixelOpacityMap = {
@@ -185,11 +185,31 @@ const ERROR_OPACITIES: PixelOpacityMap = {
 
 type PixelStageColors = { from: string; to: string; glow: string };
 
+function hslToHex(h: number, s: number, l: number): string {
+  const saturation = s / 100;
+  const lightness = l / 100;
+  const chroma = saturation * Math.min(lightness, 1 - lightness);
+  const channel = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const color = lightness - chroma * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color).toString(16).padStart(2, '0');
+  };
+  return `#${channel(0)}${channel(8)}${channel(4)}`;
+}
+
+// Match listening: full saturation, 63% / 58% lightness, warm hue shift on the gradient end.
+function buildPixelStageColors(hue: number, toHueShift = 22): PixelStageColors {
+  const from = hslToHex(hue, 100, 63);
+  const to = hslToHex((hue + toHueShift + 360) % 360, 100, 58);
+  return { from, to, glow: from };
+}
+
 const PIXEL_STAGE_COLORS: Record<'recording' | 'processing' | 'complete' | 'error', PixelStageColors> = {
   recording: { from: '#ff416c', to: '#ff4b2b', glow: '#ff416c' },
-  processing: { from: '#f6d365', to: '#fda085', glow: '#f6d365' },
-  complete: { from: '#1aad4f', to: '#33ff5c', glow: '#1aad4f' },
-  error: { from: '#7f1d1d', to: '#ef4444', glow: '#7f1d1d' },
+  // Keep both stops in the gold/yellow family (complete uses the same -20° shift within green).
+  processing: buildPixelStageColors(48, 12),
+  complete: buildPixelStageColors(145, -20),
+  error: buildPixelStageColors(0),
 };
 
 function pixelCellBackground(colors: PixelStageColors): string {
@@ -361,7 +381,7 @@ ${PIXEL_STAGE_STYLES}
 ${PIXEL_CELL_ANIMATION_RULES}
     @keyframes pixel-complete-fill {
       from {
-        opacity: 0.4;
+        opacity: 0;
         transform: scale(0.9);
       }
       45% {

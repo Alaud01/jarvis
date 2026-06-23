@@ -605,6 +605,13 @@ select option {
   display: inline;
 }
 
+.message-trail-bar-active {
+  background-color: var(--color-text-primary) !important;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--color-text-primary) 18%, transparent),
+    0 0 8px color-mix(in srgb, var(--color-text-primary) 42%, transparent);
+}
+
 .message-trail-bars-exit {
   animation: messageTrailBarsExit 180ms ease-in forwards;
 }
@@ -730,7 +737,7 @@ select option {
 }
 
 .trail-markdown-preview strong {
-  color: var(--color-text-primary);
+  color: inherit;
   font-weight: 700;
 }
 

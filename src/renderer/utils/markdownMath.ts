@@ -1,7 +1,12 @@
 const containsTexCommand = (value: string): boolean => /\\[a-zA-Z]+/.test(value);
 
+const containsProseWord = (value: string): boolean => /\b[A-Za-z]{2,}\b/.test(
+  value.replace(/\\[a-zA-Z]+/g, ''),
+);
+
 const containsMathOperator = (value: string): boolean => (
-  /[A-Za-z0-9)\]}]\s*(?:[=+\-*/^_<>]|<=|>=|!=)\s*[A-Za-z0-9([{]/.test(value)
+  !containsProseWord(value)
+  && /[A-Za-z0-9)\]}]\s*(?:[=+\-*/^_<>]|<=|>=|!=)\s*[A-Za-z0-9([{]/.test(value)
 );
 
 const isLikelyMath = (value: string): boolean => {
@@ -26,6 +31,42 @@ const isEscaped = (value: string, index: number): boolean => {
   return backslashCount % 2 === 1;
 };
 
+const isCurrencyDollarSign = (value: string, index: number): boolean => {
+  if (value[index] !== '$' || value[index + 1] === '$') {
+    return false;
+  }
+
+  const remaining = value.slice(index + 1);
+  const match = /^\d[\d,]*(?:\.\d+)?/.exec(remaining);
+
+  if (!match) {
+    return false;
+  }
+
+  const nextCharacter = remaining[match[0].length] ?? '';
+  const hasCurrencyFormatting = /[,.]/.test(match[0]);
+
+  if (/\s/.test(nextCharacter)) {
+    const nextNonWhitespace = remaining.slice(match[0].length).trimStart()[0] ?? '';
+
+    if (!hasCurrencyFormatting && /^[=+\-*/^_<>]$/.test(nextNonWhitespace)) {
+      return false;
+    }
+  }
+
+  const currencyBoundaryCharacters = new Set([')', '/', '.', '%', '*', '_', '~', ']', ',']);
+
+  return (
+    nextCharacter === ''
+    || /\s/.test(nextCharacter)
+    || /[A-Za-z]/.test(nextCharacter)
+    || currencyBoundaryCharacters.has(nextCharacter)
+    || nextCharacter === '-'
+    || nextCharacter === '–'
+    || nextCharacter === '—'
+  );
+};
+
 const protectNonMathDollarSigns = (value: string): string => {
   const dollarIndexes: number[] = [];
 
@@ -47,6 +88,10 @@ const protectNonMathDollarSigns = (value: string): string => {
   for (let index = 0; index < dollarIndexes.length - 1; index += 1) {
     const openingIndex = dollarIndexes[index];
     const closingIndex = dollarIndexes[index + 1];
+
+    if (isCurrencyDollarSign(value, openingIndex) || isCurrencyDollarSign(value, closingIndex)) {
+      continue;
+    }
 
     if (isLikelyMath(value.slice(openingIndex + 1, closingIndex))) {
       mathDollarIndexes.add(openingIndex);

@@ -523,7 +523,7 @@ const SearchSourcesOverflowMenu: React.FC<{
       />
       {isOpen && (
         <div className="absolute right-0 bottom-full z-20 mb-2 w-[440px] border border-border-primary bg-bg-secondary p-2 shadow-lg">
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.min(sources.length, 4)}, minmax(0, 1fr))` }}>
             {sources.map(source => (
               <a
                 key={source.url}

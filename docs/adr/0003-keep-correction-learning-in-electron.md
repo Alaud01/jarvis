@@ -1,0 +1,19 @@
+# Keep correction learning in Electron
+
+Jarvis will keep correction-learning decisions in the Electron/main app rather than the Python transcription service. The Python service may transcribe audio and expose low-level transcription metadata, including model-level use of Vocabulary Guidance, but Electron owns Observation Sessions, app context, edit detection, Vocabulary Candidate classification, Replacement Rule activation, Rule Application tracing, Rule Rejection, Rule Suspension, and user-facing confirmation. Replacement Rules stay post-transcription and are not passed into model biasing.
+
+Model-level Vocabulary Guidance will be built as a ranked per-dictation vocabulary pack rather than the user's entire vocabulary history. The pack should favor pinned/user-added entries, recently corrected entries, app-relevant entries, and frequently used global entries, while excluding inactive, rejected, or suspended candidates and Replacement Rule sources. The initial cap should be small, roughly 50-100 entries, to avoid noisy biasing.
+
+The existing Personal Dictionary will be migrated without losing entries. Existing preferred terms become Vocabulary Entries. Existing aliases become Replacement Rules linked to the preferred Vocabulary Entry, one rule per alias. Entries with no aliases become vocabulary-only entries. Existing learning entries remain pending unless they crossed the activation threshold and pass safety checks; aliases that are valid common words require manual review rather than automatic activation.
+
+Correction-learning notifications will be state-change driven rather than observation driven. Jarvis may show a non-blocking toast when Vocabulary Guidance is activated, an ambiguous Vocabulary Candidate needs confirmation, a Replacement Rule becomes active, or a Replacement Rule is suspended. Ordinary Correction Observations do not produce user-facing notifications by themselves.
+
+Correction Observations are retained as recent explainability and learning evidence rather than permanent user vocabulary. Vocabulary Entries and Replacement Rules persist until the user deletes, disables, or suspends them, while raw before/after observation snippets should age out or be reduced to aggregates after their review and learning value expires. The initial raw observation retention period is 30 days.
+
+The transcription provider chain will prefer local Parakeet 110M and fall back transparently to the existing OpenRouter Parakeet path when the local model is unavailable, fails, or misses its latency budget. Model loading may happen in the background, but active dictation should not wait indefinitely for a cold or slow local model. Active-dictation latency budgets are duration-aware: short dictations should use an approximately three-second budget, medium dictations may wait longer, and long dictations should show progress rather than silently feeling stuck. Transcription metadata will identify the provider, model, whether Vocabulary Guidance was available, whether fallback was used, and the fallback reason. This keeps correction learning from misattributing a failed vocabulary-guided local recognition attempt when the transcript actually came from an unguided fallback provider.
+
+Fallback is sequential rather than racing providers: Jarvis tries the local provider when it is ready and falls back only after failure or budget expiry. If the local model is cold, Jarvis uses OpenRouter immediately while warming the local model in the background.
+
+Once fallback text has been inserted, Jarvis will not automatically replace it with a later local result. Late local results may be retained for diagnostics or future quality analysis, but inserted text remains under the user's control after insertion.
+
+This keeps the transcription service mostly stateless and prevents model plumbing from owning app-specific personalization behavior.

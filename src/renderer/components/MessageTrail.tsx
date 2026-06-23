@@ -94,6 +94,27 @@ const getSourceHeaderIndex = (headers: HeaderEntry[], targetHeader: HeaderEntry)
   return headers.findIndex((header) => header === targetHeader);
 };
 
+const getActivePreviewHeaderSourceIndex = (
+  entry: AssistantTrailEntry,
+  activeTarget: ActiveTrailTarget | null
+): number | null => {
+  if (activeTarget?.messageId !== entry.messageId || activeTarget.headerIndex === undefined) {
+    return null;
+  }
+
+  const targetHeaderIndex = activeTarget.headerIndex;
+  return entry.previewHeaders.reduce<number | null>((activeSourceIndex, header) => {
+    const sourceHeaderIndex = getSourceHeaderIndex(entry.headers, header);
+    if (sourceHeaderIndex === -1 || sourceHeaderIndex > targetHeaderIndex) {
+      return activeSourceIndex;
+    }
+    if (activeSourceIndex === null || sourceHeaderIndex > activeSourceIndex) {
+      return sourceHeaderIndex;
+    }
+    return activeSourceIndex;
+  }, null);
+};
+
 const getPreview = (text: string, maxLength: number = 120): string => {
   let cleanText = text;
   cleanText = cleanText.replace(/(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/g, '');
@@ -127,7 +148,7 @@ const HEADER_INDENT: Record<number, string> = {
 const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => (
   <span className={`trail-markdown-preview ${className}`}>
     <ReactMarkdown
-      remarkPlugins={[[remarkMath, { singleDollarTextMath: true }], remarkGfm]}
+      remarkPlugins={[[remarkMath, { singleDollarTextMath: true }], [remarkGfm, { singleTilde: false }]]}
       rehypePlugins={[rehypeKatex]}
       components={{
         p: ({ children }) => <span>{children}</span>,
@@ -150,10 +171,11 @@ const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> =
 interface CollapsedTrailProps {
   messages: Message[];
   assistantEntries: AssistantTrailEntry[];
+  activeTarget: ActiveTrailTarget | null;
   onScrollToMessage: (messageId: string, headerIndex?: number) => void;
 }
 
-const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, onScrollToMessage }) => {
+const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, activeTarget, onScrollToMessage }) => {
   const entriesByMessageId = useMemo(() => {
     return new Map(assistantEntries.map((entry) => [entry.messageId, entry]));
   }, [assistantEntries]);
@@ -163,6 +185,11 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
       {messages.map((message) => {
         if (message.sender === 'assistant') {
           const entry = entriesByMessageId.get(message.id);
+          const activePreviewHeaderSourceIndex = entry
+            ? getActivePreviewHeaderSourceIndex(entry, activeTarget)
+            : null;
+          const isMessageActive = activeTarget?.messageId === message.id
+            && (activeTarget.headerIndex === undefined || activePreviewHeaderSourceIndex === null);
 
           return (
             <div
@@ -172,12 +199,13 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
             >
               <div className="flex items-center justify-start min-h-2.5 cursor-pointer group/bar">
                 <div
-                  className="w-5 h-[3px] bg-border-secondary rounded-[1px] transition-[width,background-color] duration-200 ease-in-out
-                    group-hover/bar:w-6 group-hover/bar:bg-text-tertiary"
+                  className={`w-5 h-[3px] bg-border-secondary rounded-[1px] transition-[width,background-color,box-shadow] duration-200 ease-in-out
+                    group-hover/bar:w-6 group-hover/bar:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
                 />
               </div>
               {entry?.previewHeaders.map((header) => {
                 const sourceHeaderIndex = getSourceHeaderIndex(entry.headers, header);
+                const isHeaderActive = activePreviewHeaderSourceIndex === sourceHeaderIndex;
 
                 return (
                   <div
@@ -189,8 +217,8 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
                     }}
                   >
                     <div
-                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary rounded-[1px] transition-[width,background-color] duration-200 ease-in-out
-                        ${HEADER_HOVER_WIDTHS[header.level]} group-hover/bar:bg-text-tertiary`}
+                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary rounded-[1px] transition-[width,background-color,box-shadow] duration-200 ease-in-out
+                        ${HEADER_HOVER_WIDTHS[header.level]} group-hover/bar:bg-text-tertiary ${isHeaderActive ? 'message-trail-bar-active' : ''}`}
                     />
                   </div>
                 );
@@ -199,6 +227,8 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
           );
         }
 
+        const isMessageActive = activeTarget?.messageId === message.id && activeTarget.headerIndex === undefined;
+
         return (
           <div
             key={message.id}
@@ -206,9 +236,9 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
             onClick={() => onScrollToMessage(message.id)}
           >
             <div
-              className={`w-3 h-[3px] bg-border-secondary transition-[width,background-color] duration-200 ease-in-out relative
+              className={`w-3 h-[3px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out relative
                 rounded-sm
-                group-hover:w-4 group-hover:bg-text-tertiary`}
+                group-hover:w-4 group-hover:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
             />
           </div>
         );
@@ -386,7 +416,8 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
         Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
           .map((element) => [element.dataset.messageId, element] as const)
       );
-      let activeMessage: ActiveTrailTarget | null = null;
+      let activeEntry: TrailEntry | null = null;
+      let activeMessageElement: HTMLElement | null = null;
       let activeHeader: ActiveTrailTarget | null = null;
 
       for (const entry of trailEntries) {
@@ -395,15 +426,17 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
 
         const messageTop = messageElement.getBoundingClientRect().top;
         if (messageTop <= readingLine) {
-          activeMessage = { messageId: entry.messageId };
+          activeEntry = entry;
+          activeMessageElement = messageElement;
         }
+      }
 
-        if (entry.sender !== 'assistant') continue;
-
-        const headerElements = Array.from(messageElement.querySelectorAll<HTMLElement>('h1, h2, h3'));
+      const activeMessage = activeEntry ? { messageId: activeEntry.messageId } : null;
+      if (activeEntry?.sender === 'assistant' && activeMessageElement) {
+        const headerElements = Array.from(activeMessageElement.querySelectorAll<HTMLElement>('h1, h2, h3'));
         headerElements.forEach((headerElement, headerIndex) => {
           if (headerElement.getBoundingClientRect().top <= readingLine) {
-            activeHeader = { messageId: entry.messageId, headerIndex };
+            activeHeader = { messageId: activeEntry.messageId, headerIndex };
           }
         });
       }
@@ -592,6 +625,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
           <CollapsedTrail
             messages={messages}
             assistantEntries={assistantEntries}
+            activeTarget={activeTarget}
             onScrollToMessage={onScrollToMessage}
           />
         </div>

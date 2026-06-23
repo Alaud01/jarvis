@@ -1,3 +1,9 @@
+"""Legacy browser-use LLM compatibility layer.
+
+These wrappers exist to keep the Python Browser Use Service running while
+Browser Control moves to Electron/TypeScript orchestration.
+"""
+
 import json
 import re
 from collections.abc import Mapping

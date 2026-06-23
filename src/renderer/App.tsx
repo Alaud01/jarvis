@@ -11,7 +11,14 @@ import type { BrowserLLMTraceStep, BrowserToolRun, BrowserTraceEvent } from '../
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
-import type { CreateDictionaryEntryInput, DictionaryEntry, UpdateDictionaryEntryInput } from '../shared/dictionary';
+import type {
+  CreateDictionaryEntryInput,
+  CreateReplacementRuleInput,
+  PersonalDictionaryState,
+  UpdateDictionaryEntryInput,
+  UpdateReplacementRuleInput,
+  UpdateVocabularyCandidateInput,
+} from '../shared/dictionary';
 import PersonalDictionary from './components/PersonalDictionary';
 
 interface Message {
@@ -418,10 +425,14 @@ declare global {
       storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
       storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
-      dictionaryList: () => Promise<DictionaryEntry[]>;
-      dictionaryCreate: (input: CreateDictionaryEntryInput) => Promise<DictionaryEntry>;
-      dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => Promise<DictionaryEntry>;
-      dictionaryDelete: (id: string) => Promise<{ success: boolean }>;
+      dictionaryList: () => Promise<PersonalDictionaryState>;
+      dictionaryCreate: (input: CreateDictionaryEntryInput) => Promise<PersonalDictionaryState>;
+      dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => Promise<PersonalDictionaryState>;
+      dictionaryDelete: (id: string) => Promise<PersonalDictionaryState>;
+      dictionaryRuleCreate: (input: CreateReplacementRuleInput) => Promise<PersonalDictionaryState>;
+      dictionaryRuleUpdate: (id: string, input: UpdateReplacementRuleInput) => Promise<PersonalDictionaryState>;
+      dictionaryRuleDelete: (id: string) => Promise<PersonalDictionaryState>;
+      dictionaryCandidateUpdate: (id: string, input: UpdateVocabularyCandidateInput) => Promise<PersonalDictionaryState>;
       generateTitle: (message: string, model: string, provider: string) => Promise<string>;
       setThemeBackground: (isDark: boolean) => void;
     };

@@ -122,7 +122,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
   return (
     <div className="marktext-content markdown-content text-text-primary">
       <ReactMarkdown
-        remarkPlugins={[[remarkMath, { singleDollarTextMath: true }], remarkGfm]}
+        remarkPlugins={[[remarkMath, { singleDollarTextMath: true }], [remarkGfm, { singleTilde: false }]]}
         rehypePlugins={[rehypeKatex]}
         components={{
           pre: PreBlock,

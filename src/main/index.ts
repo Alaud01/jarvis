@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
-import { app, BrowserWindow, Tray, nativeImage, Menu, ipcMain, shell, dialog } from 'electron';
+import { app, BrowserWindow, Tray, nativeImage, Menu, ipcMain, shell, dialog, session } from 'electron';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs/promises';
 import * as path from 'path';
 import { startPythonService, stopPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC, cleanupVoiceFlow } from './voiceFlow';
@@ -14,6 +15,7 @@ import {
   saveConversationMetadata,
   saveConversations,
   deleteConversation,
+  deleteFolderAndConversations,
   loadFolders,
   saveFolders,
   loadSelectedModel,
@@ -44,11 +46,21 @@ import type { ChatMessage, ToolDefinition, StreamChunk, ProviderInfo, ModelInfo 
 import { ATTACHMENT_DIALOG_FILTERS, readAttachments } from './attachmentService';
 import {
   createDictionaryEntry,
+  createReplacementRule,
   deleteDictionaryEntry,
+  deleteReplacementRule,
   listDictionaryEntries,
   updateDictionaryEntry,
+  updateReplacementRule,
+  updateVocabularyCandidate,
 } from './dictionaryService';
-import type { CreateDictionaryEntryInput, UpdateDictionaryEntryInput } from '../shared/dictionary';
+import type {
+  CreateDictionaryEntryInput,
+  CreateReplacementRuleInput,
+  UpdateDictionaryEntryInput,
+  UpdateReplacementRuleInput,
+  UpdateVocabularyCandidateInput,
+} from '../shared/dictionary';
 import { compactMessagesIfNeeded, estimateTotalTokens, getContextThresholdTokens } from './contextCompaction';
 
 dotenv.config({ quiet: true });
@@ -57,12 +69,22 @@ let tray: Tray | null = null;
 let mainWindow: BrowserWindow | null = null;
 let activeStreams = new Map<string, AbortController>();
 let isQuitting = false;
+let shutdownComplete = false;
+let shutdownPromise: Promise<void> | null = null;
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 5;
 const MAX_FETCH_URL_CALLS_PER_TURN = 5;
 const CHAT_MODEL_KEEP_ALIVE = '2m';
 const ONE_OFF_MODEL_KEEP_ALIVE = 0;
+const REGENERABLE_CACHE_PATHS = [
+  'Cache',
+  'Code Cache',
+  'GPUCache',
+  'DawnGraphiteCache',
+  'DawnWebGPUCache',
+  path.join('Service Worker', 'CacheStorage'),
+];
 
 interface SendMessageStreamRequest {
   conversationId: string;
@@ -141,7 +163,7 @@ const CHAT_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'browser_task',
-      description: 'Use a real visible browser window to complete an interactive website objective end-to-end: open pages, click, type, submit forms, play simple web games, dismiss dialogs, and inspect live page content. Provide one complete plain-English browser task for the full user objective, not a tiny first step. Do not send Playwright-style selector or method JSON.',
+      description: 'Legacy autonomous browser task fallback. Use a real visible browser window to complete an interactive website objective end-to-end: open pages, click, type, submit forms, play simple web games, dismiss dialogs, and inspect live page content. Provide one complete plain-English browser task for the full user objective, not a tiny first step. Do not send Playwright-style selector or method JSON.',
       parameters: {
         type: 'object',
         properties: {
@@ -177,7 +199,7 @@ async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> 
       'If fetch_url reports a 403, 429, CAPTCHA, verification, or anti-bot challenge, do not retry that URL; use another source or answer from search results.',
       'When you use tavily_search, include relevant Markdown links to the sources you relied on.',
       'Use the fetch_url tool first for public webpages when you only need to read page content, summarize it, or extract information such as headlines, links, prices, or article text.',
-      'Use the browser_task tool only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
+      'The browser_task tool is the legacy autonomous browser fallback. Use it only when a real browser is necessary, such as clicking, typing, submitting forms, logging in, following the current page state, or handling content that is unavailable through a simple fetch.',
       'Prefer one complete browser_task that covers the full interactive objective when possible, including navigation, clicks, typing, waiting, handling dialogs, and the final success condition. You may call browser_task again in the same turn if a follow-up step or retry is needed after reviewing the previous result.',
       'When web access is unnecessary, answer normally without calling a tool.',
       'After using a tool, answer the user with the result instead of repeating raw tool output verbatim.',
@@ -257,6 +279,22 @@ function logMainProcess(
   }
 
   console.log(label);
+}
+
+async function clearRegenerableAppCaches(): Promise<void> {
+  const userDataPath = app.getPath('userData');
+
+  await Promise.allSettled([
+    session.defaultSession.clearCache(),
+    ...REGENERABLE_CACHE_PATHS.map(relativePath =>
+      fs.rm(path.join(userDataPath, relativePath), { recursive: true, force: true }),
+    ),
+  ]).then(results => {
+    const failures = results.filter(result => result.status === 'rejected');
+    if (failures.length > 0) {
+      console.warn('[Main] Some app cache cleanup tasks failed:', failures);
+    }
+  });
 }
 
 function formatBrowserTaskResult(result: BrowserTaskResult): string {
@@ -406,8 +444,8 @@ function buildToolResultSynthesisMessages(
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: 1600,
+    height: 1000,
     show: false,
     frame: true,
     resizable: true,
@@ -935,10 +973,7 @@ ipcMain.handle('store:save-folders', async (_event, folders: unknown) => {
 });
 
 ipcMain.handle('store:delete-folder', async (_event, id: string) => {
-  const folderConversations = loadConversationMetadata().filter(c => c.folderId === id);
-  for (const c of folderConversations) {
-    await deleteConversation(c.id);
-  }
+  deleteFolderAndConversations(id);
   return { success: true };
 });
 
@@ -1011,8 +1046,23 @@ ipcMain.handle('dictionary:update', async (_event, id: string, input: UpdateDict
 });
 
 ipcMain.handle('dictionary:delete', async (_event, id: string) => {
-  deleteDictionaryEntry(id);
-  return { success: true };
+  return deleteDictionaryEntry(id);
+});
+
+ipcMain.handle('dictionary:rule-create', async (_event, input: CreateReplacementRuleInput) => {
+  return createReplacementRule(input);
+});
+
+ipcMain.handle('dictionary:rule-update', async (_event, id: string, input: UpdateReplacementRuleInput) => {
+  return updateReplacementRule(id, input);
+});
+
+ipcMain.handle('dictionary:rule-delete', async (_event, id: string) => {
+  return deleteReplacementRule(id);
+});
+
+ipcMain.handle('dictionary:candidate-update', async (_event, id: string, input: UpdateVocabularyCandidateInput) => {
+  return updateVocabularyCandidate(id, input);
 });
 
 ipcMain.handle('generate-title', async (_event, message: string, model: string, providerId: string) => {
@@ -1051,6 +1101,7 @@ app.whenReady().then(async () => {
     Menu.setApplicationMenu(Menu.buildFromTemplate([]));
   }
 
+  await clearRegenerableAppCaches();
   createTray();
   createWindow();
   
@@ -1083,14 +1134,43 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('before-quit', () => {
+async function shutdownApplicationServices(): Promise<void> {
+  const results = await Promise.allSettled([
+    cleanupVoiceFlow(),
+    stopBrowserService(),
+    stopPythonService(),
+  ]);
+
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      console.error('[Main] Failed to clean up a service during shutdown:', result.reason);
+    }
+  }
+}
+
+app.on('before-quit', (event) => {
   isQuitting = true;
+
+  // Electron does not await async event listeners. Hold the quit open until
+  // child services have actually stopped, otherwise Ctrl+C can orphan them.
+  if (shutdownComplete) {
+    return;
+  }
+
+  event.preventDefault();
+
+  if (!shutdownPromise) {
+    console.log('[Main] Stopping application services...');
+    shutdownPromise = shutdownApplicationServices().finally(() => {
+      shutdownComplete = true;
+      app.quit();
+    });
+  }
 });
 
-app.on('will-quit', async () => {
-  await cleanupVoiceFlow();
-  await stopBrowserService();
-  await stopPythonService();
-});
+// Development runners such as concurrently forward terminal signals directly
+// to Electron. Convert them into Electron's graceful quit path.
+process.on('SIGINT', () => app.quit());
+process.on('SIGTERM', () => app.quit());
 
 app.dock?.hide();

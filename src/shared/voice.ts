@@ -1,4 +1,4 @@
-import type { DictionaryVoiceEntry } from './dictionary';
+import type { DictionaryVoiceEntry, VocabularyVoiceEntry } from './dictionary';
 
 export type VoiceDestinationKind =
   | 'chat'
@@ -33,6 +33,7 @@ export type VoiceContext = {
   } | null;
   accessibilityStatus: VoiceAccessibilityStatus;
   dictionary: DictionaryVoiceEntry[];
+  vocabulary: VocabularyVoiceEntry[];
 };
 
 export const EMPTY_VOICE_CONTEXT: VoiceContext = {
@@ -41,4 +42,5 @@ export const EMPTY_VOICE_CONTEXT: VoiceContext = {
   field: null,
   accessibilityStatus: 'not_requested',
   dictionary: [],
+  vocabulary: [],
 };

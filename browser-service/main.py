@@ -1,3 +1,10 @@
+"""Legacy Browser Use Service.
+
+This sidecar runs the old autonomous browser-use task path. New Browser Control
+work should be orchestrated from Electron/TypeScript with granular browser tools;
+keep this service only as a fallback until the replacement path is complete.
+"""
+
 import asyncio
 import json
 import os

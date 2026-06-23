@@ -7,7 +7,7 @@ const CopyNotification: React.FC = () => {
     const handleSelection = () => {
       const selection = window.getSelection();
       const text = selection?.toString().trim();
-      
+
       if (text && text.length > 0) {
         navigator.clipboard.writeText(text).then(() => {
           setShow(true);
@@ -18,7 +18,7 @@ const CopyNotification: React.FC = () => {
     };
 
     document.addEventListener('mouseup', handleSelection);
-    
+
     return () => {
       document.removeEventListener('mouseup', handleSelection);
     };
@@ -36,7 +36,7 @@ const CopyNotification: React.FC = () => {
   if (!show) return null;
 
   return (
-    <div className="fixed top-4 right-4 z-50 bg-text-primary text-bg-primary px-3 py-1.5 font-mono text-[0.7rem] uppercase tracking-widest shadow-md">
+    <div className="fixed top-4 right-4 z-[300] bg-text-primary text-bg-primary px-3 py-1.5 font-mono text-[0.7rem] uppercase tracking-widest shadow-md">
       Copied
     </div>
   );

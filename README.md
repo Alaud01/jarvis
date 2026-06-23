@@ -8,14 +8,14 @@ macOS menu bar AI assistant with chat, voice input, web search, and browser auto
 - **React + TypeScript** — Chat UI
 - **Vite + Tailwind CSS** — Renderer build
 - **python-service** — Voice pipeline (VAD, OpenRouter STT and refinement)
-- **browser-service** — Playwright + browser-use agent
+- **browser-service** — Legacy Playwright + browser-use autonomous fallback
 
 ## Structure
 
 ```
 jarvis/
 ├── assets/              # Icons and fonts
-├── browser-service/     # Browser automation sidecar (port 8001)
+├── browser-service/     # Legacy browser-use sidecar (port 8001)
 ├── python-service/      # Voice flow sidecar (port 8765)
 ├── src/
 │   ├── main/            # Electron main process
@@ -63,4 +63,4 @@ Voice hotkey: **Cmd+Shift+Space** (registered via Electron global shortcuts).
 - **Main process** — Tray, providers (Ollama, OpenRouter, OpenCode Go), service orchestration
 - **Renderer** — Chat UI with streaming, attachments, browser traces
 - **python-service** — Spawned on app start for voice dictation
-- **browser-service** — Spawned on first browser automation task
+- **browser-service** — Legacy fallback spawned on first autonomous browser task
