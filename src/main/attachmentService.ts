@@ -42,6 +42,14 @@ const TEXT_FILE_NAMES = new Set([
   '.editorconfig',
 ]);
 
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
 export const ATTACHMENT_DIALOG_FILTERS = [
   {
     name: 'Supported files',
@@ -50,6 +58,7 @@ export const ATTACHMENT_DIALOG_FILTERS = [
       'txt', 'md', 'csv', 'tsv', 'json', 'xml', 'html', 'css',
       'yaml', 'yml', 'toml', 'sql', 'js', 'jsx', 'ts', 'tsx', 'py',
       'rb', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp', 'cs', 'sh',
+      'png', 'jpg', 'jpeg', 'webp', 'gif',
     ],
   },
   { name: 'All files', extensions: ['*'] },
@@ -111,6 +120,21 @@ async function readAttachment(filePath: string): Promise<FileAttachment> {
     throw new Error(`File is larger than the ${MAX_FILE_BYTES / (1024 * 1024)} MB upload limit.`);
   }
 
+  const imageMimeType = IMAGE_MIME_TYPES[extension];
+  if (imageMimeType) {
+    const base64 = await fs.readFile(filePath, 'base64');
+    return {
+      name,
+      extension,
+      size: stat.size,
+      content: `[Image attachment: ${name}]`,
+      truncated: false,
+      kind: 'image',
+      mimeType: imageMimeType,
+      base64,
+    };
+  }
+
   const extracted = await extractText(filePath, extension);
   const { content, truncated } = truncateContent(extracted.trim());
   if (!content) {
@@ -123,6 +147,7 @@ async function readAttachment(filePath: string): Promise<FileAttachment> {
     size: stat.size,
     content,
     truncated,
+    kind: 'text',
   };
 }
 

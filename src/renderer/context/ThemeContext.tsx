@@ -23,6 +23,29 @@ const defaultCustomColors: Record<string, string> = {
   '--color-accent-secondary-hover': '#db2777',
 };
 
+function loadCustomColors(): Record<string, string> {
+  if (typeof window === 'undefined') {
+    return defaultCustomColors;
+  }
+
+  const saved = localStorage.getItem(CUSTOM_COLORS_KEY);
+  if (!saved) {
+    return defaultCustomColors;
+  }
+
+  try {
+    const parsed = JSON.parse(saved);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return defaultCustomColors;
+    }
+    return { ...defaultCustomColors, ...parsed };
+  } catch (error) {
+    console.error('Failed to load custom theme colors:', error);
+    localStorage.removeItem(CUSTOM_COLORS_KEY);
+    return defaultCustomColors;
+  }
+}
+
 const getSystemTheme = (): 'light' | 'dark' => {
   if (typeof window !== 'undefined') {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -50,11 +73,7 @@ export const ThemeProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   });
 
   const [customColors, setCustomColorsState] = useState<Record<string, string>>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(CUSTOM_COLORS_KEY);
-      return saved ? { ...defaultCustomColors, ...JSON.parse(saved) } : defaultCustomColors;
-    }
-    return defaultCustomColors;
+    return loadCustomColors();
   });
 
   const isDark = resolvedTheme === 'dark';

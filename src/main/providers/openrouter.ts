@@ -48,9 +48,35 @@ interface OpenAIStreamChunk {
   choices?: OpenAIStreamChoice[];
 }
 
+type OpenAIMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
+
+function toImageDataUrl(base64: string, mimeType = 'image/png'): string {
+  return base64.startsWith('data:') ? base64 : `data:${mimeType};base64,${base64}`;
+}
+
+function convertContentToOpenAI(msg: ChatMessage): OpenAIMessageContent {
+  if (!msg.images?.length) {
+    return msg.content;
+  }
+
+  const content: Exclude<OpenAIMessageContent, string> = [];
+  if (msg.content) {
+    content.push({ type: 'text', text: msg.content });
+  }
+
+  msg.images.forEach((image, index) => {
+    content.push({
+      type: 'image_url',
+      image_url: { url: toImageDataUrl(image, msg.imageMimeTypes?.[index]) },
+    });
+  });
+
+  return content;
+}
+
 function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
   role: string;
-  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
+  content: OpenAIMessageContent;
   reasoning_content?: string;
   tool_calls?: Array<{
     type: 'function';
@@ -89,7 +115,7 @@ function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
 
     return {
       role: msg.role as string,
-      content: msg.content,
+      content: convertContentToOpenAI(msg),
       reasoning_content: msg.role === 'assistant' ? msg.thinking : undefined,
     };
   });

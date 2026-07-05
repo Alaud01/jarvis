@@ -219,9 +219,39 @@ function buildAnthropicHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+type OpenAIMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
+
+function toImageDataUrl(base64: string, mimeType = 'image/png'): string {
+  return base64.startsWith('data:') ? base64 : `data:${mimeType};base64,${base64}`;
+}
+
+function toImageBase64(image: string): string {
+  return image.startsWith('data:') ? image.split(',', 2)[1] ?? image : image;
+}
+
+function convertContentToOpenAI(msg: ChatMessage): OpenAIMessageContent {
+  if (!msg.images?.length) {
+    return msg.content;
+  }
+
+  const content: Exclude<OpenAIMessageContent, string> = [];
+  if (msg.content) {
+    content.push({ type: 'text', text: msg.content });
+  }
+
+  msg.images.forEach((image, index) => {
+    content.push({
+      type: 'image_url',
+      image_url: { url: toImageDataUrl(image, msg.imageMimeTypes?.[index]) },
+    });
+  });
+
+  return content;
+}
+
 function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
   role: string;
-  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
+  content: OpenAIMessageContent;
   reasoning_content?: string;
   tool_calls?: Array<{
     type: 'function';
@@ -260,7 +290,7 @@ function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
 
     return {
       role: msg.role as string,
-      content: msg.content,
+      content: convertContentToOpenAI(msg),
       reasoning_content: msg.role === 'assistant' ? msg.thinking : undefined,
     };
   });
@@ -328,6 +358,33 @@ function convertMessagesToAnthropic(
       converted.push({
         role: 'assistant',
         content: contentBlocks.length > 0 ? contentBlocks : msg.content,
+      });
+      continue;
+    }
+
+    if (msg.images?.length) {
+      const contentBlocks: Array<Record<string, unknown>> = [];
+      if (msg.content) {
+        contentBlocks.push({
+          type: 'text',
+          text: msg.content,
+        });
+      }
+
+      msg.images.forEach((image, index) => {
+        contentBlocks.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: msg.imageMimeTypes?.[index] ?? 'image/png',
+            data: toImageBase64(image),
+          },
+        });
+      });
+
+      converted.push({
+        role: msg.role as 'user',
+        content: contentBlocks,
       });
       continue;
     }

@@ -30,6 +30,8 @@ import {
   saveOpenTabIds,
   loadCurrentConversationId,
   saveCurrentConversationId,
+  loadConversationDrafts,
+  saveConversationDrafts,
 } from './store';
 import { fetchUrlContent, type FetchToolArgs, type FetchToolResult } from './fetchService';
 import { tavilySearch, toSearchSource, type TavilySearchToolArgs, type TavilySearchToolResult } from './tavilySearchService';
@@ -730,12 +732,24 @@ async function clearRegenerableAppCaches(): Promise<void> {
   await Promise.allSettled([
     session.defaultSession.clearCache(),
     ...REGENERABLE_CACHE_PATHS.map(relativePath =>
-      fs.rm(path.join(userDataPath, relativePath), { recursive: true, force: true }),
+      fs.rm(path.join(userDataPath, relativePath), {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      }),
     ),
   ]).then(results => {
     const failures = results.filter(result => result.status === 'rejected');
     if (failures.length > 0) {
-      console.warn('[Main] Some app cache cleanup tasks failed:', failures);
+      console.warn('[Main] Some app cache cleanup tasks failed:', failures.map(failure => {
+        const reason = failure.reason as NodeJS.ErrnoException;
+        return {
+          code: reason.code,
+          path: reason.path,
+          message: reason.message,
+        };
+      }));
     }
   });
 }
@@ -994,10 +1008,15 @@ function createWindow(): void {
   });
   
   setMainWindow(mainWindow);
+  attachMainWindowDiagnostics(mainWindow);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  mainWindow.once('ready-to-show', () => {
+    showMainWindow();
   });
 
   if (isDev) {
@@ -1012,8 +1031,41 @@ function createWindow(): void {
       return;
     }
     event.preventDefault();
-    mainWindow?.hide();
+    hideMainWindow();
   });
+}
+
+function attachMainWindowDiagnostics(window: BrowserWindow): void {
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error('[Renderer] Failed to load:', { errorCode, errorDescription, url: validatedURL });
+  });
+
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[Renderer] Process gone:', details);
+  });
+
+  window.webContents.on('unresponsive', () => {
+    console.error('[Renderer] Window became unresponsive');
+  });
+
+  window.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error('[Renderer] Preload failed:', { preloadPath, error });
+  });
+}
+
+function showMainWindow(): void {
+  if (process.platform === 'darwin') {
+    app.dock?.show();
+  }
+  mainWindow?.show();
+  mainWindow?.focus();
+}
+
+function hideMainWindow(): void {
+  mainWindow?.hide();
+  if (process.platform === 'darwin') {
+    app.dock?.hide();
+  }
 }
 
 function createTray(): void {
@@ -1024,7 +1076,7 @@ function createTray(): void {
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
   
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Open', click: () => mainWindow?.show() },
+    { label: 'Open', click: () => showMainWindow() },
     { type: 'separator' },
     { label: 'Quit', click: () => app.quit() }
   ]);
@@ -1034,9 +1086,9 @@ function createTray(): void {
   
   tray.on('click', () => {
     if (mainWindow?.isVisible()) {
-      mainWindow.hide();
+      hideMainWindow();
     } else {
-      mainWindow?.show();
+      showMainWindow();
     }
   });
 }
@@ -1605,6 +1657,15 @@ ipcMain.handle('store:save-current-conversation-id', async (_event, id: string |
   return { success: true };
 });
 
+ipcMain.handle('store:load-conversation-drafts', async () => {
+  return loadConversationDrafts();
+});
+
+ipcMain.handle('store:save-conversation-drafts', async (_event, drafts: Record<string, string>) => {
+  saveConversationDrafts(drafts);
+  return { success: true };
+});
+
 ipcMain.handle('dictionary:list', async () => {
   return listDictionaryEntries();
 });
@@ -1663,14 +1724,80 @@ ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
   }
 });
 
+function broadcastMenuAction(action: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send(`menu:${action}`);
+    }
+  }
+}
+
+function buildAppMenu(): Electron.MenuItemConstructorOptions[] {
+  const template: Electron.MenuItemConstructorOptions[] = [];
+
+  if (process.platform === 'darwin') {
+    template.push({ role: 'appMenu' });
+  }
+
+  template.push({
+    label: 'File',
+    submenu: [
+      {
+        label: 'New Conversation',
+        accelerator: 'CmdOrCtrl+N',
+        click: () => broadcastMenuAction('new-conversation'),
+      },
+      { type: 'separator' },
+      { role: 'close' },
+    ],
+  });
+
+  template.push({ role: 'editMenu' });
+
+  // View menu: standard items, with toggleDevTools only in dev.
+  const viewSubmenu: Electron.MenuItemConstructorOptions[] = [
+    { role: 'reload' },
+    { role: 'forceReload' },
+    { type: 'separator' },
+    { role: 'resetZoom' },
+    { role: 'zoomIn' },
+    { role: 'zoomOut' },
+    { type: 'separator' },
+  ];
+  if (isDev) {
+    viewSubmenu.push({ role: 'toggleDevTools' });
+  }
+  viewSubmenu.push({ type: 'separator' }, { role: 'togglefullscreen' });
+
+  template.push({
+    label: 'View',
+    submenu: viewSubmenu,
+  });
+
+  template.push({
+    role: 'windowMenu',
+    submenu: [
+      { role: 'minimize' },
+      { role: 'zoom' },
+      ...(process.platform === 'darwin' ? [{ role: 'front' } as Electron.MenuItemConstructorOptions] : []),
+    ],
+  });
+
+  return template;
+}
+
 app.whenReady().then(async () => {
   initializeProviders(
     loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY,
     loadOpenRouterApiKey() || process.env.OPENROUTER_API_KEY,
   );
 
-  if (process.platform === 'darwin' && !isDev) {
-    Menu.setApplicationMenu(Menu.buildFromTemplate([]));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenu()));
+
+  // Start in tray-only mode on macOS; the Dock icon appears when the main
+  // window is shown (ready-to-show) and disappears again when it's hidden.
+  if (process.platform === 'darwin') {
+    app.dock?.hide();
   }
 
   await clearRegenerableAppCaches();
@@ -1703,6 +1830,12 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('activate', () => {
+  if (process.platform === 'darwin') {
+    showMainWindow();
   }
 });
 
@@ -1744,5 +1877,3 @@ app.on('before-quit', (event) => {
 // to Electron. Convert them into Electron's graceful quit path.
 process.on('SIGINT', () => app.quit());
 process.on('SIGTERM', () => app.quit());
-
-app.dock?.hide();

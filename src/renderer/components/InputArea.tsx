@@ -3,6 +3,9 @@ import type { FileAttachment } from '../../shared/attachments';
 
 type VoiceState = 'idle' | 'recording' | 'processing';
 
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const SUPPORTED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
 interface VoiceTranscriptPayload {
   id: string;
   text: string;
@@ -20,6 +23,8 @@ interface ModelInfo {
 interface InputAreaProps {
   onSendMessage: (text: string, attachments?: FileAttachment[]) => void;
   onStopStreaming: () => void;
+  value: string;
+  onChange: (value: string) => void;
   isLoading?: boolean;
   disabled?: boolean;
   voiceTranscript?: VoiceTranscriptPayload | null;
@@ -51,6 +56,76 @@ function groupModelsByProvider(models: ModelInfo[]): Map<string, ModelInfo[]> {
     groups.set(model.provider, existing);
   }
   return groups;
+}
+
+function getExtensionFromFile(file: File): string {
+  const extension = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')).toLowerCase() : '';
+  if (extension) {
+    return extension;
+  }
+
+  switch (file.type) {
+    case 'image/png':
+      return '.png';
+    case 'image/jpeg':
+      return '.jpg';
+    case 'image/webp':
+      return '.webp';
+    case 'image/gif':
+      return '.gif';
+    default:
+      return '';
+  }
+}
+
+function getAttachmentImageSrc(attachment: FileAttachment): string | null {
+  if (attachment.kind !== 'image' || !attachment.base64) {
+    return null;
+  }
+
+  return `data:${attachment.mimeType ?? 'image/png'};base64,${attachment.base64}`;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error('Unable to read image data.'));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read image data.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function createImageAttachment(file: File, fallbackName: string): Promise<FileAttachment> {
+  if (!SUPPORTED_IMAGE_MIME_TYPES.has(file.type)) {
+    throw new Error('Unsupported image type.');
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    throw new Error(`Image is larger than the ${MAX_IMAGE_BYTES / (1024 * 1024)} MB upload limit.`);
+  }
+
+  const dataUrl = await readFileAsDataUrl(file);
+  const base64 = dataUrl.split(',', 2)[1];
+  if (!base64) {
+    throw new Error('Unable to read image data.');
+  }
+
+  const name = file.name || fallbackName;
+  return {
+    name,
+    extension: getExtensionFromFile(file),
+    size: file.size,
+    content: `[Image attachment: ${name}]`,
+    truncated: false,
+    kind: 'image',
+    mimeType: file.type,
+    base64,
+  };
 }
 
 const ModelSelector: React.FC<{
@@ -220,6 +295,8 @@ const ModelSelector: React.FC<{
 const InputArea: React.FC<InputAreaProps> = ({ 
   onSendMessage, 
   onStopStreaming, 
+  value,
+  onChange,
   isLoading = false, 
   disabled = false,
   voiceTranscript,
@@ -232,10 +309,10 @@ const InputArea: React.FC<InputAreaProps> = ({
   onRefreshModels,
   composeFocusKey = 0,
 }) => {
-  const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
   const [isReadingAttachments, setIsReadingAttachments] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastComposeFocusKeyRef = useRef<number | null>(null);
   const lastHandledVoiceIdRef = useRef<string | null>(null);
@@ -271,30 +348,30 @@ const InputArea: React.FC<InputAreaProps> = ({
       return;
     }
 
-    const nextInput = input ? `${input} ${text}` : text;
+    const nextInput = value ? `${value} ${text}` : text;
 
     if (voiceTranscript.autoSubmit && !isLoading && !disabled) {
-      setInput('');
+      onChange('');
       onSendMessage(nextInput, attachments);
       setAttachments([]);
       setAttachmentError('');
     } else {
-      setInput(nextInput);
+      onChange(nextInput);
     }
 
     onVoiceTextUsed();
-  }, [voiceTranscript, onVoiceTextUsed, input, attachments, isLoading, disabled, onSendMessage]);
+  }, [voiceTranscript, onVoiceTextUsed, value, attachments, isLoading, disabled, onSendMessage, onChange]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
-    if (!input) {
+    if (!value) {
       textarea.style.height = '24px';
       return;
     }
     textarea.style.height = 'auto';
     textarea.style.height = `${textarea.scrollHeight}px`;
-  }, [input]);
+  }, [value]);
 
   useEffect(() => {
     if (!window.assistant?.onVoiceFlowState) return;
@@ -307,10 +384,10 @@ const InputArea: React.FC<InputAreaProps> = ({
   }, []);
 
   const handleSend = () => {
-    const text = input.trim() || (attachments.length > 0 ? 'Please read and summarize the attached file(s).' : '');
+    const text = value.trim() || (attachments.length > 0 ? 'Please read and summarize the attached file(s).' : '');
     if (!text || isLoading) return;
     onSendMessage(text, attachments);
-    setInput('');
+    onChange('');
     setAttachments([]);
     setAttachmentError('');
   };
@@ -342,8 +419,112 @@ const InputArea: React.FC<InputAreaProps> = ({
     }
   };
 
+  const addFilesAsAttachments = async (files: File[], fallbackPrefix: string) => {
+    if (files.length === 0 || isReadingAttachments) {
+      return;
+    }
+
+    setAttachmentError('');
+    setIsReadingAttachments(true);
+
+    try {
+      const paths: string[] = [];
+      const blobImages: File[] = [];
+      const errors: string[] = [];
+
+      files.forEach((file, index) => {
+        let nativePath = (file as File & { path?: string }).path || '';
+        try {
+          nativePath = window.assistant?.getPathForFile?.(file) || nativePath;
+        } catch {
+          nativePath = nativePath || '';
+        }
+
+        if (nativePath) {
+          paths.push(nativePath);
+          return;
+        }
+
+        if (SUPPORTED_IMAGE_MIME_TYPES.has(file.type)) {
+          blobImages.push(file.name ? file : new File([file], `${fallbackPrefix}-${index + 1}${getExtensionFromFile(file)}`, { type: file.type }));
+          return;
+        }
+
+        errors.push(`${file.name || 'Pasted item'}: Only image clipboard items can be attached without a file path.`);
+      });
+
+      const [pathResult, imageResults] = await Promise.all([
+        paths.length > 0 && window.assistant?.readAttachments
+          ? window.assistant.readAttachments(paths)
+          : Promise.resolve({ attachments: [], errors: [] }),
+        Promise.allSettled(blobImages.map((file, index) => createImageAttachment(file, `${fallbackPrefix}-${index + 1}${getExtensionFromFile(file)}`))),
+      ]);
+
+      const imageAttachments: FileAttachment[] = [];
+      imageResults.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          imageAttachments.push(result.value);
+          return;
+        }
+
+        const reason = result.reason instanceof Error ? result.reason.message : 'Unable to read image.';
+        errors.push(`${blobImages[index]?.name || 'Image'}: ${reason}`);
+      });
+
+      setAttachments(current => [...current, ...pathResult.attachments, ...imageAttachments]);
+      setAttachmentError([...pathResult.errors, ...errors].join(' '));
+    } catch (error) {
+      setAttachmentError(error instanceof Error ? error.message : 'Unable to attach files.');
+    } finally {
+      setIsReadingAttachments(false);
+    }
+  };
+
   const handleRemoveAttachment = (index: number) => {
     setAttachments(current => current.filter((_, currentIndex) => currentIndex !== index));
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const fileItems = Array.from(e.clipboardData.items)
+      .filter(item => item.kind === 'file')
+      .map(item => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const files = fileItems.length > 0 ? fileItems : Array.from(e.clipboardData.files);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    e.preventDefault();
+    void addFilesAsAttachments(files, 'pasted-image');
+  };
+
+  const hasDraggedFiles = (dataTransfer: DataTransfer) => Array.from(dataTransfer.types).includes('Files');
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(e.dataTransfer)) {
+      return;
+    }
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+      setIsDragOver(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!hasDraggedFiles(e.dataTransfer)) {
+      return;
+    }
+
+    e.preventDefault();
+    setIsDragOver(false);
+    void addFilesAsAttachments(Array.from(e.dataTransfer.files), 'dropped-image');
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -372,9 +553,14 @@ const InputArea: React.FC<InputAreaProps> = ({
   const isDisabled = isLoading || disabled || voiceState === 'processing';
 
   return (
-    <div className="pb-6 bg-bg-primary shrink-0">
+    <div
+      className="pb-6 bg-bg-primary shrink-0"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="max-w-200 mx-auto">
-        <div className="bg-transparent border border-border-primary px-3 py-2 transition-all duration-150 focus-within:border-text-primary">
+        <div className={`bg-transparent border px-3 py-2 transition-all duration-150 focus-within:border-text-primary ${isDragOver ? 'border-text-primary bg-bg-secondary' : 'border-border-primary'}`}>
           {attachments.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap mb-2">
               {attachments.map((attachment, index) => (
@@ -383,6 +569,13 @@ const InputArea: React.FC<InputAreaProps> = ({
                   className="inline-flex items-center gap-2 border border-border-secondary px-2 py-1 font-mono text-[0.65rem] text-text-secondary"
                   title={attachment.truncated ? 'Extracted text was truncated for model context' : attachment.name}
                 >
+                  {getAttachmentImageSrc(attachment) && (
+                    <img
+                      src={getAttachmentImageSrc(attachment) ?? undefined}
+                      alt=""
+                      className="h-10 w-10 object-cover border border-border-secondary"
+                    />
+                  )}
                   {attachment.name}{attachment.truncated ? ' (trimmed)' : ''}
                   <button
                     type="button"
@@ -402,8 +595,9 @@ const InputArea: React.FC<InputAreaProps> = ({
           <textarea
             ref={textareaRef}
             className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-[0.875rem] leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onPaste={handlePaste}
             onKeyDown={handleKeyDown}
             placeholder="Compose your thought..."
             rows={1}
@@ -456,7 +650,7 @@ const InputArea: React.FC<InputAreaProps> = ({
               <button
                 className="py-1 px-4 border border-text-primary bg-text-primary text-bg-primary font-mono text-[0.575rem] uppercase tracking-widest cursor-pointer transition-all duration-[150ms] hover:not-disabled:bg-transparent hover:not-disabled:text-text-primary disabled:opacity-30 disabled:cursor-not-allowed"
                 onClick={isLoading ? onStopStreaming : handleSend}
-                disabled={!isLoading && ((!input.trim() && attachments.length === 0) || disabled)}
+                disabled={!isLoading && ((!value.trim() && attachments.length === 0) || disabled)}
               >
                 {isLoading ? 'Stop' : 'Send'}
               </button>

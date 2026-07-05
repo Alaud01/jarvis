@@ -1,9 +1,17 @@
 import { BrowserWindow, screen } from 'electron';
 
+type OverlayAnchorBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 let overlayWindow: BrowserWindow | null = null;
 let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 let overlayWidthAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let overlayReady = false;
+let overlayAnchorBounds: OverlayAnchorBounds | null = null;
 let pendingOverlayPayload: {
   payload: ReturnType<typeof getOverlayPayload>;
   state: OverlayState;
@@ -511,9 +519,22 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function getOverlayPosition(width: number): { x: number; y: number } {
+function getOverlayDisplay() {
+  if (overlayAnchorBounds) {
+    return screen.getDisplayMatching(overlayAnchorBounds);
+  }
+
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  if (focusedWindow && focusedWindow !== overlayWindow && !focusedWindow.isDestroyed()) {
+    return screen.getDisplayMatching(focusedWindow.getBounds());
+  }
+
   const cursor = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursor);
+  return screen.getDisplayNearestPoint(cursor);
+}
+
+function getOverlayPosition(width: number): { x: number; y: number } {
+  const display = getOverlayDisplay();
   const { width: screenWidth } = display.workAreaSize;
   const wa = display.workArea;
   return {
@@ -621,6 +642,24 @@ function revealOverlay(
   }
 }
 
+function recreateHiddenOverlayForCurrentMacSpace(): void {
+  if (
+    process.platform !== 'darwin' ||
+    !overlayWindow ||
+    overlayWindow.isDestroyed() ||
+    overlayWindow.isVisible()
+  ) {
+    return;
+  }
+
+  // Hidden macOS windows can remain tied to the Space where they were created.
+  stopOverlayWidthAnimation();
+  const previousOverlayWindow = overlayWindow;
+  overlayWindow = null;
+  overlayReady = false;
+  previousOverlayWindow.close();
+}
+
 function createOverlayWindow(
   state: OverlayState,
   transcript?: string,
@@ -658,7 +697,10 @@ function createOverlayWindow(
     },
   });
 
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayWindow.setVisibleOnAllWorkspaces(true, {
+    visibleOnFullScreen: true,
+    skipTransformProcessType: process.platform === 'darwin',
+  });
   overlayWindow.setIgnoreMouseEvents(true);
   overlayWindow.setAlwaysOnTop(true, 'floating', 1);
   hideOverlayWindowButtons(overlayWindow);
@@ -689,7 +731,22 @@ function createOverlayWindow(
 }
 
 export function preloadOverlay(): void {
+  if (process.platform === 'darwin') {
+    return;
+  }
+
   createOverlayWindow('recording', undefined, undefined, false);
+}
+
+export function setOverlayAnchorBounds(bounds: OverlayAnchorBounds | null): void {
+  overlayAnchorBounds = bounds;
+  if (!overlayWindow || overlayWindow.isDestroyed() || !overlayWindow.isVisible()) {
+    return;
+  }
+
+  const currentBounds = overlayWindow.getBounds();
+  const pos = getOverlayPosition(currentBounds.width);
+  overlayWindow.setBounds({ x: pos.x, y: pos.y, width: currentBounds.width, height: OVERLAY_HEIGHT });
 }
 
 function showOverlayWithoutFocus(win: BrowserWindow): void {
@@ -731,6 +788,8 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
   }
+
+  recreateHiddenOverlayForCurrentMacSpace();
 
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     pendingOverlayPayload = { payload, state, transcript, errorMessage };

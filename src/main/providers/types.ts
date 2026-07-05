@@ -13,6 +13,7 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   images?: string[];
+  imageMimeTypes?: string[];
   thinking?: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;

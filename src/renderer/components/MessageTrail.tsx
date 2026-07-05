@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -47,10 +47,49 @@ interface ActiveTrailTarget {
   headerIndex?: number;
 }
 
+// Adaptive collapsed-trail reduction state.
+// step 1: all header levels shown, all messages
+// step 2: drop h3
+// step 3: drop h2+h3 (only h1 bars)
+// step 4: no header bars, just the one message-level bar each
+// step 5: only N messages kept, centered on the active message
+type ReductionStep = 1 | 2 | 3 | 4 | 5;
+
+interface ReductionState {
+  step: ReductionStep;
+  maxHeaderLevel: 3 | 2 | 1 | 0;
+  messageKeepRange: { start: number; end: number } | null;
+}
+
+const MAX_HEADER_LEVEL_FOR_STEP: Record<ReductionStep, 3 | 2 | 1 | 0> = {
+  1: 3,
+  2: 2,
+  3: 1,
+  4: 0,
+  5: 0,
+};
+
+// Default (step 1, everything fits) — used as the initial state and whenever
+// content fits without any trimming.
+const FULL_REDUCTION: ReductionState = {
+  step: 1,
+  maxHeaderLevel: 3,
+  messageKeepRange: null,
+};
+
 const MAX_PREVIEW_HEADERS = 9;
 const ACTIVE_READING_OFFSET = 56;
 const TRAIL_COLLAPSE_ANIMATION_MS = 220;
 const TRAIL_HOVER_RECHECK_MS = 300;
+const EXPANDED_PANEL_VERTICAL_MARGIN = 12;
+
+// Adaptive collapsed-trail reduction: row-height estimates (in px) used to
+// compute whether content fits without scrolling. Calibrated once from the
+// real DOM on mount; these are the Tailwind-derived fallbacks.
+const MSG_ROW_HEIGHT_FALLBACK = 10;
+const HEADER_ROW_HEIGHT_FALLBACK = 6;
+const ROW_GAP_FALLBACK = 2;
+const COLLAPSED_PADDING_FALLBACK = 8;
 
 const parseHeaders = (text: string): HeaderEntry[] => {
   let cleanText = text;
@@ -94,17 +133,22 @@ const getSourceHeaderIndex = (headers: HeaderEntry[], targetHeader: HeaderEntry)
   return headers.findIndex((header) => header === targetHeader);
 };
 
-const getActivePreviewHeaderSourceIndex = (
-  entry: AssistantTrailEntry,
-  activeTarget: ActiveTrailTarget | null
+// Like getActivePreviewHeaderSourceIndex but operates on an arbitrary filtered
+// header list (the headers actually displayed after reduction). When the
+// active header's level has been dropped entirely, returns null so the caller
+// falls back to highlighting the message-level bar.
+const getActiveDisplayHeaderSourceIndex = (
+  fullHeaders: HeaderEntry[],
+  displayHeaders: HeaderEntry[],
+  activeTarget: ActiveTrailTarget | null,
+  messageId: string
 ): number | null => {
-  if (activeTarget?.messageId !== entry.messageId || activeTarget.headerIndex === undefined) {
+  if (activeTarget?.messageId !== messageId || activeTarget.headerIndex === undefined) {
     return null;
   }
-
   const targetHeaderIndex = activeTarget.headerIndex;
-  return entry.previewHeaders.reduce<number | null>((activeSourceIndex, header) => {
-    const sourceHeaderIndex = getSourceHeaderIndex(entry.headers, header);
+  return displayHeaders.reduce<number | null>((activeSourceIndex, header) => {
+    const sourceHeaderIndex = getSourceHeaderIndex(fullHeaders, header);
     if (sourceHeaderIndex === -1 || sourceHeaderIndex > targetHeaderIndex) {
       return activeSourceIndex;
     }
@@ -145,6 +189,15 @@ const HEADER_INDENT: Record<number, string> = {
   3: 'pl-9',
 };
 
+// Transition classes for smoothly collapsing a trail row when the reduction
+// level drops it. Visible rows keep their natural min-height + a generous
+// max-height; hidden rows collapse to 0 and fade out. Spacing is done with
+// per-row bottom margin (transitioned) rather than flex gap, so a hidden row
+// contributes no vertical space once collapsed.
+const ROW_TRANSITION = 'overflow-hidden transition-[min-height,max-height,opacity,margin-bottom] duration-200 ease-in-out';
+const ROW_SPACING_VISIBLE = 'mb-0.5';
+const ROW_SPACING_HIDDEN = 'mb-0';
+
 const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => (
   <span className={`trail-markdown-preview ${className}`}>
     <ReactMarkdown
@@ -172,46 +225,87 @@ interface CollapsedTrailProps {
   messages: Message[];
   assistantEntries: AssistantTrailEntry[];
   activeTarget: ActiveTrailTarget | null;
+  reduction: ReductionState;
   onScrollToMessage: (messageId: string, headerIndex?: number) => void;
 }
 
-const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, activeTarget, onScrollToMessage }) => {
+const MSG_ROW_VISIBLE_CLASS = 'min-h-2.5 max-h-8 opacity-100';
+const MSG_ROW_HIDDEN_CLASS = 'min-h-0 max-h-0 opacity-0';
+const HDR_ROW_VISIBLE_CLASS = 'min-h-1.5 max-h-6 opacity-100';
+const HDR_ROW_HIDDEN_CLASS = 'min-h-0 max-h-0 opacity-0';
+
+const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, activeTarget, reduction, onScrollToMessage }) => {
   const entriesByMessageId = useMemo(() => {
     return new Map(assistantEntries.map((entry) => [entry.messageId, entry]));
   }, [assistantEntries]);
 
+  // Precompute which preview headers are visible at the current reduction
+  // level. We render ALL preview headers for every message, but hidden ones
+  // collapse (height->0, opacity->0) with a CSS transition so dropping a
+  // header level animates instead of popping.
+  const visibleFlagsByMessageId = useMemo(() => {
+    const map = new Map<string, boolean[]>();
+    const maxLevel = reduction.maxHeaderLevel;
+    for (const entry of assistantEntries) {
+      map.set(
+        entry.messageId,
+        entry.previewHeaders.map((header) => maxLevel === 0 ? false : header.level <= maxLevel)
+      );
+    }
+    return map;
+  }, [assistantEntries, reduction.maxHeaderLevel]);
+
+  const offset = reduction.messageKeepRange?.start ?? 0;
+
   return (
-    <div className="flex flex-col gap-0.5">
-      {messages.map((message) => {
+    <div className="flex flex-col">
+      {messages.map((message, messageIndex) => {
+        const inRange = !reduction.messageKeepRange
+          || (messageIndex >= reduction.messageKeepRange.start && messageIndex < reduction.messageKeepRange.end);
+
         if (message.sender === 'assistant') {
           const entry = entriesByMessageId.get(message.id);
-          const activePreviewHeaderSourceIndex = entry
-            ? getActivePreviewHeaderSourceIndex(entry, activeTarget)
+          const visibleFlags = entry ? (visibleFlagsByMessageId.get(message.id) ?? []) : [];
+          // Active highlight runs over the currently-visible (not-yet-collapsed)
+          // header rows so a dropped active header cleanly falls back to the bar.
+          const visibleHeaders = entry
+            ? entry.previewHeaders.filter((_, i) => visibleFlags[i])
+            : [];
+          const activePreviewHeaderSourceIndex = entry && inRange
+            ? getActiveDisplayHeaderSourceIndex(entry.headers, visibleHeaders, activeTarget, message.id)
             : null;
-          const isMessageActive = activeTarget?.messageId === message.id
+          const isMessageActive = inRange && activeTarget?.messageId === message.id
             && (activeTarget.headerIndex === undefined || activePreviewHeaderSourceIndex === null);
 
           return (
             <div
               key={message.id}
               className="flex flex-col"
-              onClick={() => onScrollToMessage(message.id)}
+              onClick={() => inRange && onScrollToMessage(message.id)}
             >
-              <div className="flex items-center justify-start min-h-2.5 cursor-pointer group/bar">
+              <div
+                className={`flex items-center justify-start cursor-pointer group/bar ${ROW_TRANSITION} ${
+                  inRange ? `${MSG_ROW_VISIBLE_CLASS} ${ROW_SPACING_VISIBLE}` : `${MSG_ROW_HIDDEN_CLASS} ${ROW_SPACING_HIDDEN}`
+                }`}
+              >
                 <div
                   className={`w-5 h-[3px] bg-border-secondary rounded-[1px] transition-[width,background-color,box-shadow] duration-200 ease-in-out
                     group-hover/bar:w-6 group-hover/bar:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
                 />
               </div>
-              {entry?.previewHeaders.map((header) => {
+              {entry?.previewHeaders.map((header, i) => {
                 const sourceHeaderIndex = getSourceHeaderIndex(entry.headers, header);
-                const isHeaderActive = activePreviewHeaderSourceIndex === sourceHeaderIndex;
+                const visible = visibleFlags[i];
+                const isHeaderActive = visible && inRange && activePreviewHeaderSourceIndex === sourceHeaderIndex;
 
                 return (
                   <div
                     key={`${message.id}-h-${sourceHeaderIndex}`}
-                    className="flex items-center justify-start min-h-1.5 cursor-pointer group/bar"
+                    className={`flex items-center justify-start cursor-pointer group/bar ${ROW_TRANSITION} ${
+                      visible ? `${HDR_ROW_VISIBLE_CLASS} ${ROW_SPACING_VISIBLE}` : `${HDR_ROW_HIDDEN_CLASS} ${ROW_SPACING_HIDDEN}`
+                    }`}
                     onClick={(e) => {
+                      if (!visible || !inRange) return;
                       e.stopPropagation();
                       onScrollToMessage(message.id, sourceHeaderIndex);
                     }}
@@ -227,13 +321,15 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
           );
         }
 
-        const isMessageActive = activeTarget?.messageId === message.id && activeTarget.headerIndex === undefined;
+        const isMessageActive = inRange && activeTarget?.messageId === message.id && activeTarget.headerIndex === undefined;
 
         return (
           <div
             key={message.id}
-            className="flex items-center justify-end min-h-2.5 cursor-pointer group"
-            onClick={() => onScrollToMessage(message.id)}
+            className={`flex items-center justify-end cursor-pointer group ${ROW_TRANSITION} ${
+              inRange ? `${MSG_ROW_VISIBLE_CLASS} ${ROW_SPACING_VISIBLE}` : `${MSG_ROW_HIDDEN_CLASS} ${ROW_SPACING_HIDDEN}`
+            }`}
+            onClick={() => inRange && onScrollToMessage(message.id)}
           >
             <div
               className={`w-3 h-[3px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out relative
@@ -251,6 +347,11 @@ interface ExpandedTrailProps {
   trailEntries: TrailEntry[];
   activeTarget: ActiveTrailTarget | null;
   onScrollToMessage: (messageId: string, headerIndex?: number) => void;
+}
+
+interface ExpandedPanelFrame {
+  top: number;
+  height: number;
 }
 
 const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarget, onScrollToMessage }) => {
@@ -371,6 +472,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsing, setIsCollapsing] = useState(false);
   const [activeTarget, setActiveTarget] = useState<ActiveTrailTarget | null>(null);
+  const [expandedPanelFrame, setExpandedPanelFrame] = useState<ExpandedPanelFrame | null>(null);
   const collapseTimeoutRef = useRef<number | null>(null);
   const hoverRecheckTimeoutRef = useRef<number | null>(null);
   const collapseFinishedRef = useRef(false);
@@ -388,6 +490,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
         sender: message.sender,
         headers,
         previewHeaders: getPreviewHeaders(headers),
+        // Full header list kept for the expanded panel and active-header logic.
         previewText: getPreview(message.text),
         isStreaming: message.isStreaming,
       };
@@ -404,6 +507,116 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
         isStreaming,
       }));
   }, [trailEntries]);
+
+  // Adaptive collapsed-trail reduction state. Computed synchronously after
+  // render so there is no visible overflow flash; falls back gracefully when
+  // content fits (FULL_REDUCTION = everything shown, current behavior).
+  const [reduction, setReduction] = useState<ReductionState>(FULL_REDUCTION);
+  const [containerHeight, setContainerHeight] = useState(0);
+  const metricsRef = useRef({
+    msgRowHeight: MSG_ROW_HEIGHT_FALLBACK,
+    headerRowHeight: HEADER_ROW_HEIGHT_FALLBACK,
+    rowGap: ROW_GAP_FALLBACK,
+    padding: COLLAPSED_PADDING_FALLBACK,
+    calibrated: false,
+  });
+
+  // Total collapsed content height (px) for a given reduction step. Visible
+  // rows contribute their height plus a bottom margin (rowGap); hidden rows
+  // contribute 0 height and 0 margin. The last visible row still carries its
+  // margin (over-estimate by one gap; harmless — prefers trimming slightly).
+  const stepHeight = useCallback(
+    (step: ReductionStep, messageCount: number) => {
+      const m = metricsRef.current;
+      const maxLevel = MAX_HEADER_LEVEL_FOR_STEP[step];
+      let headerRows = 0;
+      if (maxLevel > 0) {
+        for (const entry of assistantEntries) {
+          headerRows += entry.previewHeaders.filter((h) => h.level <= maxLevel).length;
+        }
+      }
+      const totalRows = messageCount + headerRows;
+      if (totalRows === 0) return 0;
+      return (
+        messageCount * (m.msgRowHeight + m.rowGap) +
+        headerRows * (m.headerRowHeight + m.rowGap)
+      );
+    },
+    [assistantEntries]
+  );
+
+  // Find the index of the active message within the full `messages` array, so
+  // step 5 can center the kept window on it. Falls back to the last message.
+  const activeMessageIndex = useMemo(() => {
+    if (!activeTarget) return messages.length - 1;
+    const idx = messages.findIndex((m) => m.id === activeTarget.messageId);
+    return idx === -1 ? messages.length - 1 : idx;
+  }, [activeTarget, messages]);
+
+  // Calibrate row-height metrics from the real DOM once (after first render
+  // with content), then (re)compute the reduction whenever the inputs change.
+  // Runs synchronously (useLayoutEffect) so there's no visible overflow flash.
+  useLayoutEffect(() => {
+    const wrapper = collapsedBarsRef.current;
+    if (!wrapper) return;
+
+    // Calibrate from the rendered rows if not already done.
+    if (!metricsRef.current.calibrated) {
+      const msgRow = wrapper.querySelector<HTMLElement>('.min-h-2\\.5');
+      const headerRow = wrapper.querySelector<HTMLElement>('.min-h-1\\.5');
+      const containerStyle = window.getComputedStyle(wrapper);
+      const firstRow = wrapper.querySelector<HTMLElement>(':scope > div > div');
+      if (msgRow || headerRow || firstRow) {
+        // Spacing is via per-row margin-bottom (mb-0.5); measure it from a row.
+        let measuredGap = ROW_GAP_FALLBACK;
+        const gapSource = msgRow ?? headerRow ?? firstRow;
+        if (gapSource) {
+          const parsed = parseFloat(window.getComputedStyle(gapSource).marginBottom || '');
+          if (!Number.isNaN(parsed) && parsed >= 0) measuredGap = parsed;
+        }
+        metricsRef.current = {
+          msgRowHeight: msgRow ? msgRow.getBoundingClientRect().height : MSG_ROW_HEIGHT_FALLBACK,
+          headerRowHeight: headerRow ? headerRow.getBoundingClientRect().height : HEADER_ROW_HEIGHT_FALLBACK,
+          rowGap: measuredGap,
+          padding: parseFloat(containerStyle.paddingTop || '') + parseFloat(containerStyle.paddingBottom || '') || COLLAPSED_PADDING_FALLBACK,
+          calibrated: true,
+        };
+      }
+    }
+
+    const m = metricsRef.current;
+    const available = wrapper.clientHeight - m.padding;
+    if (available <= 0) {
+      setReduction(FULL_REDUCTION);
+      return;
+    }
+
+    const total = messages.length;
+    if (total === 0) {
+      setReduction(FULL_REDUCTION);
+      return;
+    }
+
+    // Try steps 1..4 with all messages; pick the first that fits. Step 4 uses
+    // the collapsed-row height (min-height 0) so trimmed header rows still
+    // contribute ~0px in the height model.
+    for (const step of [1, 2, 3, 4] as ReductionStep[]) {
+      if (stepHeight(step, total) <= available) {
+        setReduction({ step, maxHeaderLevel: MAX_HEADER_LEVEL_FOR_STEP[step], messageKeepRange: null });
+        return;
+      }
+    }
+
+    // Step 5: no headers, keep only N messages centered on the active message.
+    const perMsg = m.msgRowHeight + m.rowGap;
+    let n = perMsg > 0 ? Math.floor((available + m.rowGap) / perMsg) : total;
+    n = Math.max(1, Math.min(n, total));
+
+    let start = activeMessageIndex - Math.floor(n / 2);
+    start = Math.max(0, Math.min(start, total - n));
+    const end = start + n;
+    setReduction({ step: 5, maxHeaderLevel: 0, messageKeepRange: { start, end } });
+  }, [messages, assistantEntries, activeMessageIndex, containerHeight, stepHeight]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -431,7 +644,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
         }
       }
 
-      const activeMessage = activeEntry ? { messageId: activeEntry.messageId } : null;
+      const activeMessage: ActiveTrailTarget | null = activeEntry ? { messageId: activeEntry.messageId } : null;
       if (activeEntry?.sender === 'assistant' && activeMessageElement) {
         const headerElements = Array.from(activeMessageElement.querySelectorAll<HTMLElement>('h1, h2, h3'));
         headerElements.forEach((headerElement, headerIndex) => {
@@ -455,11 +668,22 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
 
     updateActiveTarget();
     container.addEventListener('scroll', updateActiveTarget, { passive: true });
-    window.addEventListener('resize', updateActiveTarget);
+    const handleResize = () => {
+      updateActiveTarget();
+      const wrapper = collapsedBarsRef.current;
+      if (wrapper) setContainerHeight(wrapper.clientHeight);
+    };
+    window.addEventListener('resize', handleResize);
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => {
+      const wrapper = collapsedBarsRef.current;
+      if (wrapper) setContainerHeight(wrapper.clientHeight);
+    }) : null;
+    if (ro && collapsedBarsRef.current) ro.observe(collapsedBarsRef.current);
 
     return () => {
       container.removeEventListener('scroll', updateActiveTarget);
-      window.removeEventListener('resize', updateActiveTarget);
+      window.removeEventListener('resize', handleResize);
+      ro?.disconnect();
     };
   }, [scrollContainerRef, trailEntries]);
 
@@ -590,12 +814,51 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     setIsExpanded(true);
   };
 
-  if (messages.length === 0) return null;
-
   const showPanel = isExpanded || isCollapsing;
   const barsAnimationClass = showPanel
     ? (isCollapsing ? 'message-trail-bars-enter' : 'message-trail-bars-exit')
     : '';
+
+  useLayoutEffect(() => {
+    if (!showPanel) return;
+
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const updateExpandedPanelFrame = () => {
+      const rect = container.getBoundingClientRect();
+      setExpandedPanelFrame((current) => {
+        const height = Math.max(0, rect.height - EXPANDED_PANEL_VERTICAL_MARGIN * 2);
+        const next = {
+          top: rect.top + EXPANDED_PANEL_VERTICAL_MARGIN,
+          height,
+        };
+        if (
+          current?.top === next.top &&
+          current.height === next.height
+        ) {
+          return current;
+        }
+        return next;
+      });
+    };
+
+    updateExpandedPanelFrame();
+
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(updateExpandedPanelFrame)
+      : null;
+    resizeObserver?.observe(container);
+    window.addEventListener('resize', updateExpandedPanelFrame);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateExpandedPanelFrame);
+    };
+  }, [scrollContainerRef, showPanel]);
+
+  if (messages.length === 0) return null;
+
   const handleTrailBlur = (event: React.FocusEvent<HTMLElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget)) {
       collapseTrail();
@@ -610,7 +873,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     >
       <div
         ref={collapsedBarsRef}
-        className={`h-full max-h-full min-w-full overflow-y-auto px-1 py-2 flex items-center ${barsAnimationClass} ${
+        className={`h-full max-h-full min-w-full overflow-hidden px-1 py-2 flex items-center ${barsAnimationClass} ${
           isExpanded && !isCollapsing ? 'pointer-events-none' : ''
         }`}
       >
@@ -626,6 +889,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
             messages={messages}
             assistantEntries={assistantEntries}
             activeTarget={activeTarget}
+            reduction={reduction}
             onScrollToMessage={onScrollToMessage}
           />
         </div>
@@ -634,7 +898,12 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
       {showPanel ? (
         <div
           ref={expandedPanelRef}
-          className="fixed right-3 top-1/2 z-[200] max-h-[calc(100vh-2rem)] w-[280px] -translate-y-1/2"
+          className="fixed right-3 z-[200] w-[280px]"
+          style={{
+            top: expandedPanelFrame?.top ?? 0,
+            height: expandedPanelFrame?.height ?? '100%',
+            maxHeight: expandedPanelFrame?.height ?? '100%',
+          }}
           onMouseEnter={expandTrail}
           onMouseLeave={scheduleHoverRecheck}
           onFocusCapture={expandTrail}

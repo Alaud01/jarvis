@@ -51,6 +51,7 @@ interface StoreSchema {
   selectedProvider: string;
   openTabIds: string[];
   currentConversationId: string | null;
+  conversationDrafts: Record<string, string>;
   opencodeGoApiKey: string;
   openRouterApiKey: string;
   dictionaryEntries: LegacyDictionaryEntry[];
@@ -72,6 +73,7 @@ const store = new Store<StoreSchema>({
     selectedProvider: 'ollama',
     openTabIds: [],
     currentConversationId: null,
+    conversationDrafts: {},
     opencodeGoApiKey: '',
     openRouterApiKey: '',
     dictionaryEntries: [],
@@ -168,11 +170,23 @@ function pruneConversationReferences(validIds: Set<string>): void {
   }
 }
 
+function pruneConversationDrafts(validIds: Set<string>): void {
+  const drafts = store.get('conversationDrafts', {}) as Record<string, string>;
+  const nextDrafts = Object.fromEntries(
+    Object.entries(drafts).filter(([id]) => validIds.has(id) || id.startsWith('__')),
+  ) as Record<string, string>;
+
+  if (Object.keys(nextDrafts).length !== Object.keys(drafts).length) {
+    store.set('conversationDrafts', nextDrafts);
+  }
+}
+
 function pruneDeletedConversationState(validIds: Set<string>): void {
   pruneConversationFiles(validIds);
   pruneConversationMessageMap(validIds);
   pruneLegacyConversations(validIds);
   pruneConversationReferences(validIds);
+  pruneConversationDrafts(validIds);
 }
 
 function conversationToMetadata(conversation: SerializedConversation): SerializedConversationMetadata {
@@ -308,6 +322,7 @@ export function deleteConversation(id: string): void {
   store.set('conversations', legacyConversations.filter(c => c.id !== id));
   store.set('conversationMessages', conversationMessages);
   pruneConversationReferences(validIds);
+  pruneConversationDrafts(validIds);
 }
 
 export function loadFolders(): SerializedFolder[] {
@@ -336,6 +351,7 @@ export function deleteFolderAndConversations(id: string): void {
   store.set('conversations', legacyConversations.filter(c => c.folderId !== id));
   store.set('conversationMessages', conversationMessages);
   pruneConversationReferences(validIds);
+  pruneConversationDrafts(validIds);
   const folders: SerializedFolder[] = store.get('folders', []);
   store.set('folders', folders.filter(f => f.id !== id));
 }
@@ -386,6 +402,14 @@ export function loadCurrentConversationId(): string | null {
 
 export function saveCurrentConversationId(id: string | null): void {
   store.set('currentConversationId', id);
+}
+
+export function loadConversationDrafts(): Record<string, string> {
+  return store.get('conversationDrafts', {}) as Record<string, string>;
+}
+
+export function saveConversationDrafts(drafts: Record<string, string>): void {
+  store.set('conversationDrafts', drafts);
 }
 
 export function loadDictionaryEntries(): LegacyDictionaryEntry[] {

@@ -75,10 +75,13 @@ interface SerializedFolder {
   timestamp: string;
 }
 
+type SerializedConversationDrafts = Record<string, string>;
+
 const SCROLL_BUTTON_BOTTOM_THRESHOLD = 8;
 const CONVERSATION_CACHE_LIMIT = 6;
 const SAVE_DEBOUNCE_MS = 400;
 const STREAM_FLUSH_MS = 60;
+const NEW_CHAT_DRAFT_ID = '__new_chat__';
 
 const isScrollContainerAtBottom = (container: HTMLElement) => (
   container.scrollHeight - container.scrollTop - container.clientHeight <= SCROLL_BUTTON_BOTTOM_THRESHOLD
@@ -259,7 +262,12 @@ interface SendMessageStreamRequest {
   assistantMessageId: string;
   model: string;
   provider: string;
-  messages: { role: 'user' | 'assistant'; content: string }[];
+  messages: {
+    role: 'user' | 'assistant';
+    content: string;
+    images?: string[];
+    imageMimeTypes?: string[];
+  }[];
 }
 
 function getProviderForModel(models: ModelInfo[], modelId: string | null): string {
@@ -269,16 +277,20 @@ function getProviderForModel(models: ModelInfo[], modelId: string | null): strin
 }
 
 function toStreamMessage(message: Pick<Message, 'sender' | 'text' | 'attachments'>): SendMessageStreamRequest['messages'][number] {
-  const attachmentContext = message.attachments?.map(attachment => [
+  const textAttachments = message.attachments?.filter(attachment => attachment.kind !== 'image') ?? [];
+  const imageAttachments = message.attachments?.filter(attachment => attachment.kind === 'image' && attachment.base64) ?? [];
+  const attachmentContext = textAttachments.map(attachment => [
     '',
     `--- Attached file: ${attachment.name}${attachment.truncated ? ' (truncated)' : ''} ---`,
     attachment.content,
     `--- End attached file: ${attachment.name} ---`,
-  ].join('\n')).join('\n') ?? '';
+  ].join('\n')).join('\n');
 
   return {
     role: message.sender === 'user' ? 'user' : 'assistant',
     content: `${message.text}${attachmentContext}`,
+    images: imageAttachments.map(attachment => attachment.base64!),
+    imageMimeTypes: imageAttachments.map(attachment => attachment.mimeType ?? 'image/png'),
   };
 }
 
@@ -290,6 +302,7 @@ declare global {
       getProviders: () => Promise<ProviderInfo[]>;
       pickAttachmentPaths: () => Promise<string[]>;
       readAttachments: (filePaths: string[]) => Promise<AttachmentSelectionResult>;
+      getPathForFile: (file: File) => string;
       sendMessageStream: (request: SendMessageStreamRequest) => Promise<{ success: boolean; aborted?: boolean }>;
       stopStream: (request: StopStreamRequest) => Promise<{ success: boolean }>;
       getVoiceShortcut: () => Promise<string>;
@@ -303,6 +316,7 @@ declare global {
       onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => () => void;
       onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => () => void;
       onVoiceError: (callback: (error: string) => void) => () => void;
+      onMenuNewConversation: (callback: () => void) => () => void;
       connectAudioPort: (port: MessagePort) => void;
       sendAudioData: (chunk: ArrayBuffer | ArrayBufferView) => void;
       storeLoadConversations: () => Promise<SerializedConversation[]>;
@@ -328,6 +342,8 @@ declare global {
       storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
       storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
+      storeLoadConversationDrafts: () => Promise<SerializedConversationDrafts>;
+      storeSaveConversationDrafts: (drafts: SerializedConversationDrafts) => Promise<{ success: boolean }>;
       dictionaryList: () => Promise<PersonalDictionaryState>;
       dictionaryCreate: (input: CreateDictionaryEntryInput) => Promise<PersonalDictionaryState>;
       dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => Promise<PersonalDictionaryState>;
@@ -348,6 +364,7 @@ const App: React.FC = () => {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
+  const [conversationDrafts, setConversationDrafts] = useState<SerializedConversationDrafts>({});
   const [unreadCompleteConversationIds, setUnreadCompleteConversationIds] = useState<Set<string>>(() => new Set());
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -372,6 +389,7 @@ const App: React.FC = () => {
   const savedConversationMetadataRevisionRef = useRef<string>('');
   const metadataSaveTimerRef = useRef<number | null>(null);
   const conversationSaveTimersRef = useRef<Map<string, number>>(new Map());
+  const draftSaveTimerRef = useRef<number | null>(null);
   const streamChunkBuffersRef = useRef<Map<string, string[]>>(new Map());
   const streamFlushTimersRef = useRef<Map<string, number>>(new Map());
 
@@ -382,6 +400,9 @@ const App: React.FC = () => {
   useEffect(() => () => {
     if (metadataSaveTimerRef.current !== null) {
       window.clearTimeout(metadataSaveTimerRef.current);
+    }
+    if (draftSaveTimerRef.current !== null) {
+      window.clearTimeout(draftSaveTimerRef.current);
     }
     conversationSaveTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
     streamFlushTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
@@ -437,13 +458,14 @@ const App: React.FC = () => {
     let isMounted = true;
 
     const loadStoredData = async () => {
-      const [conversationsResult, foldersResult, modelResult, providerResult, tabIdsResult, currentConvResult] = await Promise.allSettled([
+      const [conversationsResult, foldersResult, modelResult, providerResult, tabIdsResult, currentConvResult, draftsResult] = await Promise.allSettled([
         window.assistant.storeLoadConversationList(),
         window.assistant.storeLoadFolders(),
         window.assistant.storeLoadModel(),
         window.assistant.storeLoadProvider(),
         window.assistant.storeLoadOpenTabIds(),
         window.assistant.storeLoadCurrentConversationId(),
+        window.assistant.storeLoadConversationDrafts(),
       ]);
 
       if (!isMounted) {
@@ -513,6 +535,12 @@ const App: React.FC = () => {
         // Provider is derived from selected model, no separate hydration needed
       } else {
         console.error('Failed to load stored provider:', providerResult.reason);
+      }
+
+      if (draftsResult.status === 'fulfilled') {
+        setConversationDrafts(draftsResult.value);
+      } else {
+        console.error('Failed to load stored conversation drafts:', draftsResult.reason);
       }
 
       setHasHydratedStore(true);
@@ -630,6 +658,21 @@ const App: React.FC = () => {
       console.error('Failed to save current conversation ID:', err);
     });
   }, [currentConversationId, hasHydratedStore]);
+
+  useEffect(() => {
+    if (!hasHydratedStore) return;
+
+    if (draftSaveTimerRef.current !== null) {
+      window.clearTimeout(draftSaveTimerRef.current);
+    }
+
+    draftSaveTimerRef.current = window.setTimeout(() => {
+      draftSaveTimerRef.current = null;
+      window.assistant.storeSaveConversationDrafts(conversationDrafts).catch(err => {
+        console.error('Failed to save conversation drafts:', err);
+      });
+    }, SAVE_DEBOUNCE_MS);
+  }, [conversationDrafts, hasHydratedStore]);
 
   const ensureConversationLoaded = useCallback(async (id: string) => {
     conversationAccessRef.current.set(id, Date.now());
@@ -998,6 +1041,23 @@ const App: React.FC = () => {
     void ensureConversationLoaded(id);
   }, [ensureConversationLoaded]);
 
+  const handleComposeChange = useCallback((value: string) => {
+    const draftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
+    setConversationDrafts(prev => {
+      if ((prev[draftKey] ?? '') === value) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      if (value) {
+        next[draftKey] = value;
+      } else {
+        delete next[draftKey];
+      }
+      return next;
+    });
+  }, [currentConversationId]);
+
   const handleDeleteConversation = useCallback((id: string) => {
     if (!window.confirm('Delete this conversation?')) return;
 
@@ -1124,6 +1184,11 @@ const App: React.FC = () => {
     window.addEventListener('keydown', handleKeyboardShortcut);
     return () => window.removeEventListener('keydown', handleKeyboardShortcut);
   }, [handleNewChat, handleDeleteConversation, currentConversationId]);
+
+  useEffect(() => {
+    if (!window.assistant?.onMenuNewConversation) return;
+    return window.assistant.onMenuNewConversation(() => handleNewChat());
+  }, [handleNewChat]);
 
   const handleTabClose = useCallback((id: string, e: React.MouseEvent) => {
     e.preventDefault();
@@ -1384,6 +1449,7 @@ const App: React.FC = () => {
       return;
     }
 
+    const draftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
     let conversationId = currentConversationId;
     let conversationMessagesForRequest = messages;
     
@@ -1438,6 +1504,16 @@ const App: React.FC = () => {
       timestamp: new Date(),
       attachments: attachments.length > 0 ? attachments : undefined,
     };
+
+    setConversationDrafts(prev => {
+      if (!(draftKey in prev)) {
+        return prev;
+      }
+
+      const next = { ...prev };
+      delete next[draftKey];
+      return next;
+    });
 
     setConversations(prev =>
       prev.map(c =>
@@ -1529,6 +1605,8 @@ const App: React.FC = () => {
     : null;
   const isCurrentConversationLoading = Boolean(activeConversation && !activeConversation.isLoaded);
   const isCurrentConversationStreaming = messages.some(message => message.isStreaming);
+  const composeDraftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
+  const composeValue = conversationDrafts[composeDraftKey] ?? '';
 
   return (
     <ThemeProvider>
@@ -1594,6 +1672,8 @@ const App: React.FC = () => {
             <InputArea
               onSendMessage={handleSendMessage}
               onStopStreaming={handleStopStreaming}
+              value={composeValue}
+              onChange={handleComposeChange}
               isLoading={isCurrentConversationStreaming}
               disabled={!selectedModel || isCurrentConversationLoading}
               voiceTranscript={voiceTranscript}

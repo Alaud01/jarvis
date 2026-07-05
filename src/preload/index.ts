@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
@@ -21,6 +21,8 @@ type VoiceTranscriptPayload = {
 type ChatMessagePayload = {
   role: 'user' | 'assistant';
   content: string;
+  images?: string[];
+  imageMimeTypes?: string[];
 };
 
 type ModelInfo = {
@@ -51,6 +53,7 @@ contextBridge.exposeInMainWorld('assistant', {
   pickAttachmentPaths: (): Promise<string[]> => ipcRenderer.invoke('pick-attachment-paths'),
   readAttachments: (filePaths: string[]): Promise<AttachmentSelectionResult> =>
     ipcRenderer.invoke('read-attachments', filePaths),
+  getPathForFile: (file: File): string => webUtils.getPathForFile(file),
   sendMessageStream: (request: SendMessageStreamRequest) =>
     ipcRenderer.invoke('send-message-stream', request),
   stopStream: (request: StopStreamRequest) => ipcRenderer.invoke('stop-stream', request),
@@ -93,6 +96,11 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('voice-error', listener);
     return () => ipcRenderer.removeListener('voice-error', listener);
   },
+  onMenuNewConversation: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('menu:new-conversation', listener);
+    return () => ipcRenderer.removeListener('menu:new-conversation', listener);
+  },
   connectAudioPort: (port: TransferableMessagePort) => ipcRenderer.postMessage('audio-port', null, [port]),
   sendAudioData: (chunk: ArrayBuffer | ArrayBufferView) => ipcRenderer.send('audio-data', chunk),
   storeLoadConversations: () => ipcRenderer.invoke('store:load-conversations'),
@@ -118,6 +126,8 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),
   storeSaveCurrentConversationId: (id: string | null) => ipcRenderer.invoke('store:save-current-conversation-id', id),
+  storeLoadConversationDrafts: () => ipcRenderer.invoke('store:load-conversation-drafts'),
+  storeSaveConversationDrafts: (drafts: Record<string, string>) => ipcRenderer.invoke('store:save-conversation-drafts', drafts),
   dictionaryList: () => ipcRenderer.invoke('dictionary:list'),
   dictionaryCreate: (input: CreateDictionaryEntryInput) => ipcRenderer.invoke('dictionary:create', input),
   dictionaryUpdate: (id: string, input: UpdateDictionaryEntryInput) => ipcRenderer.invoke('dictionary:update', id, input),

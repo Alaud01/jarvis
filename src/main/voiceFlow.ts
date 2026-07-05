@@ -4,7 +4,7 @@ import { startRecording, stopRecording, requestMicrophoneAccess, cleanupAudioCap
 import { getVoiceShortcutLabel, setupGlobalHotkey, setupLocalHotkey, teardownGlobalHotkey } from './hotkeyManager';
 import { processVoiceFlow } from './pythonService';
 import { typeTextInActiveApp, getFrontmostApp, activateApp, type FrontmostApp } from './textInserter';
-import { showOverlay, hideOverlay, destroyOverlay, preloadOverlay } from './overlayWindow';
+import { showOverlay, hideOverlay, destroyOverlay, preloadOverlay, setOverlayAnchorBounds } from './overlayWindow';
 import { captureVoiceContext } from './voiceContext';
 import { EMPTY_VOICE_CONTEXT, type VoiceContext } from '../shared/voice';
 import { cancelCorrectionObservation, observePostInsertionCorrection } from './correctionObserver';
@@ -91,23 +91,33 @@ async function resolveTargetApp(): Promise<FrontmostApp | null> {
   }
 }
 
-async function capturePreRecordingApp(): Promise<void> {
+async function capturePreRecordingTarget(): Promise<void> {
   cancelCorrectionObservation();
   preRecordingProjectFocused = isProjectWindowFocused();
   if (preRecordingProjectFocused) {
     preRecordingApp = null;
-    preRecordingContext = await captureVoiceContext(null, true);
+    setOverlayAnchorBounds(null);
     console.log('[VoiceFlow] Pre-recording target: project window');
     return;
   }
 
   try {
     preRecordingApp = await getFrontmostApp();
+    setOverlayAnchorBounds(preRecordingApp.windowBounds);
     console.log('[VoiceFlow] Pre-recording app:', preRecordingApp);
   } catch (err) {
     console.log('[VoiceFlow] Could not get frontmost app:', err);
     preRecordingApp = null;
+    setOverlayAnchorBounds(null);
   }
+}
+
+async function capturePreRecordingContext(): Promise<void> {
+  if (preRecordingProjectFocused) {
+    preRecordingContext = await captureVoiceContext(null, true);
+    return;
+  }
+
   preRecordingContext = await captureVoiceContext(preRecordingApp);
   console.log('[VoiceFlow] Voice context captured:', {
     app: preRecordingContext.app,
@@ -119,7 +129,7 @@ async function capturePreRecordingApp(): Promise<void> {
 }
 
 function beginPreRecordingCapture(): void {
-  preRecordingCapturePromise = capturePreRecordingApp();
+  preRecordingCapturePromise = capturePreRecordingContext();
 }
 
 async function handleVoiceShortcut(): Promise<void> {
@@ -141,6 +151,7 @@ async function startVoiceRecording(): Promise<void> {
 
   voiceFlowState = 'recording';
   sendStateToRenderer('recording');
+  await capturePreRecordingTarget();
   showOverlay('recording');
   beginPreRecordingCapture();
 
@@ -156,6 +167,7 @@ async function startVoiceRecording(): Promise<void> {
     showOverlay('error', undefined, result.error || 'Failed to start recording');
     setTimeout(() => {
       hideOverlay();
+      setOverlayAnchorBounds(null);
     }, 2000);
   }
 }
@@ -251,6 +263,7 @@ async function stopAndProcess(): Promise<void> {
     preRecordingApp = null;
     preRecordingProjectFocused = false;
     preRecordingContext = EMPTY_VOICE_CONTEXT;
+    setOverlayAnchorBounds(null);
     voiceFlowState = 'idle';
     sendStateToRenderer('idle');
   }

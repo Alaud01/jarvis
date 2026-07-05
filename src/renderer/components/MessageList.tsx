@@ -26,6 +26,14 @@ interface MessageListProps {
   onRegenerateResponse?: (messageId: string) => void;
 }
 
+function getAttachmentImageSrc(attachment: FileAttachment): string | null {
+  if (attachment.kind !== 'image' || !attachment.base64) {
+    return null;
+  }
+
+  return `data:${attachment.mimeType ?? 'image/png'};base64,${attachment.base64}`;
+}
+
 export interface MessageListHandle {
   scrollToMessage: (messageId: string) => void;
   scrollToMessageHeader: (messageId: string, headerIndex: number) => void;
@@ -69,7 +77,11 @@ const buildMessageRenderItems = (segments: MessageSegment[]): MessageRenderItem[
     .filter((item): item is MessageRenderItem => item !== null)
 );
 
-const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegment[] => {
+const parseMessageSegments = (
+  text: string,
+  isStreaming?: boolean,
+  allowIncompleteThinking = isStreaming
+): MessageSegment[] => {
   const rawSegments: MessageSegment[] = [];
   
   const xmlThinkingRegex = /(?:<thinking>|思考)([\s\S]*?)(?:<\/thinking>|<\/思考>)/g;
@@ -141,7 +153,7 @@ const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegme
       
       const nextIndex = Math.min(nextXmlIndex, nextOllamaIndex);
       
-      if (isStreaming && nextIndex === Infinity) {
+      if (allowIncompleteThinking && nextIndex === Infinity) {
         const streamingMatch = remaining.match(ollamaStreamingStartRegex);
         if (streamingMatch) {
           const beforeStreaming = remaining.slice(0, remaining.indexOf(streamingMatch[0]));
@@ -149,7 +161,7 @@ const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegme
           pushThinkingSegment(
             streamingMatch[1],
             currentOffset + remaining.indexOf(streamingMatch[0]),
-            true
+            Boolean(isStreaming)
           );
           return;
         }
@@ -189,7 +201,7 @@ const parseMessageSegments = (text: string, isStreaming?: boolean): MessageSegme
 };
 
 const getCopyableAssistantText = (text: string, isStreaming?: boolean): string => (
-  parseMessageSegments(text, isStreaming)
+  parseMessageSegments(text, isStreaming, true)
     .filter((segment) => segment.type === 'content')
     .map((segment) => segment.text ?? '')
     .join('\n\n')
@@ -215,7 +227,11 @@ const getCachedMessageRenderItems = (message: Message): MessageRenderItem[] => {
     return cached.items;
   }
 
-  const segments = parseMessageSegments(message.text, message.isStreaming);
+  const segments = parseMessageSegments(
+    message.text,
+    message.isStreaming,
+    message.sender === 'assistant'
+  );
   const items = buildMessageRenderItems(segments);
   parsedMessageCache.set(message.id, {
     text: message.text,
@@ -318,28 +334,13 @@ const getSourceInitial = (source: SearchSource): string => {
   return label.trim().charAt(0).toUpperCase() || '?';
 };
 
-const MAX_INLINE_SOURCES = 7;
+const SOURCE_ROW_GAP_PX = 8;
 
-const SearchSourcesOverflowToggle: React.FC<{ groups?: SearchSourceGroup[] }> = ({ groups }) => {
+const getUniqueSearchSources = (groups?: SearchSourceGroup[]): SearchSource[] => {
   const sources = (groups ?? []).flatMap(group => group.sources);
-  const uniqueSources = sources.filter((source, index) => (
+  return sources.filter((source, index) => (
     sources.findIndex(candidate => candidate.url === source.url) === index
   ));
-  const hiddenSources = uniqueSources.slice(0, -MAX_INLINE_SOURCES);
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  if (hiddenSources.length === 0) {
-    return null;
-  }
-
-  return (
-    <SearchSourcesOverflowMenu
-      sources={hiddenSources}
-      isOpen={menuOpen}
-      onToggle={() => setMenuOpen(open => !open)}
-      onClose={() => setMenuOpen(false)}
-    />
-  );
 };
 
 const SourceIcon: React.FC<{ source: SearchSource; className?: string }> = ({ source, className = 'h-3.5 w-3.5' }) => {
@@ -373,7 +374,7 @@ const SearchSourceChip: React.FC<{ source: SearchSource }> = ({ source }) => {
       target="_blank"
       rel="noopener noreferrer"
       title={tooltip}
-      className="inline-flex min-w-0 max-w-[180px] items-center gap-1.5 border border-border-secondary px-1 py-1 text-text-secondary hover:border-text-primary hover:text-text-primary"
+      className="inline-flex min-w-0 max-w-[180px] shrink-0 items-center gap-1.5 border border-border-secondary px-1 py-1 text-text-secondary hover:border-text-primary hover:text-text-primary"
     >
       <SourceIcon source={source} />
       <span className="min-w-0 truncate font-mono text-[0.525rem]">
@@ -462,29 +463,123 @@ const SearchSourcesOverflowMenu: React.FC<{
 
 const SearchSourcesBar: React.FC<{
   groups?: SearchSourceGroup[];
-  overflowButton?: React.ReactNode;
-}> = ({ groups, overflowButton }) => {
-  const sources = (groups ?? []).flatMap(group => group.sources);
-  const uniqueSources = sources.filter((source, index) => (
-    sources.findIndex(candidate => candidate.url === source.url) === index
-  ));
+}> = ({ groups }) => {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const labelRef = useRef<HTMLSpanElement>(null);
+  const overflowButtonMeasureRef = useRef<HTMLDivElement>(null);
+  const measureChipRefs = useRef<Map<string, HTMLSpanElement>>(new Map());
+  const [visibleSourceCount, setVisibleSourceCount] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const uniqueSources = useMemo(() => getUniqueSearchSources(groups), [groups]);
+
+  useLayoutEffect(() => {
+    const row = rowRef.current;
+    if (!row || !uniqueSources.length) {
+      setVisibleSourceCount(0);
+      return;
+    }
+
+    const updateVisibleSourceCount = () => {
+      const rowWidth = row.clientWidth;
+      const labelWidth = labelRef.current?.getBoundingClientRect().width ?? 0;
+      const overflowButtonWidth = overflowButtonMeasureRef.current?.getBoundingClientRect().width ?? 24;
+      const sourceWidths = uniqueSources.map(source => (
+        measureChipRefs.current.get(source.url)?.getBoundingClientRect().width ?? 0
+      ));
+
+      const getRowWidthForCount = (count: number, hasOverflowButton: boolean) => {
+        const visibleSourceWidth = sourceWidths
+          .slice(0, count)
+          .reduce((total, width) => total + width, 0);
+        const itemCount = 1 + count + (hasOverflowButton ? 1 : 0);
+        const gapWidth = Math.max(0, itemCount - 1) * SOURCE_ROW_GAP_PX;
+        return labelWidth + visibleSourceWidth + (hasOverflowButton ? overflowButtonWidth : 0) + gapWidth;
+      };
+
+      let nextVisibleCount = uniqueSources.length;
+      if (getRowWidthForCount(uniqueSources.length, false) > rowWidth) {
+        nextVisibleCount = 0;
+        for (let count = uniqueSources.length - 1; count >= 0; count -= 1) {
+          if (getRowWidthForCount(count, true) <= rowWidth) {
+            nextVisibleCount = count;
+            break;
+          }
+        }
+      }
+
+      setVisibleSourceCount(current => (
+        current === nextVisibleCount ? current : nextVisibleCount
+      ));
+    };
+
+    updateVisibleSourceCount();
+
+    const resizeObserver = new ResizeObserver(updateVisibleSourceCount);
+    resizeObserver.observe(row);
+    window.addEventListener('resize', updateVisibleSourceCount);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', updateVisibleSourceCount);
+    };
+  }, [uniqueSources]);
+
+  const visibleSources = uniqueSources.slice(0, visibleSourceCount);
+  const hiddenSources = uniqueSources.slice(visibleSourceCount);
+
+  useEffect(() => {
+    if (hiddenSources.length === 0) {
+      setMenuOpen(false);
+    }
+  }, [hiddenSources.length]);
 
   if (!uniqueSources.length) {
     return null;
   }
 
-  const visibleSources = uniqueSources.slice(-MAX_INLINE_SOURCES);
-  const hiddenSources = uniqueSources.slice(0, -MAX_INLINE_SOURCES);
-
   return (
-    <div className="flex min-w-0 flex-nowrap items-center gap-2 overflow-hidden pt-1">
-      <span className="shrink-0 font-mono text-[0.475rem] uppercase tracking-[0.15em] text-text-tertiary">
+    <div ref={rowRef} className="relative flex w-full min-w-0 flex-nowrap items-center gap-2 pt-1">
+      <span ref={labelRef} className="shrink-0 font-mono text-[0.475rem] uppercase tracking-[0.15em] text-text-tertiary">
         Sources
       </span>
       {visibleSources.map(source => (
         <SearchSourceChip key={source.url} source={source} />
       ))}
-      {overflowButton}
+      {hiddenSources.length > 0 && (
+        <SearchSourcesOverflowMenu
+          sources={hiddenSources}
+          isOpen={menuOpen}
+          onToggle={() => setMenuOpen(open => !open)}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
+      <div
+        aria-hidden="true"
+        className="invisible pointer-events-none absolute left-0 top-0 flex max-w-none flex-nowrap items-center gap-2"
+      >
+        {uniqueSources.map(source => (
+          <span
+            key={source.url}
+            ref={(element) => {
+              if (element) {
+                measureChipRefs.current.set(source.url, element);
+              } else {
+                measureChipRefs.current.delete(source.url);
+              }
+            }}
+            className="shrink-0"
+          >
+            <SearchSourceChip source={source} />
+          </span>
+        ))}
+        <div ref={overflowButtonMeasureRef} className="shrink-0">
+          <MessageActionButton
+            onClick={() => undefined}
+            label="More sources"
+            icon={<ThreeDotsIcon />}
+            ariaHaspopup="menu"
+          />
+        </div>
+      </div>
     </div>
   );
 };
@@ -576,15 +671,25 @@ const MessageRow = React.memo(({
 
       {message.sender === 'user' && message.attachments && message.attachments.length > 0 && (
         <div className="flex items-center gap-2 flex-wrap">
-          {message.attachments.map((attachment, index) => (
-            <span
-              key={`${attachment.name}-${attachment.size}-${index}`}
-              className="border border-border-secondary px-2 py-1 font-mono text-[0.525rem] text-text-secondary"
-              title={attachment.truncated ? 'Model context was truncated for this file' : undefined}
-            >
-              {attachment.name}{attachment.truncated ? ' (trimmed)' : ''}
-            </span>
-          ))}
+          {message.attachments.map((attachment, index) => {
+            const imageSrc = getAttachmentImageSrc(attachment);
+            return (
+              <span
+                key={`${attachment.name}-${attachment.size}-${index}`}
+                className="inline-flex items-center gap-2 border border-border-secondary px-2 py-1 font-mono text-[0.525rem] text-text-secondary"
+                title={attachment.truncated ? 'Model context was truncated for this file' : undefined}
+              >
+                {imageSrc && (
+                  <img
+                    src={imageSrc}
+                    alt=""
+                    className="h-12 w-12 object-cover border border-border-secondary"
+                  />
+                )}
+                {attachment.name}{attachment.truncated ? ' (trimmed)' : ''}
+              </span>
+            );
+          })}
         </div>
       )}
 
@@ -592,7 +697,7 @@ const MessageRow = React.memo(({
         <div className="flex flex-col gap-3">
           <textarea
             ref={editTextareaRef}
-            className="w-full min-h-[60px] border border-text-primary bg-transparent p-3 text-[0.875rem] text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
+            className="w-full min-h-[60px] bg-transparent p-3 text-[0.875rem] text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onKeyDown={(e) => {
@@ -676,7 +781,6 @@ const MessageRow = React.memo(({
               </>
             ) : (
               <>
-                <SearchSourcesOverflowToggle groups={message.searchSources} />
                 <MessageActionButton
                   onClick={() => onCopy(message.id, getCopyableAssistantText(message.text, message.isStreaming))}
                   label={copiedId === message.id ? 'Copied' : 'Copy'}

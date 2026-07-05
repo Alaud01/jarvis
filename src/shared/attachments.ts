@@ -4,6 +4,9 @@ export interface FileAttachment {
   size: number;
   content: string;
   truncated: boolean;
+  kind?: 'text' | 'image';
+  mimeType?: string;
+  base64?: string;
 }
 
 export interface AttachmentSelectionResult {
