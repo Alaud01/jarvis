@@ -8,6 +8,7 @@ import type {
   StreamTurnResult,
   ToolDefinition,
 } from './types';
+import { debugLog } from '../logger';
 
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_TITLE = 'Jarvis';
@@ -413,7 +414,7 @@ export class OpenRouterProvider implements Provider {
       throw error;
     }
 
-    console.log('[OpenRouter] Stream complete:', {
+    debugLog('[OpenRouter] Stream complete:', {
       model,
       contentLength: accumulatedContent.length,
       thinkingLength: accumulatedThinking.length,

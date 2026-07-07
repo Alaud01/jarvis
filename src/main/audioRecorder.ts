@@ -1,4 +1,5 @@
 import { ipcMain, systemPreferences, BrowserWindow, type MessagePortMain } from 'electron';
+import { debugLog } from './logger';
 
 const SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
@@ -293,7 +294,7 @@ export async function stopRecording(): Promise<RecordedAudio> {
   const durationMs = audioSampleCount > 0 ? (audioSampleCount / SAMPLE_RATE) * 1000 : 0;
   const rms = audioSampleCount > 0 ? Math.sqrt(audioSumSquares / audioSampleCount) : 0;
 
-  console.log('[AudioRecorder] Captured audio:', {
+  debugLog('[AudioRecorder] Captured audio:', {
     bytes: audioByteLength,
     durationMs: Math.round(durationMs),
     peak: Number(audioPeakAbs.toFixed(4)),

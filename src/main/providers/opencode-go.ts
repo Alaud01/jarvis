@@ -8,6 +8,7 @@ import type {
   StreamTurnResult,
   ToolDefinition,
 } from './types';
+import { debugLog } from '../logger';
 
 const BASE_URL = 'https://opencode.ai/zen/go/v1';
 
@@ -794,7 +795,7 @@ export class OpenCodeGoProvider implements Provider {
       throw e;
     }
 
-    console.log('[OpenCode Go] Stream complete:', {
+    debugLog('[OpenCode Go] Stream complete:', {
       model,
       contentLength: accumulatedContent.length,
       thinkingLength: accumulatedThinking.length,
@@ -1018,7 +1019,7 @@ export class OpenCodeGoProvider implements Provider {
       throw e;
     }
 
-    console.log('[OpenCode Go] Anthropic stream complete:', {
+    debugLog('[OpenCode Go] Anthropic stream complete:', {
       model,
       contentLength: accumulatedContent.length,
       thinkingLength: accumulatedThinking.length,
@@ -1036,7 +1037,7 @@ export class OpenCodeGoProvider implements Provider {
 
       const fallbackMessage = await this.completeAnthropicNonStreaming(requestBody, onChunk);
       if (fallbackMessage) {
-        console.log('[OpenCode Go] Anthropic non-stream fallback complete:', {
+        debugLog('[OpenCode Go] Anthropic non-stream fallback complete:', {
           model,
           contentLength: fallbackMessage.content.length,
           thinkingLength: fallbackMessage.thinking?.length || 0,

@@ -36,6 +36,7 @@ import {
   saveVocabularyCandidates,
   saveVocabularyEntries,
 } from './store';
+import { infoLog } from './logger';
 
 const MAX_ENTRY_TEXT = 120;
 const MAX_ALIASES = 12;
@@ -269,7 +270,7 @@ function migrateLegacyDictionaryIfNeeded(): void {
   saveReplacementRules(replacementRules);
   saveVocabularyCandidates(vocabularyCandidates.slice(0, MAX_CANDIDATES));
   saveDictionaryEntries([]);
-  console.log(`[Dictionary] Migrated ${legacyEntries.length} legacy personal dictionary entr${legacyEntries.length === 1 ? 'y' : 'ies'}`);
+  infoLog(`[Dictionary] Migrated ${legacyEntries.length} legacy personal dictionary entr${legacyEntries.length === 1 ? 'y' : 'ies'}`);
   if (vocabularyEntries.length === 0 && replacementRules.length === 0 && vocabularyCandidates.length === 0) {
     saveCorrectionObservations([
       {

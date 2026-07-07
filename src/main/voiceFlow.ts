@@ -8,6 +8,7 @@ import { showOverlay, hideOverlay, destroyOverlay, preloadOverlay, setOverlayAnc
 import { captureVoiceContext } from './voiceContext';
 import { EMPTY_VOICE_CONTEXT, type VoiceContext } from '../shared/voice';
 import { cancelCorrectionObservation, observePostInsertionCorrection } from './correctionObserver';
+import { debugLog, infoLog } from './logger';
 
 type VoiceFlowState = 'idle' | 'recording' | 'processing';
 type VoiceTranscriptPayload = {
@@ -83,7 +84,7 @@ async function resolveTargetApp(): Promise<FrontmostApp | null> {
 
   try {
     const currentFrontmostApp = await getFrontmostApp();
-    console.log('[VoiceFlow] Fallback frontmost app:', currentFrontmostApp);
+    debugLog('[VoiceFlow] Fallback frontmost app:', currentFrontmostApp);
     return currentFrontmostApp;
   } catch (err) {
     console.warn('[VoiceFlow] Could not resolve target app for transcript routing:', err);
@@ -97,16 +98,16 @@ async function capturePreRecordingTarget(): Promise<void> {
   if (preRecordingProjectFocused) {
     preRecordingApp = null;
     setOverlayAnchorBounds(null);
-    console.log('[VoiceFlow] Pre-recording target: project window');
+    debugLog('[VoiceFlow] Pre-recording target: project window');
     return;
   }
 
   try {
     preRecordingApp = await getFrontmostApp();
     setOverlayAnchorBounds(preRecordingApp.windowBounds);
-    console.log('[VoiceFlow] Pre-recording app:', preRecordingApp);
+    debugLog('[VoiceFlow] Pre-recording app:', preRecordingApp);
   } catch (err) {
-    console.log('[VoiceFlow] Could not get frontmost app:', err);
+    debugLog('[VoiceFlow] Could not get frontmost app:', err);
     preRecordingApp = null;
     setOverlayAnchorBounds(null);
   }
@@ -119,7 +120,7 @@ async function capturePreRecordingContext(): Promise<void> {
   }
 
   preRecordingContext = await captureVoiceContext(preRecordingApp);
-  console.log('[VoiceFlow] Voice context captured:', {
+  debugLog('[VoiceFlow] Voice context captured:', {
     app: preRecordingContext.app,
     destination: preRecordingContext.destination,
     accessibilityStatus: preRecordingContext.accessibilityStatus,
@@ -133,14 +134,14 @@ function beginPreRecordingCapture(): void {
 }
 
 async function handleVoiceShortcut(): Promise<void> {
-  console.log('[VoiceFlow] handleVoiceShortcut state:', voiceFlowState);
+  debugLog('[VoiceFlow] handleVoiceShortcut state:', voiceFlowState);
 
   if (voiceFlowState === 'idle') {
     await startVoiceRecording();
   } else if (voiceFlowState === 'recording') {
     await stopAndProcess();
   } else {
-    console.log('[VoiceFlow] Voice shortcut ignored while processing');
+    debugLog('[VoiceFlow] Voice shortcut ignored while processing');
   }
 }
 
@@ -203,7 +204,7 @@ async function stopAndProcess(): Promise<void> {
       const sendToProjectApp = targetIsProjectApp || routeToProjectAppOnly;
       const sendToExternalApp = !targetIsProjectApp && !routeToProjectAppOnly;
 
-      console.log('[VoiceFlow] Transcript routing:', {
+      debugLog('[VoiceFlow] Transcript routing:', {
         targetApp,
         preRecordingProjectFocused,
         targetIsProjectApp,
@@ -272,7 +273,7 @@ async function stopAndProcess(): Promise<void> {
 export async function initializeVoiceFlow(): Promise<void> {
   const registered = setupGlobalHotkey(handleVoiceShortcut);
   if (registered) {
-    console.log(`[VoiceFlow] Global voice shortcut registered successfully (${getVoiceShortcutLabel()})`);
+    infoLog(`[VoiceFlow] Global voice shortcut registered successfully (${getVoiceShortcutLabel()})`);
   } else {
     console.warn(
       `[VoiceFlow] Global voice shortcut registration failed, falling back to local mode (${getVoiceShortcutLabel()} only works while the app is focused)`

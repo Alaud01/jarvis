@@ -1,4 +1,5 @@
 import { BrowserWindow, globalShortcut, type Input } from 'electron';
+import { debugLog, infoLog } from './logger';
 
 type HotkeyCallback = () => void;
 type LocalHotkeyListener = (event: { preventDefault: () => void }, input: Input) => void;
@@ -30,7 +31,7 @@ function triggerHotkey(source: 'global' | 'local'): void {
     return;
   }
 
-  console.log(`[HotkeyManager] Voice shortcut triggered via ${source}`);
+  debugLog(`[HotkeyManager] Voice shortcut triggered via ${source}`);
   hotkeyCallback();
 }
 
@@ -63,7 +64,7 @@ export function setupGlobalHotkey(callback: HotkeyCallback): boolean {
     return false;
   }
 
-  console.log(`[HotkeyManager] Global voice shortcut registered: ${VOICE_SHORTCUT_LABEL}`);
+  infoLog(`[HotkeyManager] Global voice shortcut registered: ${VOICE_SHORTCUT_LABEL}`);
   return true;
 }
 
@@ -88,7 +89,7 @@ export function setupLocalHotkey(callback: HotkeyCallback): boolean {
   };
 
   mainWindow.webContents.on('before-input-event', localHotkeyListener);
-  console.log(`[HotkeyManager] Local voice shortcut registered: ${VOICE_SHORTCUT_LABEL}`);
+  infoLog(`[HotkeyManager] Local voice shortcut registered: ${VOICE_SHORTCUT_LABEL}`);
   return true;
 }
 

@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import logging
 import os
 import re
 import ssl
@@ -25,6 +26,12 @@ from pydantic import BaseModel, Field, ValidationError
 # service remains usable before NeMo/torch are installed.
 
 app = FastAPI(title="Voice Flow Service")
+
+logging.basicConfig(
+    level=getattr(logging, os.environ.get("JARVIS_LOG_LEVEL", "WARNING").upper(), logging.WARNING),
+    format="%(message)s",
+)
+logger = logging.getLogger("VoiceService")
 
 VAD_THRESHOLD = 0.5
 VAD_MIN_SILENCE_MS = 700
@@ -239,7 +246,7 @@ def parse_refinement_output(content: str, raw_text: str, refinement_mode: str) -
             applied_edits=list(dict.fromkeys(parsed.applied_edits)),
         )
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as error:
-        print(f"[VoiceService] Invalid structured refinement ({error}), using raw transcript")
+        logger.info("[VoiceService] Invalid structured refinement (%s), using raw transcript", error)
         return RefinementResult(text=raw_text, refinement_mode="raw_fallback", applied_edits=[])
 
 
@@ -456,14 +463,14 @@ def build_refinement_messages(raw_text: str, context: VoiceContext) -> list[dict
 def load_models():
     global vad_model
 
-    print(f"[VoiceService] Using OpenRouter model {OPENROUTER_TRANSCRIPTION_MODEL}")
+    logger.info("[VoiceService] Using OpenRouter model %s", OPENROUTER_TRANSCRIPTION_MODEL)
     if LOCAL_PARAKEET_ENABLED:
-        print(f"[VoiceService] Local Parakeet enabled: {LOCAL_PARAKEET_MODEL}")
-    print(f"[VoiceService] Using OpenRouter refinement model {OPENROUTER_REFINEMENT_MODEL}")
-    print("[VoiceService] Loading Silero VAD ONNX...")
+        logger.info("[VoiceService] Local Parakeet enabled: %s", LOCAL_PARAKEET_MODEL)
+    logger.info("[VoiceService] Using OpenRouter refinement model %s", OPENROUTER_REFINEMENT_MODEL)
+    logger.info("[VoiceService] Loading Silero VAD ONNX...")
     from silero_vad import load_silero_vad
     vad_model = load_silero_vad(onnx=True)
-    print("[VoiceService] Silero VAD ONNX loaded successfully")
+    logger.info("[VoiceService] Silero VAD ONNX loaded successfully")
     start_local_parakeet_background_load()
 
 
@@ -750,9 +757,12 @@ def transcribe_chunk_with_openrouter(wav: np.ndarray) -> str:
             if attempt >= OPENROUTER_MAX_ATTEMPTS or not is_retriable_openrouter_error(error):
                 raise openrouter_failure(error, attempt) from error
             delay = OPENROUTER_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-            print(
-                f"[VoiceService] OpenRouter transcription attempt {attempt}/{OPENROUTER_MAX_ATTEMPTS} "
-                f"failed ({type(error).__name__}); retrying in {delay:.1f}s"
+            logger.info(
+                "[VoiceService] OpenRouter transcription attempt %s/%s failed (%s); retrying in %.1fs",
+                attempt,
+                OPENROUTER_MAX_ATTEMPTS,
+                type(error).__name__,
+                delay,
             )
             time.sleep(delay)
 
@@ -760,7 +770,7 @@ def transcribe_chunk_with_openrouter(wav: np.ndarray) -> str:
         raise openrouter_failure(last_error or ConnectionError("No response received"), OPENROUTER_MAX_ATTEMPTS)
 
     transcription_ms = round((time.perf_counter() - started_at) * 1000)
-    print(f"[VoiceService] OpenRouter transcription completed in {transcription_ms}ms")
+    logger.info("[VoiceService] OpenRouter transcription completed in %sms", transcription_ms)
 
     transcript = response_data.get("text", "")
     if isinstance(transcript, str):
@@ -802,7 +812,7 @@ def load_local_parakeet_model():
         model = model.to(device)
         model.eval()
         local_parakeet_model = model
-        print(f"[VoiceService] Local Parakeet model loaded: {LOCAL_PARAKEET_MODEL} on {device}")
+        logger.info("[VoiceService] Local Parakeet model loaded: %s on %s", LOCAL_PARAKEET_MODEL, device)
         return local_parakeet_model
     except Exception as error:
         local_parakeet_load_error = str(error)
@@ -827,7 +837,7 @@ def start_local_parakeet_background_load():
         try:
             load_local_parakeet_model()
         except Exception as error:
-            print(f"[VoiceService] Local Parakeet background load failed: {error}")
+            logger.info("[VoiceService] Local Parakeet background load failed: %s", error)
 
     threading.Thread(target=load_background, daemon=True).start()
 
@@ -872,9 +882,11 @@ def transcribe_chunks_with_openrouter(transcription_chunks: list[np.ndarray]) ->
     for index, transcription_audio in enumerate(transcription_chunks):
         if len(transcription_chunks) > 1:
             chunk_seconds = transcription_audio.shape[0] / TARGET_SAMPLE_RATE
-            print(
-                f"[VoiceService] Transcribing chunk {index + 1}/{len(transcription_chunks)} "
-                f"({chunk_seconds:.2f}s)"
+            logger.info(
+                "[VoiceService] Transcribing chunk %s/%s (%.2fs)",
+                index + 1,
+                len(transcription_chunks),
+                chunk_seconds,
             )
 
         transcript = transcribe_chunk_with_openrouter(transcription_audio)
@@ -892,9 +904,11 @@ def transcribe_chunks_with_local_parakeet(
     for index, transcription_audio in enumerate(transcription_chunks):
         if len(transcription_chunks) > 1:
             chunk_seconds = transcription_audio.shape[0] / TARGET_SAMPLE_RATE
-            print(
-                f"[VoiceService] Locally transcribing chunk {index + 1}/{len(transcription_chunks)} "
-                f"({chunk_seconds:.2f}s)"
+            logger.info(
+                "[VoiceService] Locally transcribing chunk %s/%s (%.2fs)",
+                index + 1,
+                len(transcription_chunks),
+                chunk_seconds,
             )
         transcript = transcribe_chunk_with_local_parakeet(transcription_audio, vocabulary)
         if transcript:
@@ -914,11 +928,12 @@ def transcribe_audio(
         return "", TranscriptionMetadata(provider="none", model="", fallback_reason="no_transcription_chunks")
 
     if len(transcription_chunks) == 1:
-        print(f"[VoiceService] Transcribing pause-preserved utterance ({duration_seconds:.2f}s of audio)")
+        logger.info("[VoiceService] Transcribing pause-preserved utterance (%.2fs of audio)", duration_seconds)
     else:
-        print(
-            f"[VoiceService] Transcribing {len(transcription_chunks)} chunks "
-            f"({duration_seconds:.2f}s of pause-preserved audio)"
+        logger.info(
+            "[VoiceService] Transcribing %s chunks (%.2fs of pause-preserved audio)",
+            len(transcription_chunks),
+            duration_seconds,
         )
 
     vocabulary = context.vocabulary if context else []
@@ -939,7 +954,7 @@ def transcribe_audio(
                 fallback_used=False,
             )
         except Exception as error:
-            print(f"[VoiceService] Local Parakeet unavailable/slow ({error}); falling back to OpenRouter")
+            logger.info("[VoiceService] Local Parakeet unavailable/slow (%s); falling back to OpenRouter", error)
             transcript = transcribe_chunks_with_openrouter(transcription_chunks)
             return transcript, TranscriptionMetadata(
                 provider="openrouter",
@@ -964,7 +979,7 @@ def refine_transcript(raw_text: str, context: VoiceContext) -> RefinementResult:
     fallback = build_fallback_refinement(raw_text, context)
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
-        print("[VoiceService] OPENROUTER_API_KEY is not configured, using rule fallback")
+        logger.info("[VoiceService] OPENROUTER_API_KEY is not configured, using rule fallback")
         return fallback
 
     try:
@@ -1014,7 +1029,7 @@ def refine_transcript(raw_text: str, context: VoiceContext) -> RefinementResult:
 
         correction_ms = round((time.perf_counter() - started_at) * 1000)
         message = response_data.get("choices", [{}])[0].get("message", {})
-        print(f"[VoiceService] {OPENROUTER_REFINEMENT_MODEL} refinement completed in {correction_ms}ms")
+        logger.info("[VoiceService] %s refinement completed in %sms", OPENROUTER_REFINEMENT_MODEL, correction_ms)
 
         content = message.get("content", "")
         result = parse_refinement_output(content, fallback.text, refinement_mode)
@@ -1025,13 +1040,18 @@ def refine_transcript(raw_text: str, context: VoiceContext) -> RefinementResult:
         return result
     except urllib_error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
-        print(f"[VoiceService] {OPENROUTER_REFINEMENT_MODEL} refinement HTTP error {e.code}: {error_body}, using rule fallback")
+        logger.info(
+            "[VoiceService] %s refinement HTTP error %s: %s, using rule fallback",
+            OPENROUTER_REFINEMENT_MODEL,
+            e.code,
+            error_body,
+        )
         return fallback
     except urllib_error.URLError as e:
-        print(f"[VoiceService] {OPENROUTER_REFINEMENT_MODEL} refinement connection failed: {e}, using rule fallback")
+        logger.info("[VoiceService] %s refinement connection failed: %s, using rule fallback", OPENROUTER_REFINEMENT_MODEL, e)
         return fallback
     except Exception as e:
-        print(f"[VoiceService] {OPENROUTER_REFINEMENT_MODEL} refinement failed: {e}, using rule fallback")
+        logger.info("[VoiceService] %s refinement failed: %s, using rule fallback", OPENROUTER_REFINEMENT_MODEL, e)
         return fallback
 
 
@@ -1079,14 +1099,14 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
         temp_path, upload_bytes = copy_upload_to_temp(file, suffix)
         
-        print(f"[VoiceService] Processing audio file: {temp_path} ({upload_bytes} bytes)")
+        logger.info("[VoiceService] Processing audio file: %s (%s bytes)", temp_path, upload_bytes)
         wav = load_audio(temp_path)
         audio_stats = describe_audio(wav)
-        print(
-            "[VoiceService] Audio stats: "
-            f"duration={audio_stats['duration_ms']:.0f}ms "
-            f"peak={audio_stats['peak']:.4f} "
-            f"rms={audio_stats['rms']:.4f}"
+        logger.info(
+            "[VoiceService] Audio stats: duration=%.0fms peak=%.4f rms=%.4f",
+            audio_stats["duration_ms"],
+            audio_stats["peak"],
+            audio_stats["rms"],
         )
         speech_segments, speech_duration = detect_speech_segments(wav)
         
@@ -1099,7 +1119,7 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
                 }
             )
         
-        print(f"[VoiceService] Speech detected: {speech_duration:.0f}ms, transcribing...")
+        logger.info("[VoiceService] Speech detected: %.0fms, transcribing...", speech_duration)
         
         raw_text, transcription_metadata = transcribe_audio(wav, speech_segments, voice_context)
         
@@ -1112,11 +1132,11 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
                 }
             )
         
-        print(f"[VoiceService] Raw transcription: {raw_text}")
+        logger.info("[VoiceService] Raw transcription: %s", raw_text)
         
         refinement = refine_transcript(raw_text, voice_context)
         
-        print(f"[VoiceService] Corrected text: {refinement.text}")
+        logger.info("[VoiceService] Corrected text: %s", refinement.text)
         
         return JSONResponse(
             content={
@@ -1135,7 +1155,7 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
         
     except Exception as e:
         status_code = e.status_code if isinstance(e, HTTPException) else 500
-        print(f"[VoiceService] Error processing audio: {e}")
+        logger.info("[VoiceService] Error processing audio: %s", e)
         return JSONResponse(
             content={
                 "text": "",
@@ -1198,4 +1218,4 @@ async def transcribe_only(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("VOICE_SERVICE_PORT", "8765")))

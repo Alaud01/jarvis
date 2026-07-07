@@ -88,6 +88,7 @@ import type {
   UpdateReplacementRuleInput,
   UpdateVocabularyCandidateInput,
 } from '../shared/dictionary';
+import { debugLog, infoLog } from './logger';
 import { compactMessagesIfNeeded, estimateTotalTokens, getContextThresholdTokens } from './contextCompaction';
 
 dotenv.config({ quiet: true });
@@ -719,11 +720,11 @@ function logMainProcess(
 ): void {
   const label = `[${prefix}] ${message}`;
   if (details) {
-    console.log(label, details);
+    debugLog(label, details);
     return;
   }
 
-  console.log(label);
+  debugLog(label);
 }
 
 async function clearRegenerableAppCaches(): Promise<void> {
@@ -1804,14 +1805,14 @@ app.whenReady().then(async () => {
   createTray();
   createWindow();
   
-  console.log('[Main] Starting Python voice service...');
+  infoLog('[Main] Starting Python voice service...');
   
   void startPythonService()
     .then((pythonStarted) => {
       if (!pythonStarted) {
         console.error('[Main] Failed to start Python voice service - voice features will not work');
       } else {
-        console.log('[Main] Python voice service started successfully');
+        infoLog('[Main] Python voice service started successfully');
       }
     })
     .catch((error) => {
@@ -1820,11 +1821,11 @@ app.whenReady().then(async () => {
   
   try {
     await initializeVoiceFlow();
-    console.log('[Main] Voice flow initialized');
+    infoLog('[Main] Voice flow initialized');
   } catch (error) {
     console.error('[Main] Error initializing voice flow:', error);
   }
-  console.log('[Main] Browser Control is ready for assistant-directed browser tools');
+  infoLog('[Main] Browser Control is ready for assistant-directed browser tools');
 });
 
 app.on('window-all-closed', () => {
@@ -1865,7 +1866,7 @@ app.on('before-quit', (event) => {
   event.preventDefault();
 
   if (!shutdownPromise) {
-    console.log('[Main] Stopping application services...');
+    infoLog('[Main] Stopping application services...');
     shutdownPromise = shutdownApplicationServices().finally(() => {
       shutdownComplete = true;
       app.quit();

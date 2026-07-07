@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { app } from 'electron';
 import type { RecordedAudio } from './audioRecorder';
 import type { VoiceContext } from '../shared/voice';
+import { debugLog, infoLog } from './logger';
 
 const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
@@ -44,13 +45,13 @@ function getPythonExecutable(): string {
 
 export async function startPythonService(): Promise<boolean> {
   if (pythonProcess) {
-    console.log('[PythonService] Already running');
+    debugLog('[PythonService] Already running');
     return true;
   }
 
   const existingServiceHealth = await checkServiceHealth();
   if (existingServiceHealth.ready) {
-    console.log(`[PythonService] Reusing healthy service already running on port ${PYTHON_SERVICE_PORT}`);
+    infoLog(`[PythonService] Reusing healthy service already running on port ${PYTHON_SERVICE_PORT}`);
     isServiceReady = true;
     return true;
   }
@@ -73,7 +74,7 @@ export async function startPythonService(): Promise<boolean> {
     return false;
   }
 
-  console.log(`[PythonService] Starting Python service from ${serviceDir}`);
+  infoLog(`[PythonService] Starting Python service from ${serviceDir}`);
 
   const pythonExe = getPythonExecutable();
 
@@ -87,7 +88,7 @@ export async function startPythonService(): Promise<boolean> {
   let spawnedExited = false;
 
   pythonProcess.stdout?.on('data', (data) => {
-    console.log(`[PythonService] ${data.toString().trim()}`);
+    debugLog(`[PythonService] ${data.toString().trim()}`);
   });
 
   pythonProcess.stderr?.on('data', (data) => {
@@ -104,7 +105,7 @@ export async function startPythonService(): Promise<boolean> {
   });
 
   pythonProcess.on('exit', (code, signal) => {
-    console.log(`[PythonService] Process exited with code ${code}, signal ${signal}`);
+    debugLog(`[PythonService] Process exited with code ${code}, signal ${signal}`);
     if (pythonProcess === spawnedProcess) {
       pythonProcess = null;
     }
@@ -194,7 +195,7 @@ async function waitForService(
     }
 
     if ((await checkServiceHealth()).ready) {
-      console.log('[PythonService] Service is ready');
+      infoLog('[PythonService] Service is ready');
       return true;
     }
 
@@ -211,7 +212,7 @@ export async function stopPythonService(): Promise<void> {
     return;
   }
   
-  console.log('[PythonService] Stopping Python service');
+  infoLog('[PythonService] Stopping Python service');
 
   await new Promise<void>((resolve) => {
     const timeout = setTimeout(() => {

@@ -8,6 +8,7 @@ import type {
   StreamTurnResult,
   ToolDefinition,
 } from './types';
+import { debugLog } from '../logger';
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 const DEFAULT_CLOUD_TAGS_URL = 'https://ollama.com/api/tags';
@@ -290,7 +291,7 @@ function logStreamEnd(
   thinkingLength: number,
   toolCallCount: number,
 ) {
-  console.log('[Ollama] Stream terminated:', {
+  debugLog('[Ollama] Stream terminated:', {
     reason: data.done_reason || 'unknown',
     prompt_tokens: data.prompt_eval_count,
     response_tokens: data.eval_count,

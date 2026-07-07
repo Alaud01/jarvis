@@ -16,20 +16,15 @@ else
 fi
 
 echo ""
-echo "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
-
-echo ""
 echo "Installing dependencies..."
-pip install --upgrade pip
-pip install -r "$SCRIPT_DIR/requirements.txt"
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
+"$VENV_DIR/bin/python" -m pip install -r "$SCRIPT_DIR/requirements.txt"
 
 echo ""
 echo "=== Setup Complete ==="
 echo ""
 echo "To run the voice service:"
 echo "  cd python-service"
-echo "  source venv/bin/activate"
-echo "  python3 -m uvicorn main:app --host 127.0.0.1 --port 8765"
+echo "  venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8765"
 echo ""
 echo "Or use: pnpm start:python (from root)"

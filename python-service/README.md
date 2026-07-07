@@ -52,15 +52,16 @@ cd python-service
 ## Start Service on Port 8765
 
 ```bash
-source venv/bin/activate
-python3 -m uvicorn main:app --host 127.0.0.1 --port 8765
+venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port "${VOICE_SERVICE_PORT:-8765}"
 ```
 
 Or simply:
 
 ```bash
-python3 main.py
+venv/bin/python main.py
 ```
+
+Both commands default to port `8765` unless `VOICE_SERVICE_PORT` is set.
 
 ## Endpoints
 

@@ -1,26 +1,23 @@
 {
   "name": "jarvis",
   "version": "1.0.0",
-  "description": "Mac menu bar assistant powered by Ollama",
+  "description": "macOS menu bar AI assistant with chat, voice dictation, search, Notion tools, and browser control",
   "main": "dist/main/index.js",
   "packageManager": "pnpm@10.28.2",
   "scripts": {
     "compile": "tsc -p tsconfig.node.json",
     "build:renderer": "vite build",
+    "setup:python": "cd python-service && python3 -m venv venv && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt",
+    "test:js": "node tests/voiceLearning.test.js",
+    "test:python": "cd python-service && if [ ! -d venv ]; then python3 -m venv venv; fi && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt && venv/bin/python -m unittest discover -s .",
+    "test": "pnpm compile && pnpm test:js && pnpm test:python",
     "dev": "pnpm dev:all",
     "build": "pnpm compile && pnpm build:renderer && electron-builder",
     "start": "pnpm compile && pnpm build:renderer && electron .",
     "dev:all": "concurrently \"pnpm dev:vite\" \"pnpm dev:electron\"",
     "dev:vite": "vite",
     "dev:electron": "tsc -p tsconfig.node.json && wait-on http://localhost:5174 && electron .",
-    "start:python": "cd python-service && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && python3 -m uvicorn main:app --host 127.0.0.1 --port 8765 --reload"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "electron",
-      "electron-winstaller",
-      "esbuild"
-    ]
+    "start:python": "cd python-service && if [ ! -d venv ]; then python3 -m venv venv; fi && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt && venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port ${VOICE_SERVICE_PORT:-8765} --reload"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
