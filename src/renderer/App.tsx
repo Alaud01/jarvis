@@ -1655,6 +1655,7 @@ const App: React.FC = () => {
                 scrollContainerRef={chatScrollContainerRef}
                 messages={messages} 
                 isLoading={isCurrentConversationStreaming}
+                emptyStateRefreshKey={newChatTrigger}
                 editingMessageId={editingMessageId}
                 onEditMessage={handleEditMessage}
                 onCancelEdit={handleCancelEdit}

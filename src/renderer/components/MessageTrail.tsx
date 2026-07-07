@@ -376,18 +376,15 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
   }, [activeTarget]);
 
   return (
-    <div ref={scrollRef} className="max-h-[inherit] min-h-0 overflow-x-hidden overflow-y-auto bg-[var(--color-bg-secondary)] px-2 py-2">
-      <div className="mb-2 px-2 font-mono text-[0.62rem] uppercase tracking-[0.16em] text-text-tertiary">
-        Trail
-      </div>
+    <div ref={scrollRef} className="max-h-[inherit] min-h-0 overflow-x-hidden overflow-y-auto bg-[var(--color-bg-secondary)] px-1.5 py-1.5">
       {visibleEntries.length > 0 ? (
-        <div className="flex min-w-0 flex-col gap-3">
+        <div className="flex min-w-0 flex-col gap-2">
           {visibleEntries.map((entry) => (
             <div
               key={entry.messageId}
               className={`flex min-w-0 flex-col gap-0.5 ${
                 entry.sender === 'user'
-                  ? 'rounded border border-border-secondary bg-bg-secondary px-1 py-1'
+                  ? 'rounded border border-border-secondary bg-bg-secondary px-1 py-0.5'
                   : ''
               }`}
             >
@@ -395,17 +392,17 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                 <button
                   type="button"
                   data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined ? 'true' : undefined}
-                  className={`flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-2 py-1.5 text-left transition-colors hover:bg-bg-hover focus:bg-bg-hover focus:outline-none ${
+                  className={`flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-1.5 py-1 text-left transition-colors hover:bg-bg-hover focus:bg-bg-hover focus:outline-none ${
                     activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined
                       ? 'bg-bg-hover text-text-primary'
                       : 'text-text-secondary'
                   }`}
                   onClick={() => onScrollToMessage(entry.messageId)}
                 >
-                  <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.62rem] uppercase tracking-[0.14em] text-text-tertiary">
+                  <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.58rem] uppercase tracking-[0.14em] text-text-tertiary">
                     You {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
                   </span>
-                  <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.75rem] leading-[1.25]">
+                  <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.7rem] leading-[1.2]">
                     {entry.isStreaming ? 'Streaming...' : <InlineMarkdownPreview content={entry.previewText || 'Untitled message'} />}
                   </span>
                 </button>
@@ -413,7 +410,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                 <>
                   <button
                     type="button"
-                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1 text-left font-mono text-[0.62rem] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
+                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left font-mono text-[0.58rem] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
                     onClick={() => onScrollToMessage(entry.messageId)}
                   >
                     <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -426,7 +423,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                         key={`${entry.messageId}-${headerIndex}`}
                         type="button"
                         data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex ? 'true' : undefined}
-                        className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1.5 text-left text-[0.75rem] leading-[1.25] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]} ${
+                        className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]} ${
                           activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex
                             ? 'bg-bg-hover text-text-primary'
                             : 'text-text-tertiary'
@@ -442,7 +439,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                     <button
                       type="button"
                       data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined ? 'true' : undefined}
-                      className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-2 py-1.5 text-left text-[0.75rem] leading-[1.25] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${
+                      className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${
                         activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined
                           ? 'bg-bg-hover text-text-primary'
                           : 'text-text-tertiary'
@@ -898,7 +895,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
       {showPanel ? (
         <div
           ref={expandedPanelRef}
-          className="fixed right-3 z-[200] w-[280px]"
+          className="fixed right-3 z-[200] flex w-[240px] items-center"
           style={{
             top: expandedPanelFrame?.top ?? 0,
             height: expandedPanelFrame?.height ?? '100%',

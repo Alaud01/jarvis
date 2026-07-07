@@ -378,7 +378,7 @@ select option {
   color: var(--color-text-primary);
   font-family: var(--font-readable);
   font-weight: 700;
-  letter-spacing: -0.018em;
+  letter-spacing: 0;
   line-height: 1.24;
   scroll-margin-top: 1.5rem;
 }
@@ -757,4 +757,75 @@ select option {
 
 .trail-markdown-preview del {
   text-decoration-thickness: 1px;
+}
+
+/* ================================================================== */
+/* New Chat empty state - Jarvis wordmark reveal                       */
+/* ================================================================== */
+
+.jarvis-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  font-family: var(--font-sans);
+  font-size: clamp(1.5rem, 3.6vw, 2.2rem);
+  line-height: 1;
+  letter-spacing: 0;
+  color: var(--color-text-primary);
+}
+
+/* Bold J: starts centered (translated right by half the "arvis" width),
+   then slides smoothly left to its final position in one motion. The
+   fade-up completes before the slide begins to avoid transform conflicts. */
+.jarvis-wordmark-j {
+  font-weight: 700;
+  display: inline-block;
+  opacity: 0;
+  transform: translateX(var(--j-offset, 0));
+}
+
+.jarvis-wordmark-j.is-animated {
+  animation:
+    jarvisJFade 420ms ease-out 60ms forwards,
+    jarvisJSlide 900ms cubic-bezier(0.45, 0, 0.35, 1) 480ms forwards;
+}
+
+@keyframes jarvisJFade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes jarvisJSlide {
+  from { opacity: 1; transform: translateX(var(--j-offset, 0)); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* The "arvis" span: non-bold, starts at the background color (invisible
+   against the page), then fades as one to the theme's text color after the
+   J has slid into place. */
+.jarvis-wordmark-rest {
+  font-weight: 500;
+  display: inline-block;
+  color: var(--color-bg-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--color-bg-primary);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.14em;
+  transition: color 1100ms cubic-bezier(0.45, 0, 0.35, 1),
+              text-decoration-color 1100ms cubic-bezier(0.45, 0, 0.35, 1);
+}
+
+.jarvis-wordmark-rest.is-revealed {
+  color: var(--color-text-secondary);
+  text-decoration-color: var(--color-text-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-wordmark-j,
+  .jarvis-wordmark-rest {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    color: var(--color-text-primary) !important;
+    transition: none !important;
+  }
 }

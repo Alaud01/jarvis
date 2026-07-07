@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useLayoutEffect, useCallback, useImperativeHa
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingSection from './ThinkingSection';
 import TypingIndicator from './TypingIndicator';
+import NewChatEmptyState from './NewChatEmptyState';
 import type { SearchSource, SearchSourceGroup } from '../../shared/search';
 import type { FileAttachment } from '../../shared/attachments';
 
@@ -19,6 +20,7 @@ interface MessageListProps {
   messages: Message[];
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   isLoading?: boolean;
+  emptyStateRefreshKey?: number;
   editingMessageId?: string | null;
   onEditMessage?: (messageId: string) => void;
   onCancelEdit?: () => void;
@@ -847,6 +849,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   messages, 
   scrollContainerRef,
   isLoading = false,
+  emptyStateRefreshKey,
   editingMessageId,
   onEditMessage,
   onCancelEdit,
@@ -1201,18 +1204,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   return (
     <div className="flex-1 min-w-0">
       {showEmptyPlaceholder ? (
-        <div className="py-8">
-          <div className="max-w-[800px] mx-auto px-6">
-            <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
-              <p className="font-sans text-[2.375rem] text-text-primary mb-2">
-                A Blank Page
-              </p>
-              <p className="font-mono text-[0.575rem] text-text-tertiary uppercase tracking-[2px]">
-                Begin your discourse
-              </p>
-            </div>
-          </div>
-        </div>
+        <NewChatEmptyState refreshKey={emptyStateRefreshKey ?? 0} />
       ) : (
       <div className="py-4">
         <div ref={messagesColumnRef} className="max-w-[838px] mx-auto pl-[38px]">
