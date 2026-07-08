@@ -49,15 +49,20 @@ const ThemeSwitcher: React.FC = () => {
       {themes.map((t) => (
         <button
           key={t.id}
-          className={`flex items-center justify-center w-6 h-6 transition-all duration-[150ms] ${
+          type="button"
+          className={`group relative flex items-center justify-center w-6 h-6 transition-all duration-[150ms] ${
             theme === t.id 
               ? 'text-text-primary' 
               : 'text-text-tertiary hover:text-text-secondary'
           }`}
           onClick={() => setTheme(t.id)}
           title={`Switch to ${t.name} theme`}
+          aria-label={`Switch to ${t.name} theme`}
         >
           {t.icon}
+          <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 -translate-x-1/2 whitespace-nowrap rounded border border-border-primary bg-bg-secondary px-2 py-1 text-[0.6rem] text-text-primary opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
+            {t.name}
+          </span>
         </button>
       ))}
     </div>

@@ -863,14 +863,18 @@ const Sidebar: React.FC<SidebarProps> = ({
           <ThemeSwitcher />
           <button
             type="button"
-            className={`ml-auto flex h-6 w-6 items-center justify-center transition-all duration-[150ms] ${activeWorkspace === 'dictionary' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:text-text-secondary'}`}
+            className={`group relative ml-auto flex h-6 w-6 items-center justify-center transition-all duration-[150ms] ${activeWorkspace === 'dictionary' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:text-text-secondary'}`}
             title="Personal dictionary"
+            aria-label="Personal dictionary"
             onClick={onDictionaryOpen}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
               <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
             </svg>
+            <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-2 whitespace-nowrap rounded border border-border-primary bg-bg-secondary px-2 py-1 font-mono text-[0.6rem] text-text-primary opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
+              Personal dictionary
+            </span>
           </button>
         </div>
       </aside>
