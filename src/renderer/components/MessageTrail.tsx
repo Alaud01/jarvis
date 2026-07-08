@@ -878,7 +878,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
           ref={collapsedHoverRef}
           className="min-w-full"
           onMouseEnter={expandTrail}
-          onMouseLeave={!isExpanded ? collapseTrail : undefined}
+          onMouseLeave={isExpanded ? scheduleHoverRecheck : collapseTrail}
           onFocusCapture={expandTrail}
           onBlurCapture={handleTrailBlur}
         >
@@ -894,22 +894,22 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
 
       {showPanel ? (
         <div
-          ref={expandedPanelRef}
-          className="fixed right-3 z-[200] flex w-[240px] items-center"
+          className="pointer-events-none fixed right-3 z-[200] flex w-[240px] items-center"
           style={{
             top: expandedPanelFrame?.top ?? 0,
             height: expandedPanelFrame?.height ?? '100%',
             maxHeight: expandedPanelFrame?.height ?? '100%',
           }}
-          onMouseEnter={expandTrail}
-          onMouseLeave={scheduleHoverRecheck}
-          onFocusCapture={expandTrail}
-          onBlurCapture={handleTrailBlur}
         >
           <div
-            className={`max-h-[inherit] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
+            ref={expandedPanelRef}
+            className={`pointer-events-auto max-h-[inherit] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
               isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
             }`}
+            onMouseEnter={expandTrail}
+            onMouseLeave={scheduleHoverRecheck}
+            onFocusCapture={expandTrail}
+            onBlurCapture={handleTrailBlur}
           >
             <ExpandedTrail
               trailEntries={trailEntries}
