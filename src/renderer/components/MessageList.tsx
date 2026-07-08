@@ -21,6 +21,7 @@ interface MessageListProps {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   isLoading?: boolean;
   emptyStateRefreshKey?: number;
+  conversationSearchTrigger?: number;
   editingMessageId?: string | null;
   onEditMessage?: (messageId: string) => void;
   onCancelEdit?: () => void;
@@ -290,6 +291,18 @@ const XIcon = () => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="18" y1="6" x2="6" y2="18"></line>
     <line x1="6" y1="6" x2="18" y2="18"></line>
+  </svg>
+);
+
+const ChevronUpIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="18 15 12 9 6 15"></polyline>
+  </svg>
+);
+
+const ChevronDownIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="6 9 12 15 18 9"></polyline>
   </svg>
 );
 
@@ -596,6 +609,7 @@ interface MessageRowProps {
   editText: string;
   copiedId: string | null;
   isLoading: boolean;
+  searchQuery: string;
   setMessageRef: (messageId: string, element: HTMLDivElement | null) => void;
   setEditText: (text: string) => void;
   onCopy: (messageId: string, text: string) => void;
@@ -613,6 +627,7 @@ const MessageRow = React.memo(({
   editText,
   copiedId,
   isLoading,
+  searchQuery,
   setMessageRef,
   setEditText,
   onCopy,
@@ -754,7 +769,7 @@ const MessageRow = React.memo(({
             if (segment.type === 'content' && segment.text) {
               return (
                 <div key={item.key} className="text-[0.875rem] text-text-primary leading-[1.8]">
-                  <MarkdownRenderer content={segment.text} />
+                  <MarkdownRenderer content={segment.text} highlightTerm={searchQuery} />
                 </div>
               );
             }
@@ -811,6 +826,11 @@ const VIRTUALIZATION_THRESHOLD = 80;
 const VIRTUALIZATION_OVERSCAN = 8;
 const DEFAULT_MESSAGE_HEIGHT = 180;
 
+interface ConversationSearchMatch {
+  messageId: string;
+  occurrenceIndex: number;
+}
+
 const isNearBottom = (
   container: HTMLElement,
   threshold = AUTO_SCROLL_BOTTOM_THRESHOLD
@@ -845,11 +865,41 @@ const findOffsetIndex = (offsets: number[], target: number): number => {
   return low;
 };
 
+const countTextMatches = (text: string, query: string): number => {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  const normalizedText = text.toLocaleLowerCase();
+  let count = 0;
+  let searchStart = 0;
+
+  while (searchStart < normalizedText.length) {
+    const matchIndex = normalizedText.indexOf(normalizedQuery, searchStart);
+    if (matchIndex === -1) {
+      break;
+    }
+
+    count += 1;
+    searchStart = matchIndex + normalizedQuery.length;
+  }
+
+  return count;
+};
+
+const countSearchableMessageMatches = (message: Message, query: string): number => (
+  getCachedMessageRenderItems(message)
+    .filter(item => item.type === 'content' && item.text)
+    .reduce((total, item) => total + countTextMatches(item.text ?? '', query), 0)
+);
+
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(({ 
   messages, 
   scrollContainerRef,
   isLoading = false,
   emptyStateRefreshKey,
+  conversationSearchTrigger = 0,
   editingMessageId,
   onEditMessage,
   onCancelEdit,
@@ -862,9 +912,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const smoothAutoScrollTimeoutRef = useRef<number | null>(null);
   const prevLastMessageIdRef = useRef<string | null>(null);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const lastConversationSearchTriggerRef = useRef(conversationSearchTrigger);
   const measuredHeightsRef = useRef<Map<string, number>>(new Map());
   const [heightVersion, setHeightVersion] = useState(0);
   const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 0 });
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
 
   const setAutoScrollEnabled = useCallback((enabled: boolean) => {
     autoScrollEnabledRef.current = enabled;
@@ -953,6 +1008,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const renderedMessages = shouldVirtualize
     ? messages.slice(virtualRange.start, virtualRange.end)
     : messages;
+
+  const conversationSearchMatches = useMemo<ConversationSearchMatch[]>(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      return [];
+    }
+
+    return messages.flatMap(message => (
+      Array.from({ length: countSearchableMessageMatches(message, query) }, (_value, occurrenceIndex) => ({
+        messageId: message.id,
+        occurrenceIndex,
+      }))
+    ));
+  }, [messages, searchQuery]);
 
   const updateVirtualViewport = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -1064,23 +1133,85 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
   }, [cancelAutoScroll, reactivateAutoScroll, scrollContainerRef]);
 
-  useImperativeHandle(ref, () => ({
-    scrollToMessage: (messageId: string) => {
-      const messageElement = messageRefsRef.current.get(messageId);
-      if (messageElement) {
-        scrollElementIntoView(messageElement);
+  const scrollToMessageId = useCallback((messageId: string, offset = 16) => {
+    const messageElement = messageRefsRef.current.get(messageId);
+    if (messageElement) {
+      scrollElementIntoView(messageElement, offset);
+      return;
+    }
+
+    const messageIndex = messages.findIndex(message => message.id === messageId);
+    const container = scrollContainerRef.current;
+    if (messageIndex !== -1 && container && shouldVirtualize) {
+      cancelAutoScroll();
+      container.scrollTo({
+        top: Math.max(0, heightOffsets.offsets[messageIndex] - offset),
+        behavior: 'smooth',
+      });
+    }
+  }, [cancelAutoScroll, heightOffsets, messages, scrollContainerRef, scrollElementIntoView, shouldVirtualize]);
+
+  const scrollToSearchMatch = useCallback((match: ConversationSearchMatch) => {
+    const scrollToHighlight = () => {
+      const messageElement = messageRefsRef.current.get(match.messageId);
+      const highlightElement = messageElement?.querySelectorAll('.conversation-search-highlight')[match.occurrenceIndex];
+      if (!highlightElement) {
+        return false;
+      }
+
+      scrollElementIntoView(highlightElement, 72);
+      return true;
+    };
+
+    if (scrollToHighlight()) {
+      return;
+    }
+
+    scrollToMessageId(match.messageId, 48);
+    window.requestAnimationFrame(() => {
+      if (scrollToHighlight()) {
         return;
       }
 
-      const messageIndex = messages.findIndex(message => message.id === messageId);
-      const container = scrollContainerRef.current;
-      if (messageIndex !== -1 && container && shouldVirtualize) {
-        cancelAutoScroll();
-        container.scrollTo({
-          top: Math.max(0, heightOffsets.offsets[messageIndex] - 16),
-          behavior: 'smooth',
-        });
-      }
+      window.requestAnimationFrame(() => {
+        if (!scrollToHighlight()) {
+          scrollToMessageId(match.messageId, 48);
+        }
+      });
+    });
+  }, [scrollElementIntoView, scrollToMessageId]);
+
+  const activateSearchMatch = useCallback((nextIndex: number) => {
+    const match = conversationSearchMatches[nextIndex];
+    if (!match) {
+      return;
+    }
+
+    setActiveSearchMatchIndex(nextIndex);
+    scrollToSearchMatch(match);
+  }, [conversationSearchMatches, scrollToSearchMatch]);
+
+  const goToNextSearchMatch = useCallback(() => {
+    if (conversationSearchMatches.length === 0) {
+      return;
+    }
+
+    const nextIndex = (activeSearchMatchIndex + 1) % conversationSearchMatches.length;
+    activateSearchMatch(nextIndex);
+  }, [activateSearchMatch, activeSearchMatchIndex, conversationSearchMatches.length]);
+
+  const goToPreviousSearchMatch = useCallback(() => {
+    if (conversationSearchMatches.length === 0) {
+      return;
+    }
+
+    const nextIndex = (activeSearchMatchIndex - 1 + conversationSearchMatches.length) % conversationSearchMatches.length;
+    activateSearchMatch(nextIndex);
+  }, [activateSearchMatch, activeSearchMatchIndex, conversationSearchMatches.length]);
+
+  useImperativeHandle(ref, () => ({
+    scrollToMessage: (messageId: string) => {
+      scrollToMessageId(messageId);
     },
     scrollToMessageHeader: (messageId: string, headerIndex: number) => {
       const messageElement = messageRefsRef.current.get(messageId);
@@ -1091,15 +1222,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       } else if (messageElement) {
         scrollElementIntoView(messageElement);
       } else {
-        const messageIndex = messages.findIndex(message => message.id === messageId);
-        const container = scrollContainerRef.current;
-        if (messageIndex !== -1 && container && shouldVirtualize) {
-          cancelAutoScroll();
-          container.scrollTo({
-            top: Math.max(0, heightOffsets.offsets[messageIndex] - 24),
-            behavior: 'smooth',
-          });
-        }
+        scrollToMessageId(messageId, 24);
       }
     },
     scrollToBottom: () => {
@@ -1112,13 +1235,48 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     }
   }), [
     cancelAutoScroll,
-    heightOffsets,
     messages,
     reactivateAutoScroll,
     scrollContainerRef,
     scrollElementIntoView,
+    scrollToMessageId,
     scrollToBottomNow,
     shouldVirtualize,
+  ]);
+
+  useEffect(() => {
+    if (conversationSearchTrigger === lastConversationSearchTriggerRef.current) {
+      return;
+    }
+
+    lastConversationSearchTriggerRef.current = conversationSearchTrigger;
+    setIsSearchOpen(true);
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    });
+  }, [conversationSearchTrigger]);
+
+  useEffect(() => {
+    if (conversationSearchMatches.length === 0) {
+      setActiveSearchMatchIndex(0);
+      return;
+    }
+
+    if (activeSearchMatchIndex >= conversationSearchMatches.length) {
+      activateSearchMatch(0);
+      return;
+    }
+
+    if (searchQuery.trim()) {
+      scrollToSearchMatch(conversationSearchMatches[activeSearchMatchIndex]);
+    }
+  }, [
+    activateSearchMatch,
+    activeSearchMatchIndex,
+    conversationSearchMatches,
+    scrollToSearchMatch,
+    searchQuery,
   ]);
 
   const streamingActive = messages.some(m => m.isStreaming);
@@ -1200,9 +1358,67 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const showTypingIndicator = isLoading && !hasStreamingMessage && messages.length > 0 && messages[messages.length - 1].sender === 'user';
 
   const showEmptyPlaceholder = messages.length === 0 && !isLoading;
+  const hasSearchQuery = searchQuery.trim().length > 0;
+  const searchResultLabel = hasSearchQuery
+    ? `${conversationSearchMatches.length === 0 ? 0 : activeSearchMatchIndex + 1}/${conversationSearchMatches.length}`
+    : '0/0';
 
   return (
     <div className="flex-1 min-w-0">
+      {isSearchOpen && (
+        <div className="fixed right-[40px] top-[49px] z-50 w-[min(360px,calc(100vw-2rem))]">
+          <div className="flex h-9 w-full max-w-[360px] items-center gap-1 border border-border-secondary bg-bg-primary p-1 shadow-lg">
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={searchQuery}
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
+                setActiveSearchMatchIndex(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setIsSearchOpen(false);
+                  return;
+                }
+
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  if (event.shiftKey) {
+                    goToPreviousSearchMatch();
+                  } else {
+                    goToNextSearchMatch();
+                  }
+                }
+              }}
+              placeholder="Find in conversation"
+              aria-label="Find in conversation"
+              className="min-w-0 flex-1 bg-transparent px-2 font-mono text-[0.75rem] text-text-primary outline-none placeholder:text-text-muted"
+            />
+            <span className="w-12 shrink-0 text-right font-mono text-[0.625rem] text-text-tertiary">
+              {searchResultLabel}
+            </span>
+            <MessageActionButton
+              onClick={goToPreviousSearchMatch}
+              label="Previous match"
+              icon={<ChevronUpIcon />}
+              disabled={conversationSearchMatches.length === 0}
+            />
+            <MessageActionButton
+              onClick={goToNextSearchMatch}
+              label="Next match"
+              icon={<ChevronDownIcon />}
+              disabled={conversationSearchMatches.length === 0}
+            />
+            <MessageActionButton
+              onClick={() => setIsSearchOpen(false)}
+              label="Close search"
+              icon={<XIcon />}
+            />
+          </div>
+        </div>
+      )}
       {showEmptyPlaceholder ? (
         <NewChatEmptyState refreshKey={emptyStateRefreshKey ?? 0} />
       ) : (
@@ -1219,6 +1435,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
               editText={editText}
               copiedId={copiedId}
               isLoading={isLoading}
+              searchQuery={isSearchOpen ? searchQuery : ''}
               setMessageRef={setMessageRef}
               setEditText={setEditText}
               onCopy={handleCopy}

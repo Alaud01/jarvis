@@ -375,6 +375,7 @@ const App: React.FC = () => {
   const [voiceTranscript, setVoiceTranscript] = useState<PendingVoiceTranscript | null>(null);
   const [voiceShortcut, setVoiceShortcut] = useState<string>('');
   const [workspaceView, setWorkspaceView] = useState<'chat' | 'dictionary'>('chat');
+  const [conversationSearchTrigger, setConversationSearchTrigger] = useState(0);
   
   const streamingSessionsRef = useRef<Map<string, { conversationId: string }>>(new Map());
   const cleanupFunctionsRef = useRef<(() => void)[]>([]);
@@ -1166,6 +1167,13 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const handleKeyboardShortcut = (e: KeyboardEvent) => {
+      if (e.metaKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+        if (workspaceView === 'chat') {
+          e.preventDefault();
+          setConversationSearchTrigger(trigger => trigger + 1);
+        }
+        return;
+      }
       if (e.metaKey && e.shiftKey && e.key === 'o') {
         e.preventDefault();
         handleNewChat();
@@ -1183,7 +1191,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyboardShortcut);
     return () => window.removeEventListener('keydown', handleKeyboardShortcut);
-  }, [handleNewChat, handleDeleteConversation, currentConversationId]);
+  }, [handleNewChat, handleDeleteConversation, currentConversationId, workspaceView]);
 
   useEffect(() => {
     if (!window.assistant?.onMenuNewConversation) return;
@@ -1656,6 +1664,7 @@ const App: React.FC = () => {
                 messages={messages} 
                 isLoading={isCurrentConversationStreaming}
                 emptyStateRefreshKey={newChatTrigger}
+                conversationSearchTrigger={conversationSearchTrigger}
                 editingMessageId={editingMessageId}
                 onEditMessage={handleEditMessage}
                 onCancelEdit={handleCancelEdit}

@@ -31,6 +31,7 @@ interface CodeProps {
 
 interface MarkdownRendererProps {
   content: string;
+  highlightTerm?: string;
 }
 
 const CopyIcon: React.FC = () => (
@@ -116,8 +117,97 @@ const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props 
   );
 };
 
-const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
+const splitHighlightedText = (
+  text: string,
+  highlightTerm: string,
+  keyPrefix: string
+): React.ReactNode => {
+  const term = highlightTerm.trim();
+  if (!term) {
+    return text;
+  }
+
+  const lowerText = text.toLocaleLowerCase();
+  const lowerTerm = term.toLocaleLowerCase();
+  const pieces: React.ReactNode[] = [];
+  let searchStart = 0;
+  let keyIndex = 0;
+
+  while (searchStart < text.length) {
+    const matchIndex = lowerText.indexOf(lowerTerm, searchStart);
+    if (matchIndex === -1) {
+      pieces.push(text.slice(searchStart));
+      break;
+    }
+
+    if (matchIndex > searchStart) {
+      pieces.push(text.slice(searchStart, matchIndex));
+    }
+
+    pieces.push(
+      <mark key={`${keyPrefix}-${keyIndex}`} className="conversation-search-highlight">
+        {text.slice(matchIndex, matchIndex + term.length)}
+      </mark>
+    );
+    keyIndex += 1;
+    searchStart = matchIndex + term.length;
+  }
+
+  return pieces.length > 0 ? pieces : text;
+};
+
+const highlightNode = (
+  node: React.ReactNode,
+  highlightTerm: string,
+  keyPrefix = 'highlight'
+): React.ReactNode => {
+  if (!highlightTerm.trim()) {
+    return node;
+  }
+
+  if (typeof node === 'string') {
+    return splitHighlightedText(node, highlightTerm, keyPrefix);
+  }
+
+  if (typeof node === 'number') {
+    return splitHighlightedText(String(node), highlightTerm, keyPrefix);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map((child, index) => highlightNode(child, highlightTerm, `${keyPrefix}-${index}`));
+  }
+
+  if (!React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return node;
+  }
+
+  if (
+    node.type === CodeBlock
+    || node.type === PreBlock
+    || node.type === 'code'
+    || node.type === 'mark'
+    || node.type === 'pre'
+  ) {
+    return node;
+  }
+
+  const children = node.props.children;
+  if (children === undefined || children === null) {
+    return node;
+  }
+
+  return React.cloneElement(
+    node,
+    undefined,
+    highlightNode(children, highlightTerm, `${keyPrefix}-child`)
+  );
+};
+
+const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, highlightTerm = '' }) => {
   const normalizedContent = prepareMarkdownMath(content);
+  const highlight = useCallback((children: React.ReactNode) => (
+    highlightNode(children, highlightTerm)
+  ), [highlightTerm]);
 
   return (
     <div className="marktext-content markdown-content text-text-primary">
@@ -127,28 +217,28 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
         components={{
           pre: PreBlock,
           code: CodeBlock,
-          h1: ({ children }) => <h1>{children}</h1>,
-          h2: ({ children }) => <h2>{children}</h2>,
-          h3: ({ children }) => <h3>{children}</h3>,
-          h4: ({ children }) => <h4>{children}</h4>,
-          h5: ({ children }) => <h5>{children}</h5>,
-          h6: ({ children }) => <h6>{children}</h6>,
-          p: ({ children }) => <p>{children}</p>,
-          ul: ({ children }) => <ul>{children}</ul>,
-          ol: ({ children }) => <ol>{children}</ol>,
-          li: ({ children }) => <li>{children}</li>,
+          h1: ({ children }) => <h1>{highlight(children)}</h1>,
+          h2: ({ children }) => <h2>{highlight(children)}</h2>,
+          h3: ({ children }) => <h3>{highlight(children)}</h3>,
+          h4: ({ children }) => <h4>{highlight(children)}</h4>,
+          h5: ({ children }) => <h5>{highlight(children)}</h5>,
+          h6: ({ children }) => <h6>{highlight(children)}</h6>,
+          p: ({ children }) => <p>{highlight(children)}</p>,
+          ul: ({ children }) => <ul>{highlight(children)}</ul>,
+          ol: ({ children }) => <ol>{highlight(children)}</ol>,
+          li: ({ children }) => <li>{highlight(children)}</li>,
           blockquote: ({ children }) => (
             <blockquote>
-              {children}
+              {highlight(children)}
             </blockquote>
           ),
           a: ({ href, children }) => (
             <a href={href} target="_blank" rel="noopener noreferrer">
-              {children}
+              {highlight(children)}
             </a>
           ),
-          strong: ({ children }) => <strong>{children}</strong>,
-          em: ({ children }) => <em>{children}</em>,
+          strong: ({ children }) => <strong>{highlight(children)}</strong>,
+          em: ({ children }) => <em>{highlight(children)}</em>,
           hr: () => <hr />,
           table: ({ children }) => (
             <div className="table-scroll">
@@ -157,11 +247,11 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
               </table>
             </div>
           ),
-          thead: ({ children }) => <thead>{children}</thead>,
-          tbody: ({ children }) => <tbody>{children}</tbody>,
-          tr: ({ children }) => <tr>{children}</tr>,
-          th: ({ children }) => <th>{children}</th>,
-          td: ({ children }) => <td>{children}</td>,
+          thead: ({ children }) => <thead>{highlight(children)}</thead>,
+          tbody: ({ children }) => <tbody>{highlight(children)}</tbody>,
+          tr: ({ children }) => <tr>{highlight(children)}</tr>,
+          th: ({ children }) => <th>{highlight(children)}</th>,
+          td: ({ children }) => <td>{highlight(children)}</td>,
           img: ({ src, alt }) => <img src={src} alt={alt ?? ''} loading="lazy" />,
         }}
       >
