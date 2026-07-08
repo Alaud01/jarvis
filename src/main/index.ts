@@ -628,11 +628,44 @@ function isAbortLikeError(error: unknown): boolean {
   );
 }
 
+function formatLocalUtcOffset(date: Date): string {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absoluteMinutes = Math.abs(offsetMinutes);
+  const hours = Math.floor(absoluteMinutes / 60).toString().padStart(2, '0');
+  const minutes = (absoluteMinutes % 60).toString().padStart(2, '0');
+  return `${sign}${hours}:${minutes}`;
+}
+
+function buildTemporalContext(now = new Date()): string {
+  const resolvedTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'system local time';
+  const localDate = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(now);
+  const localTime = new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+    timeZoneName: 'short',
+  }).format(now);
+
+  return [
+    `Current local date and time: ${localDate} at ${localTime} (${resolvedTimeZone}, UTC${formatLocalUtcOffset(now)}).`,
+    `Current ISO timestamp: ${now.toISOString()}.`,
+    'Interpret relative dates and times like "today", "tomorrow", "tonight", "this week", and "next week" relative to this local date/time unless the user specifies a different timezone.',
+  ].join(' ');
+}
+
 async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> {
   return {
     role: 'system',
     content: [
       'You are Jarvis, a desktop assistant. Your name is Jarvis.',
+      buildTemporalContext(),
       'Use the tavily_search tool for current information, recent facts, source discovery, or explicit web search requests.',
       'After tavily_search, answer from search snippets and source metadata when they are enough.',
       'Use fetch_url only when the full page is necessary for accuracy, and fetch at most one or two high-value primary sources.',
@@ -646,6 +679,7 @@ async function buildSystemPrompt(_conversationId: string): Promise<ChatMessage> 
       'Use browser_drag for drag-and-drop, sliders, sortable items, game pieces, or any interaction that requires press-move-release rather than a click.',
       'Each conversation has its own Browser Control window. The Browser Control page persists across turns within the same conversation only. If the user asks you to continue or try again, inspect the current browser state before reopening the page.',
       'Use browser_open with external=true only when the user specifically wants the page opened in their default browser or needs their normal browser session; after external handoff, do not claim you can inspect or control that default-browser page.',
+      'When providing self-contained HTML, CSS, or JavaScript for the user to copy or save, put it in a fenced Markdown code block with the correct language. Do not use Browser Control to create or preview generated local HTML unless the user explicitly asks you to preview it.',
       'Use Notion tools when the user asks to find, read, add to, or create content in their Notion pages or databases. When the target page or database is ambiguous, ask the user; never invent Notion IDs. Use notion_search to resolve a name to a Notion ID and (for databases) to learn its property schema, then notion_query_database to read rows with filters (e.g. upcoming tasks, incomplete items, items with a certain status). If a Notion call returns 404, tell the user to open the page in Notion via the "..." menu -> Connections -> add the integration, since integrations only see pages and databases where they were explicitly added.',
       'When web access is unnecessary, answer normally without calling a tool.',
       'After using a tool, answer the user with the result instead of repeating raw tool output verbatim.',

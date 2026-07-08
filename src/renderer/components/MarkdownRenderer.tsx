@@ -12,6 +12,7 @@ import css from 'highlight.js/lib/languages/css';
 import json from 'highlight.js/lib/languages/json';
 import bash from 'highlight.js/lib/languages/bash';
 import markdown from 'highlight.js/lib/languages/markdown';
+import xml from 'highlight.js/lib/languages/xml';
 import { prepareMarkdownMath } from '../utils/markdownMath';
 
 hljs.registerLanguage('python', python);
@@ -21,6 +22,8 @@ hljs.registerLanguage('css', css);
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('bash', bash);
 hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('xml', xml);
 
 interface CodeProps {
   node?: any;
@@ -54,6 +57,29 @@ const getCodeText = (children: React.ReactNode): string => (
 const getLanguageFromClassName = (className?: string): string => {
   const match = /language-([\w-]+)/.exec(className || '');
   return match ? match[1] : '';
+};
+
+const fencedCodePattern = /(```[\s\S]*?```|~~~[\s\S]*?~~~)/g;
+const htmlDocumentPattern = /(^|\n)([ \t]*(?:<!doctype\s+html[^>]*>\s*)?<html\b[\s\S]*?<\/html>)/gi;
+
+const fenceHtmlDocumentsOutsideCode = (value: string): string => {
+  let result = '';
+  let lastIndex = 0;
+
+  for (const match of value.matchAll(fencedCodePattern)) {
+    const matchIndex = match.index ?? 0;
+    result += value.slice(lastIndex, matchIndex).replace(
+      htmlDocumentPattern,
+      (_htmlMatch, prefix: string, html: string) => `${prefix}\`\`\`html\n${html.trimEnd()}\n\`\`\``
+    );
+    result += match[0];
+    lastIndex = matchIndex + match[0].length;
+  }
+
+  return result + value.slice(lastIndex).replace(
+    htmlDocumentPattern,
+    (_htmlMatch, prefix: string, html: string) => `${prefix}\`\`\`html\n${html.trimEnd()}\n\`\`\``
+  );
 };
 
 const PreBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
@@ -204,7 +230,7 @@ const highlightNode = (
 };
 
 const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, highlightTerm = '' }) => {
-  const normalizedContent = prepareMarkdownMath(content);
+  const normalizedContent = prepareMarkdownMath(fenceHtmlDocumentsOutsideCode(content));
   const highlight = useCallback((children: React.ReactNode) => (
     highlightNode(children, highlightTerm)
   ), [highlightTerm]);
