@@ -38,6 +38,7 @@ export type VoiceFlowResult = {
     fallback_used?: boolean;
     fallback_reason?: string | null;
   };
+  diagnostics?: unknown;
   success: boolean;
   error?: string;
 };
@@ -187,6 +188,12 @@ async function stopAndProcess(): Promise<void> {
     const audioBuffer = await stopRecording();
     if (audioBuffer.durationMs < 250 || audioBuffer.peak < 0.001) {
       const errorMessage = `Microphone captured silence (${Math.round(audioBuffer.durationMs)}ms, peak ${audioBuffer.peak.toFixed(4)})`;
+      console.warn('[VoiceFlow] Microphone capture rejected as silence:', {
+        durationMs: Math.round(audioBuffer.durationMs),
+        byteLength: audioBuffer.byteLength,
+        peak: Number(audioBuffer.peak.toFixed(4)),
+        rms: Number(audioBuffer.rms.toFixed(4)),
+      });
       showOverlay('error', undefined, errorMessage);
       sendErrorToRenderer(errorMessage);
       return;
@@ -248,9 +255,30 @@ async function stopAndProcess(): Promise<void> {
         }
       }
     } else if (!result.success && result.error) {
+      console.warn('[VoiceFlow] Voice processing failed:', {
+        error: result.error,
+        capture: {
+          durationMs: Math.round(audioBuffer.durationMs),
+          byteLength: audioBuffer.byteLength,
+          peak: Number(audioBuffer.peak.toFixed(4)),
+          rms: Number(audioBuffer.rms.toFixed(4)),
+        },
+        speechDurationMs: result.speech_duration_ms,
+        transcriptionMetadata: result.transcription_metadata,
+        diagnostics: result.diagnostics,
+      });
       showOverlay('error', undefined, result.error);
       sendErrorToRenderer(result.error);
     } else {
+      console.warn('[VoiceFlow] Voice processing failed without a specific error:', {
+        capture: {
+          durationMs: Math.round(audioBuffer.durationMs),
+          byteLength: audioBuffer.byteLength,
+          peak: Number(audioBuffer.peak.toFixed(4)),
+          rms: Number(audioBuffer.rms.toFixed(4)),
+        },
+        result,
+      });
       showOverlay('error', undefined, 'No speech detected');
       sendErrorToRenderer('No speech detected');
     }

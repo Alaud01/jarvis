@@ -85,6 +85,12 @@ If Python tests fail because dependencies are missing, run `pnpm setup:python` f
 | `OPENROUTER_BASE_URL` | No | Main | Override OpenRouter-compatible API base URL |
 | `OPENROUTER_REFERER` / `OPENROUTER_TITLE` | No | Main + python-service | Optional OpenRouter request metadata |
 | `VOICE_LOCAL_PARAKEET_ENABLED` | No | python-service | Try local Parakeet transcription before OpenRouter fallback |
+| `VOICE_LOCAL_PARAKEET_MODEL` | No | python-service | Local Hugging Face/NeMo ASR model, defaults to `nvidia/parakeet-tdt_ctc-110m` |
+| `VOICE_LOCAL_PARAKEET_DEVICE` | No | python-service | Local Parakeet torch device: `mps`, `cpu`, or `auto` |
+| `VOICE_LOCAL_PARAKEET_PRELOAD_ENABLED` | No | python-service | Preload local Parakeet on service startup for faster first dictation |
+| `VOICE_LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS` | No | python-service | How long a dictation may wait for the local model to finish loading |
+| `VOICE_LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED` | No | python-service | Set to `true` to fall back to OpenRouter when local Parakeet times out |
+| `VOICE_LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS` | No | python-service | Unload local Parakeet after this many idle seconds; `0` disables unloading |
 
 See `.env.example` for copyable defaults.
 
@@ -108,7 +114,7 @@ The renderer uses system UI fonts plus a Google-hosted JetBrains Mono stylesheet
 
 - The app is macOS-focused and depends on Electron/macOS APIs for tray, shortcuts, accessibility, and text insertion.
 - Some provider keys are stored in local app storage rather than the macOS Keychain.
-- Local Parakeet transcription support is optional and still falls back to OpenRouter when cold, unavailable, or too slow.
+- Local Parakeet transcription defaults to the Hugging Face/NeMo `nvidia/parakeet-tdt_ctc-110m` model. On Apple Silicon it can use PyTorch MPS/Metal, and it unloads after an idle window to reduce Python memory pressure. It falls back to OpenRouter for local failures; timeout fallback is opt-in so cold starts do not silently become empty cloud transcriptions.
 - Dependency warning cleanup is still worth a pass. Some lockfile warnings come from transitive packages owned by Electron/build tooling rather than direct dependencies.
 
 ## Architecture Highlights

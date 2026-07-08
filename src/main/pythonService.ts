@@ -8,6 +8,7 @@ import { debugLog, infoLog } from './logger';
 
 const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
+const READY_TRANSCRIPTION_PROVIDERS = new Set(['local-parakeet', 'openrouter']);
 
 let pythonProcess: ChildProcess | null = null;
 let isServiceReady = false;
@@ -141,7 +142,7 @@ async function checkServiceHealth(): Promise<{ reachable: boolean; ready: boolea
       reachable: true,
       ready: data.status === 'healthy'
         && data.models_loaded === true
-        && data.transcription_provider === 'openrouter',
+        && READY_TRANSCRIPTION_PROVIDERS.has(data.transcription_provider || ''),
     };
   } catch {
     return { reachable: false, ready: false };
@@ -351,6 +352,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
     fallback_used?: boolean;
     fallback_reason?: string | null;
   };
+  diagnostics?: unknown;
   success: boolean;
   error?: string;
 }> {
@@ -390,6 +392,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
         fallback_used?: boolean;
         fallback_reason?: string | null;
       };
+      diagnostics?: unknown;
       success?: boolean;
       error?: string;
     }>(response, 'process-flow');
@@ -407,6 +410,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       applied_edits: data.applied_edits,
       applied_rules: data.applied_rules,
       transcription_metadata: data.transcription_metadata,
+      diagnostics: data.diagnostics,
       success: data.success ?? false,
       error: data.error,
     };

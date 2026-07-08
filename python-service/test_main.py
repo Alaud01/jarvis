@@ -1,4 +1,5 @@
 import io
+import importlib
 import json
 import os
 import ssl
@@ -26,6 +27,21 @@ class FakeResponse:
 
 
 class VoiceContextTests(unittest.TestCase):
+    def test_local_parakeet_defaults_to_huggingface_110m_with_openrouter_fallback(self):
+        try:
+            with mock.patch.dict(os.environ, {}, clear=True):
+                reloaded_main = importlib.reload(main)
+                self.assertTrue(reloaded_main.LOCAL_PARAKEET_ENABLED)
+                self.assertEqual(reloaded_main.LOCAL_PARAKEET_MODEL, "nvidia/parakeet-tdt_ctc-110m")
+                self.assertEqual(reloaded_main.LOCAL_PARAKEET_DEVICE, "mps")
+                self.assertTrue(reloaded_main.LOCAL_PARAKEET_PRELOAD_ENABLED)
+                self.assertEqual(reloaded_main.OPENROUTER_TRANSCRIPTION_MODEL, "nvidia/parakeet-tdt-0.6b-v3")
+                self.assertEqual(reloaded_main.LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS, 90.0)
+                self.assertFalse(reloaded_main.LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED)
+                self.assertEqual(reloaded_main.LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS, 600.0)
+        finally:
+            importlib.reload(main)
+
     def test_missing_context_uses_generic_defaults(self):
         context = main.parse_voice_context(None)
 
@@ -302,6 +318,86 @@ class OpenRouterTranscriptionTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 401)
         self.assertEqual(urlopen.call_count, 1)
+
+
+class LocalParakeetTranscriptionTests(unittest.TestCase):
+    def setUp(self):
+        self.wav = main.np.zeros(1600, dtype=main.np.float32)
+        self.speech_segments = [(0, 1600)]
+
+    def test_local_timeout_does_not_fall_back_to_openrouter_by_default(self):
+        with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
+            with mock.patch.object(main, "LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED", False):
+                with mock.patch.object(main, "get_ready_local_parakeet_model", side_effect=TimeoutError("loading")):
+                    with mock.patch.object(main, "transcribe_chunks_with_openrouter") as openrouter:
+                        with self.assertRaises(HTTPException) as raised:
+                            main.transcribe_audio(self.wav, self.speech_segments, main.VoiceContext())
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("Local Parakeet", raised.exception.detail)
+        openrouter.assert_not_called()
+
+    def test_cold_start_wait_does_not_count_against_active_transcription_budget(self):
+        with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
+            with mock.patch.object(main, "get_ready_local_parakeet_model") as get_ready:
+                with mock.patch.object(
+                    main,
+                    "transcribe_chunks_with_local_parakeet",
+                    return_value=main.LocalTranscriptionResult("local transcript"),
+                ):
+                    with mock.patch.object(main, "time") as fake_time:
+                        fake_time.perf_counter.side_effect = [100.0, 101.0]
+                        text, metadata = main.transcribe_audio(
+                            self.wav,
+                            self.speech_segments,
+                            main.VoiceContext(),
+                        )
+
+        get_ready.assert_called_once()
+        self.assertEqual(text, "local transcript")
+        self.assertEqual(metadata.provider, "local-parakeet")
+        self.assertFalse(metadata.fallback_used)
+
+    def test_auto_device_prefers_mps_when_available(self):
+        fake_torch = mock.Mock()
+        fake_torch.backends.mps.is_available.return_value = True
+
+        with mock.patch.object(main, "LOCAL_PARAKEET_DEVICE", "auto"):
+            self.assertEqual(main.select_local_parakeet_device(fake_torch), "mps")
+
+    def test_auto_device_uses_cpu_when_mps_unavailable(self):
+        fake_torch = mock.Mock()
+        fake_torch.backends.mps.is_available.return_value = False
+
+        with mock.patch.object(main, "LOCAL_PARAKEET_DEVICE", "auto"):
+            self.assertEqual(main.select_local_parakeet_device(fake_torch), "cpu")
+
+    def test_forced_mps_fails_when_unavailable(self):
+        fake_torch = mock.Mock()
+        fake_torch.backends.mps.is_available.return_value = False
+
+        with mock.patch.object(main, "LOCAL_PARAKEET_DEVICE", "mps"):
+            with self.assertRaises(RuntimeError):
+                main.select_local_parakeet_device(fake_torch)
+
+    def test_unload_local_parakeet_model_clears_resident_model_state(self):
+        try:
+            main.local_parakeet_model = object()
+            main.local_parakeet_device = "mps"
+            main.local_parakeet_last_used_at = 123.0
+            with mock.patch.object(main.gc, "collect") as collect:
+                with mock.patch.object(main, "clear_torch_device_cache") as clear_cache:
+                    main.unload_local_parakeet_model("test")
+
+            self.assertIsNone(main.local_parakeet_model)
+            self.assertIsNone(main.local_parakeet_device)
+            self.assertIsNone(main.local_parakeet_last_used_at)
+            collect.assert_called_once()
+            clear_cache.assert_called_once_with("mps")
+        finally:
+            main.local_parakeet_model = None
+            main.local_parakeet_device = None
+            main.local_parakeet_last_used_at = None
 
 
 if __name__ == "__main__":

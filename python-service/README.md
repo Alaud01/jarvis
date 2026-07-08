@@ -5,9 +5,11 @@ FastAPI service for audio transcription with VAD and text refinement.
 ## Prerequisites
 
 - Python 3.14+
-- `OPENROUTER_API_KEY` for transcription and refinement
+- `OPENROUTER_API_KEY` for OpenRouter fallback transcription and refinement
+- NeMo and PyTorch installed in the environment when local Parakeet transcription is enabled
 
-OpenRouter remains the default transcription provider. Optional OpenRouter settings:
+Local Parakeet is the default transcription provider. OpenRouter remains configured as the fallback path
+for cold starts, local model failures, and transcript refinement. Optional OpenRouter settings:
 
 ```bash
 export OPENROUTER_TRANSCRIPTION_MODEL="nvidia/parakeet-tdt-0.6b-v3"
@@ -27,17 +29,31 @@ Optional local Parakeet settings:
 ```bash
 export VOICE_LOCAL_PARAKEET_ENABLED="true"
 export VOICE_LOCAL_PARAKEET_MODEL="nvidia/parakeet-tdt_ctc-110m"
+export VOICE_LOCAL_PARAKEET_DEVICE="mps"
+export VOICE_LOCAL_PARAKEET_PRELOAD_ENABLED="true"
+export VOICE_LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS="90"
+export VOICE_LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED="false"
+export VOICE_LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS="600"
 export VOICE_LOCAL_PARAKEET_READY_BUDGET_SECONDS="0.5"
 export VOICE_LOCAL_PARAKEET_SHORT_BUDGET_SECONDS="3.0"
 export VOICE_LOCAL_PARAKEET_MEDIUM_BUDGET_SECONDS="5.0"
 ```
 
 When local Parakeet is enabled, the service starts loading it in the background and uses it only when it is
-ready inside the active dictation budget. If the local model is cold, unavailable, or too slow, the request
-falls back sequentially to OpenRouter and returns transcription metadata describing the provider/model used.
-Vocabulary entries are already passed through the voice context for refinement and future model guidance;
-NeMo CTC context-biasing still needs to be wired before `used_vocabulary_guidance` is reported as true for
-local Parakeet.
+ready. Cold start has its own wait budget and does not count against active transcription latency. If the
+local model is unavailable, the request falls back sequentially to OpenRouter and returns transcription
+metadata describing the provider/model used. Local timeout fallback is disabled by default so a cold or slow
+local model does not silently become an unguided OpenRouter transcription; set
+`VOICE_LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED=true` to opt into that behavior.
+Vocabulary entries are passed through the voice context as Vocabulary Guidance. Local Parakeet uses NeMo CTC
+context-biasing when guidance terms are available, and transcription metadata reports whether guidance was
+used.
+
+On Apple Silicon, `VOICE_LOCAL_PARAKEET_DEVICE=mps` forces PyTorch's Metal backend and fails fast if MPS is
+not available. Use `auto` to prefer MPS when available and otherwise use CPU. The loaded NeMo/PyTorch model
+can keep several GB resident; `VOICE_LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS` unloads it after inactivity and
+clears the torch device cache. Set `VOICE_LOCAL_PARAKEET_PRELOAD_ENABLED=false` for the lowest idle RAM at
+the cost of paying cold-start latency on the next dictation.
 
 Refinement routes to the lowest-latency provider that meets the preferred throughput floor. Providers below
 the floor remain available as OpenRouter fallbacks.

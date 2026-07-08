@@ -24,6 +24,10 @@ _Avoid_: Correction observation, vocabulary guidance
 The nearby dictated text around a Rule Application that helps identify the same applied change after later edits.
 _Avoid_: Rule scope, observed app
 
+**App Context**:
+The frontmost application identity available during a Dictation.
+_Avoid_: Application Context Window, Rule Scope
+
 **Rule Rejection**:
 Evidence that the user rejected the output of a Rule Application by reverting it or replacing it with different text.
 _Avoid_: Inverse correction, new replacement rule
@@ -72,6 +76,7 @@ _Avoid_: autonomous browser sidecar, browser task
 
 - A **Vocabulary Entry** may exist without a **Replacement Rule**
 - A **Vocabulary Entry** belongs to the user globally, while its priority may vary by application context
+- A **Dictation** may carry **App Context**
 - A **Manual Vocabulary Addition** activates **Vocabulary Guidance** without creating a **Replacement Rule**
 - **Vocabulary Guidance** uses active **Vocabulary Entries** selected by relevance
 - One high-confidence **Correction Observation** may activate **Vocabulary Guidance** for an eligible **Vocabulary Entry**
