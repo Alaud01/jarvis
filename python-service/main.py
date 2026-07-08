@@ -9,6 +9,7 @@ import ssl
 import tempfile
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from math import gcd
 from pathlib import Path
@@ -35,6 +36,17 @@ logging.basicConfig(
     format="%(message)s",
 )
 logger = logging.getLogger("VoiceService")
+
+LOCAL_PARAKEET_SUPPRESS_STARTUP_WARNINGS = os.environ.get(
+    "VOICE_LOCAL_PARAKEET_SUPPRESS_STARTUP_WARNINGS",
+    "true",
+).strip().lower() in {"1", "true", "yes", "on"}
+PYTHON_CACHE_ROOT = Path(
+    os.environ.get(
+        "VOICE_PYTHON_CACHE_DIR",
+        str(Path(tempfile.gettempdir()) / "jarvis-python-cache"),
+    )
+)
 
 VAD_THRESHOLD = float(os.environ.get("VOICE_VAD_THRESHOLD", "0.5"))
 VAD_MIN_SILENCE_MS = max(0, int(os.environ.get("VOICE_VAD_MIN_SILENCE_MS", "700")))
@@ -132,6 +144,51 @@ local_parakeet_device = None
 local_parakeet_last_used_at = None
 local_parakeet_active_requests = 0
 local_parakeet_idle_unload_thread = None
+
+
+def configure_python_cache_dirs() -> None:
+    """Keep noisy ML library cache warnings out of the service logs."""
+    cache_dirs = {
+        "MPLCONFIGDIR": PYTHON_CACHE_ROOT / "matplotlib",
+        "XDG_CACHE_HOME": PYTHON_CACHE_ROOT / "xdg",
+    }
+    for env_name, cache_dir in cache_dirs.items():
+        os.environ.setdefault(env_name, str(cache_dir))
+        try:
+            Path(os.environ[env_name]).mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            logger.info("[VoiceService] Could not prepare %s=%s: %s", env_name, os.environ[env_name], error)
+
+
+def suppress_local_parakeet_startup_noise() -> None:
+    if not LOCAL_PARAKEET_SUPPRESS_STARTUP_WARNINGS:
+        return
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Couldn't find ffmpeg or avconv.*",
+        category=RuntimeWarning,
+        module=r"pydub\.utils",
+    )
+    logging.getLogger("nemo_logger").setLevel(logging.ERROR)
+    logging.getLogger("nemo").setLevel(logging.ERROR)
+
+
+def configure_local_parakeet_import_environment() -> None:
+    configure_python_cache_dirs()
+    suppress_local_parakeet_startup_noise()
+
+
+def quiet_nemo_logger_after_import() -> None:
+    if not LOCAL_PARAKEET_SUPPRESS_STARTUP_WARNINGS:
+        return
+
+    try:
+        from nemo.utils import logging as nemo_logging
+
+        nemo_logging.setLevel(logging.ERROR)
+    except Exception as error:
+        logger.info("[VoiceService] Could not adjust NeMo log level: %s", error)
 
 
 class VoiceAppContext(BaseModel):
@@ -894,8 +951,10 @@ def load_local_parakeet_model():
     local_parakeet_started_at = time.perf_counter()
     local_parakeet_loading = True
     try:
+        configure_local_parakeet_import_environment()
         from nemo.collections.asr.models import ASRModel
         import torch
+        quiet_nemo_logger_after_import()
 
         device = select_local_parakeet_device(torch)
         model = ASRModel.from_pretrained(model_name=LOCAL_PARAKEET_MODEL)

@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import ssl
+import tempfile
 import unittest
 from unittest import mock
 from urllib import error as urllib_error
@@ -398,6 +399,18 @@ class LocalParakeetTranscriptionTests(unittest.TestCase):
             main.local_parakeet_model = None
             main.local_parakeet_device = None
             main.local_parakeet_last_used_at = None
+
+    def test_local_parakeet_import_environment_sets_writable_cache_dirs_and_quiets_nemo(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(main, "PYTHON_CACHE_ROOT", main.Path(temp_dir)):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    main.configure_local_parakeet_import_environment()
+
+                    self.assertEqual(os.environ["MPLCONFIGDIR"], str(main.Path(temp_dir) / "matplotlib"))
+                    self.assertEqual(os.environ["XDG_CACHE_HOME"], str(main.Path(temp_dir) / "xdg"))
+                    self.assertTrue(main.Path(os.environ["MPLCONFIGDIR"]).is_dir())
+                    self.assertTrue(main.Path(os.environ["XDG_CACHE_HOME"]).is_dir())
+                    self.assertEqual(main.logging.getLogger("nemo_logger").level, main.logging.ERROR)
 
 
 if __name__ == "__main__":
