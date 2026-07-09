@@ -338,6 +338,19 @@ class LocalParakeetTranscriptionTests(unittest.TestCase):
         self.assertIn("Local Parakeet", raised.exception.detail)
         openrouter.assert_not_called()
 
+    def test_local_failure_without_openrouter_key_reports_local_failure(self):
+        with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with mock.patch.object(main, "get_ready_local_parakeet_model", side_effect=RuntimeError("model cache missing")):
+                    with mock.patch.object(main, "transcribe_chunks_with_openrouter") as openrouter:
+                        with self.assertRaises(HTTPException) as raised:
+                            main.transcribe_audio(self.wav, self.speech_segments, main.VoiceContext())
+
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("Local Parakeet is unavailable", raised.exception.detail)
+        self.assertIn("model cache missing", raised.exception.detail)
+        openrouter.assert_not_called()
+
     def test_cold_start_wait_does_not_count_against_active_transcription_budget(self):
         with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
             with mock.patch.object(main, "get_ready_local_parakeet_model") as get_ready:

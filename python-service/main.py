@@ -1209,6 +1209,22 @@ def transcribe_chunks_with_openrouter(transcription_chunks: list[np.ndarray]) ->
     return " ".join(transcripts).strip()
 
 
+def openrouter_api_key_configured() -> bool:
+    return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+
+
+def local_parakeet_unavailable_response(error: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=(
+            "Local Parakeet is unavailable and OPENROUTER_API_KEY is not configured, "
+            "so Jarvis cannot fall back to cloud transcription. "
+            f"Model: {LOCAL_PARAKEET_MODEL}. "
+            f"Reason: {error}"
+        ),
+    )
+
+
 def transcribe_chunks_with_local_parakeet(
     transcription_chunks: list[np.ndarray],
     vocabulary: list[VoiceVocabularyEntry],
@@ -1284,6 +1300,9 @@ def transcribe_audio(
             if isinstance(error, TimeoutError) and not LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED:
                 logger.warning("[VoiceService] Local Parakeet timed out without OpenRouter fallback: %s", error)
                 raise local_parakeet_timeout_response(error) from error
+            if not openrouter_api_key_configured():
+                logger.warning("[VoiceService] Local Parakeet failed without OpenRouter fallback: %s", error)
+                raise local_parakeet_unavailable_response(error) from error
             logger.info("[VoiceService] Local Parakeet unavailable/slow (%s); falling back to OpenRouter", error)
             transcript = transcribe_chunks_with_openrouter(transcription_chunks)
             return transcript, TranscriptionMetadata(
