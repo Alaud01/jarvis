@@ -59,13 +59,22 @@ const VoiceSetupPanel: React.FC = () => {
   }, [refreshStatus]);
 
   useEffect(() => {
+    if (
+      status
+      && !status.installInProgress
+      && status.status !== 'failed'
+      && (status.status === 'ready' || dismissed)
+    ) {
+      return undefined;
+    }
+
     const interval = window.setInterval(
       () => void refreshStatus(),
       status?.installInProgress ? INSTALLING_POLL_MS : IDLE_POLL_MS,
     );
 
     return () => window.clearInterval(interval);
-  }, [refreshStatus, status?.installInProgress]);
+  }, [dismissed, refreshStatus, status]);
 
   const handleInstall = async () => {
     if (!window.assistant?.installLocalVoiceModel || status?.installInProgress) {

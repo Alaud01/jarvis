@@ -146,10 +146,15 @@ async function dependenciesInstalled(): Promise<boolean> {
     return false;
   }
 
+  if (fs.existsSync(getModelReadyMarkerPath())) {
+    return true;
+  }
+
   return commandSucceeds(
     pythonExecutable,
     ['-c', 'import torch; from nemo.collections.asr.models import ASRModel'],
     getManagedVoiceRuntimeEnv(),
+    60000,
   );
 }
 
