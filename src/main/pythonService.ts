@@ -24,30 +24,42 @@ function getPythonServicePath(): string {
   return path.join(process.resourcesPath, 'python-service');
 }
 
-function getPythonExecutable(): string {
+function getPythonRuntime(): { executable: string; env: NodeJS.ProcessEnv } {
   const managedPythonExecutable = getReadyManagedVoicePythonExecutable();
   if (managedPythonExecutable) {
-    return managedPythonExecutable;
+    return {
+      executable: managedPythonExecutable,
+      env: getManagedVoiceRuntimeEnv(),
+    };
   }
 
   const venvPath = path.join(getPythonServicePath(), 'venv');
   if (fs.existsSync(venvPath)) {
     if (process.platform === 'win32') {
-      return path.join(venvPath, 'Scripts', 'python.exe');
+      return {
+        executable: path.join(venvPath, 'Scripts', 'python.exe'),
+        env: {},
+      };
     }
-    return path.join(venvPath, 'bin', 'python');
+    return {
+      executable: path.join(venvPath, 'bin', 'python'),
+      env: {},
+    };
   }
 
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   if (isDev) {
     console.warn('[PythonService] No local virtualenv found, falling back to system Python');
     if (process.platform === 'win32') {
-      return 'python';
+      return { executable: 'python', env: {} };
     }
-    return 'python3';
+    return { executable: 'python3', env: {} };
   }
 
-  return process.platform === 'win32' ? 'python' : 'python3';
+  return {
+    executable: process.platform === 'win32' ? 'python' : 'python3',
+    env: {},
+  };
 }
 
 export async function startPythonService(): Promise<boolean> {
@@ -83,14 +95,14 @@ export async function startPythonService(): Promise<boolean> {
 
   infoLog(`[PythonService] Starting Python service from ${serviceDir}`);
 
-  const pythonExe = getPythonExecutable();
+  const pythonRuntime = getPythonRuntime();
 
-  pythonProcess = spawn(pythonExe, ['-m', 'uvicorn', 'main:app', '--host', PYTHON_SERVICE_HOST, '--port', String(PYTHON_SERVICE_PORT)], {
+  pythonProcess = spawn(pythonRuntime.executable, ['-m', 'uvicorn', 'main:app', '--host', PYTHON_SERVICE_HOST, '--port', String(PYTHON_SERVICE_PORT)], {
     cwd: serviceDir,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      ...getManagedVoiceRuntimeEnv(),
+      ...pythonRuntime.env,
       PYTHONUNBUFFERED: '1',
     },
   });

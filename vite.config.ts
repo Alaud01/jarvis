@@ -7,7 +7,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5174,
-    strictPort: true
+    strictPort: true,
+    watch: {
+      ignored: ['**/.codebase-memory/**']
+    }
   },
   build: {
     outDir: '../../dist/renderer',

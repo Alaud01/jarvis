@@ -13,3 +13,4 @@ build/
 .env.local
 .env.*.local
 .opencode/
+.codebase-memory/

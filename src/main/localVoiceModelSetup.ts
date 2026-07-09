@@ -13,6 +13,7 @@ let installPromise: Promise<LocalVoiceModelInstallResult> | null = null;
 let lastStep = '';
 let lastError = '';
 let logs: string[] = [];
+const dependencyCheckCache = new Map<string, Promise<boolean>>();
 
 function appendLog(message: string): void {
   const trimmed = message.trim();
@@ -49,6 +50,7 @@ export function getManagedVoiceRuntimeEnv(): NodeJS.ProcessEnv {
     HF_HOME: path.join(serviceDir, 'cache', 'huggingface'),
     TORCH_HOME: path.join(serviceDir, 'cache', 'torch'),
     NEMO_HOME: path.join(serviceDir, 'cache', 'nemo'),
+    MPLCONFIGDIR: path.join(serviceDir, 'cache', 'matplotlib'),
   };
 }
 
@@ -66,6 +68,15 @@ function getSourcePythonServiceDir(): string {
     return path.join(__dirname, '../../python-service');
   }
   return path.join(process.resourcesPath, 'python-service');
+}
+
+function getSourceVoicePythonExecutable(): string | null {
+  const venvDir = path.join(getSourcePythonServiceDir(), 'venv');
+  const pythonExecutable = process.platform === 'win32'
+    ? path.join(venvDir, 'Scripts', 'python.exe')
+    : path.join(venvDir, 'bin', 'python');
+
+  return fs.existsSync(pythonExecutable) ? pythonExecutable : null;
 }
 
 function getSystemPythonExecutable(): string {
@@ -141,30 +152,64 @@ async function commandSucceeds(
 }
 
 async function dependenciesInstalled(): Promise<boolean> {
-  const pythonExecutable = getManagedVoicePythonExecutable();
-  if (!fs.existsSync(pythonExecutable)) {
-    return false;
-  }
-
   if (fs.existsSync(getModelReadyMarkerPath())) {
     return true;
   }
 
-  return commandSucceeds(
+  const pythonExecutable = getManagedVoicePythonExecutable();
+  return pythonExecutable ? localParakeetDependenciesInstalled(pythonExecutable, getManagedVoiceRuntimeEnv()) : false;
+}
+
+function localParakeetDependenciesInstalled(
+  pythonExecutable: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  if (!fs.existsSync(pythonExecutable)) {
+    return Promise.resolve(false);
+  }
+
+  const cacheKey = `${pythonExecutable}:${env?.HF_HOME || ''}:${env?.NEMO_HOME || ''}:${env?.TORCH_HOME || ''}`;
+  const cached = dependencyCheckCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const check = commandSucceeds(
     pythonExecutable,
     ['-c', 'import torch; from nemo.collections.asr.models import ASRModel'],
-    getManagedVoiceRuntimeEnv(),
+    env,
     60000,
   );
+  dependencyCheckCache.set(cacheKey, check);
+  return check;
+}
+
+async function findReadyLocalVoiceRuntime(): Promise<{ pythonExecutable: string; managed: boolean } | null> {
+  const managedPythonExecutable = getManagedVoicePythonExecutable();
+  if (fs.existsSync(getModelReadyMarkerPath()) && fs.existsSync(managedPythonExecutable)) {
+    return { pythonExecutable: managedPythonExecutable, managed: true };
+  }
+
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  const sourcePythonExecutable = isDev ? getSourceVoicePythonExecutable() : null;
+  if (
+    sourcePythonExecutable
+    && await localParakeetDependenciesInstalled(sourcePythonExecutable)
+  ) {
+    return { pythonExecutable: sourcePythonExecutable, managed: false };
+  }
+
+  return null;
 }
 
 async function buildLocalVoiceModelStatus(installInProgress = installPromise !== null): Promise<LocalVoiceModelStatus> {
   const managedServiceDir = getManagedVoiceServiceDir();
-  const pythonExecutable = fs.existsSync(getManagedVoicePythonExecutable())
-    ? getManagedVoicePythonExecutable()
-    : null;
+  const readyRuntime = await findReadyLocalVoiceRuntime();
+  const managedPythonExecutable = getManagedVoicePythonExecutable();
+  const pythonExecutable = readyRuntime?.pythonExecutable
+    || (fs.existsSync(managedPythonExecutable) ? managedPythonExecutable : getSourceVoicePythonExecutable());
   const depsInstalled = await dependenciesInstalled();
-  const modelReady = fs.existsSync(getModelReadyMarkerPath());
+  const modelReady = Boolean(readyRuntime);
   const openRouterFallbackConfigured = Boolean(
     process.env.OPENROUTER_API_KEY?.trim(),
   );
@@ -172,12 +217,12 @@ async function buildLocalVoiceModelStatus(installInProgress = installPromise !==
   return {
     status: installInProgress
       ? 'installing'
-      : modelReady && depsInstalled
+      : modelReady
         ? 'ready'
         : lastError
           ? 'failed'
           : 'missing',
-    dependenciesInstalled: depsInstalled,
+    dependenciesInstalled: Boolean(readyRuntime) || depsInstalled,
     modelReady,
     installInProgress,
     managedServiceDir,
