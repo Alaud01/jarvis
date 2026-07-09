@@ -57,6 +57,7 @@
   "build": {
     "appId": "com.jarvis.app",
     "files": [
+      "assets/**/*",
       "dist/main/**/*",
       "dist/preload/**/*",
       "dist/renderer/**/*",
@@ -77,6 +78,7 @@
     ],
     "mac": {
       "category": "public.app-category.productivity",
+      "icon": "assets/icon.icns",
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
     }

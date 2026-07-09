@@ -785,9 +785,20 @@ select option {
    fade-up completes before the slide begins to avoid transform conflicts. */
 .jarvis-wordmark-j {
   font-weight: 700;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.56em;
+  height: 1em;
   opacity: 0;
   transform: translateX(var(--j-offset, 0));
+}
+
+.jarvis-wordmark-mark {
+  display: block;
+  width: 100%;
+  height: 100%;
+  color: currentColor;
 }
 
 .jarvis-wordmark-j.is-animated {
