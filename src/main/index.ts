@@ -90,6 +90,7 @@ import type {
 } from '../shared/dictionary';
 import { debugLog, infoLog } from './logger';
 import { compactMessagesIfNeeded, estimateTotalTokens, getContextThresholdTokens } from './contextCompaction';
+import { getLocalVoiceModelStatus, installLocalVoiceModel } from './localVoiceModelSetup';
 
 dotenv.config({ quiet: true });
 
@@ -1586,6 +1587,21 @@ ipcMain.handle('stop-stream', async (_event, request: StopStreamRequest) => {
 
 registerVoiceFlowIPC();
 
+ipcMain.handle('voice-model:status', async () => {
+  return getLocalVoiceModelStatus();
+});
+
+ipcMain.handle('voice-model:install', async () => {
+  const result = await installLocalVoiceModel();
+  if (result.success) {
+    await stopPythonService();
+    void startPythonService().catch((error) => {
+      console.error('[Main] Failed to restart Python voice service after local model install:', error);
+    });
+  }
+  return result;
+});
+
 ipcMain.handle('store:load-conversations', async () => {
   return loadConversations();
 });
@@ -1671,6 +1687,7 @@ ipcMain.handle('store:load-openrouter-api-key', async () => {
 ipcMain.handle('store:save-openrouter-api-key', async (_event, key: string) => {
   saveOpenRouterApiKey(key);
   setOpenRouterApiKey(key);
+  process.env.OPENROUTER_API_KEY = key;
   return { success: true };
 });
 
@@ -1822,9 +1839,15 @@ function buildAppMenu(): Electron.MenuItemConstructorOptions[] {
 }
 
 app.whenReady().then(async () => {
+  const savedOpenCodeGoApiKey = loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY || '';
+  const savedOpenRouterApiKey = loadOpenRouterApiKey() || process.env.OPENROUTER_API_KEY || '';
+  if (savedOpenRouterApiKey) {
+    process.env.OPENROUTER_API_KEY = savedOpenRouterApiKey;
+  }
+
   initializeProviders(
-    loadOpenCodeGoApiKey() || process.env.OPENCODE_GO_API_KEY,
-    loadOpenRouterApiKey() || process.env.OPENROUTER_API_KEY,
+    savedOpenCodeGoApiKey,
+    savedOpenRouterApiKey,
   );
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenu()));

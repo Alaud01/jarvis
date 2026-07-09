@@ -6,10 +6,12 @@ import TopNavbar from './components/TopNavbar';
 import CopyNotification from './components/CopyNotification';
 import MessageTrail from './components/MessageTrail';
 import ScrollToBottomButton from './components/ScrollToBottomButton';
+import VoiceSetupPanel from './components/VoiceSetupPanel';
 import { ThemeProvider } from './context/ThemeContext';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
+import type { LocalVoiceModelInstallResult, LocalVoiceModelStatus } from '../shared/voiceSetup';
 import type {
   CreateDictionaryEntryInput,
   CreateReplacementRuleInput,
@@ -313,6 +315,8 @@ declare global {
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       getVoiceRecordingState: () => Promise<'idle' | 'recording' | 'processing'>;
+      getLocalVoiceModelStatus: () => Promise<LocalVoiceModelStatus>;
+      installLocalVoiceModel: () => Promise<LocalVoiceModelInstallResult>;
       onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => () => void;
       onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => () => void;
       onVoiceError: (callback: (error: string) => void) => () => void;
@@ -1678,6 +1682,7 @@ const App: React.FC = () => {
               />
               {showScrollButton && <ScrollToBottomButton onClick={handleScrollToBottom} />}
             </div>
+            <VoiceSetupPanel />
             
             <InputArea
               onSendMessage={handleSendMessage}

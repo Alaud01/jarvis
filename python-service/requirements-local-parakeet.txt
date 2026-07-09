@@ -1,0 +1,6 @@
+# Heavy local ASR dependencies for the optional managed Parakeet runtime.
+# Keep these pinned so app-managed installs are reproducible.
+torch==2.5.1
+torchaudio==2.5.1
+nemo_toolkit[asr]==2.1.0
+huggingface_hub==0.27.1

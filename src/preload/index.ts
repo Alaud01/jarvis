@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
+import type { LocalVoiceModelInstallResult, LocalVoiceModelStatus } from '../shared/voiceSetup';
 import type {
   CreateDictionaryEntryInput,
   CreateReplacementRuleInput,
@@ -81,6 +82,8 @@ contextBridge.exposeInMainWorld('assistant', {
   startVoiceRecording: () => ipcRenderer.invoke('start-voice-recording'),
   stopVoiceRecording: () => ipcRenderer.invoke('stop-voice-recording'),
   getVoiceRecordingState: () => ipcRenderer.invoke('voice-recording-state'),
+  getLocalVoiceModelStatus: (): Promise<LocalVoiceModelStatus> => ipcRenderer.invoke('voice-model:status'),
+  installLocalVoiceModel: (): Promise<LocalVoiceModelInstallResult> => ipcRenderer.invoke('voice-model:install'),
   onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => {
     const listener = (_event: any, state: 'idle' | 'recording' | 'processing') => callback(state);
     ipcRenderer.on('voice-flow-state', listener);

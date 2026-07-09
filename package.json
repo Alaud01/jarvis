@@ -62,6 +62,19 @@
       "dist/renderer/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "python-service",
+        "to": "python-service",
+        "filter": [
+          "**/*",
+          "!venv/**",
+          "!__pycache__/**",
+          "!.pytest_cache/**",
+          "!*.pyc"
+        ]
+      }
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "entitlements": "entitlements.mac.plist",

@@ -5,6 +5,7 @@ import { app } from 'electron';
 import type { RecordedAudio } from './audioRecorder';
 import type { VoiceContext } from '../shared/voice';
 import { debugLog, infoLog } from './logger';
+import { getManagedVoiceRuntimeEnv, getReadyManagedVoicePythonExecutable } from './localVoiceModelSetup';
 
 const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
@@ -24,6 +25,11 @@ function getPythonServicePath(): string {
 }
 
 function getPythonExecutable(): string {
+  const managedPythonExecutable = getReadyManagedVoicePythonExecutable();
+  if (managedPythonExecutable) {
+    return managedPythonExecutable;
+  }
+
   const venvPath = path.join(getPythonServicePath(), 'venv');
   if (fs.existsSync(venvPath)) {
     if (process.platform === 'win32') {
@@ -82,7 +88,11 @@ export async function startPythonService(): Promise<boolean> {
   pythonProcess = spawn(pythonExe, ['-m', 'uvicorn', 'main:app', '--host', PYTHON_SERVICE_HOST, '--port', String(PYTHON_SERVICE_PORT)], {
     cwd: serviceDir,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    env: {
+      ...process.env,
+      ...getManagedVoiceRuntimeEnv(),
+      PYTHONUNBUFFERED: '1',
+    },
   });
 
   const spawnedProcess = pythonProcess;

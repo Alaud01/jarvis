@@ -58,6 +58,12 @@ pnpm start            # Compile, build renderer, and launch Electron
 
 The voice service uses one canonical port: `VOICE_SERVICE_PORT`, defaulting to `8765`. Electron, `pnpm start:python`, and direct `python-service/main.py` startup all use that same default so the app does not depend on how the sidecar was started.
 
+## Local Voice Model Setup
+
+Jarvis can run voice transcription locally with Parakeet, but the heavy PyTorch/NeMo runtime and model weights are not installed by `pnpm setup:python`. When the app detects that the local runtime is missing, the chat workspace shows a **Local voice model** setup panel. Choosing **Install** creates a managed runtime under `~/Library/Application Support/Jarvis/python-service`, installs the pinned local ASR dependencies, and downloads `nvidia/parakeet-tdt_ctc-110m`.
+
+If the user skips setup or installation fails, Jarvis falls back to OpenRouter transcription/refinement when `OPENROUTER_API_KEY` is configured. The packaged Electron app includes the lightweight `python-service` source as an app resource, while the heavyweight local ML runtime stays in the user's application-support directory.
+
 ## Test And Build
 
 ```bash
