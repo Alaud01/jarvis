@@ -176,30 +176,28 @@ async function reclaimPortIfStale(): Promise<void> {
     return;
   }
 
-  let pids: string[] = [];
   try {
     const { execSync } = await import('child_process');
     const output = execSync(`lsof -ti tcp:${PYTHON_SERVICE_PORT} -sTCP:LISTEN`, {
       timeout: 3000,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).toString().trim();
-    pids = output.split('\n').map((p) => p.trim()).filter(Boolean);
+    const pids = output.split('\n').map((p) => p.trim()).filter(Boolean);
+    if (pids.length === 0) {
+      return;
+    }
+
+    console.warn(`[PythonService] Found stale process(es) ${pids.join(', ')} on port ${PYTHON_SERVICE_PORT}; attempting to reclaim`);
+    for (const pid of pids) {
+      try {
+        process.kill(Number(pid), 'SIGTERM');
+      } catch {
+        // Process may have already exited; ignore.
+      }
+    }
   } catch {
     // lsof found nothing or is unavailable; nothing to reclaim.
     return;
-  }
-
-  if (pids.length === 0) {
-    return;
-  }
-
-  console.warn(`[PythonService] Found stale process(es) ${pids.join(', ')} on port ${PYTHON_SERVICE_PORT}; attempting to reclaim`);
-  for (const pid of pids) {
-    try {
-      process.kill(Number(pid), 'SIGTERM');
-    } catch {
-      // Process may have already exited; ignore.
-    }
   }
 
   // Give the stale process a moment to release the socket.
@@ -344,7 +342,7 @@ async function parseJsonResponse<T extends Record<string, unknown>>(
 
   try {
     return { ok: true, data: JSON.parse(responseText) as T };
-  } catch (error) {
+  } catch {
     const preview = responseText.slice(0, 200);
     console.error(`[PythonService] ${context} returned non-JSON body: ${preview}`);
     return {

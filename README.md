@@ -47,6 +47,7 @@ pnpm setup:python
 ```
 
 Fill in whichever provider keys you want to use in `.env`. Ollama can run without a cloud key if a local Ollama server is available.
+Provider credentials are read only from environment variables; Jarvis does not copy them into its application data store.
 
 ## Development
 
@@ -106,7 +107,8 @@ Jarvis is a local desktop assistant, but it can touch sensitive workflows. Befor
 
 Important points:
 
-- API keys are stored locally. OpenRouter and OpenCode Go keys saved through the UI currently use `electron-store`; this is convenient for development, but OS-backed secure storage would be stronger.
+- The `fetch_url` tool is public-internet-only: DNS results and redirects to localhost, private, link-local, reserved, or other non-public addresses are blocked.
+- Provider API keys are read from `.env` or the parent process environment and are never persisted in `electron-store`. Keep `.env` private; it is excluded by `.gitignore`.
 - Browser Control uses a Jarvis-owned local browser window. It does not control the user's normal browser profile.
 - `browser_evaluate` can run JavaScript inside the Jarvis-owned browser page. Treat it as a powerful debugging/recovery tool, not as a general-purpose sandbox.
 - Voice dictation may capture nearby focused-field context for refinement and correction learning.
@@ -119,7 +121,6 @@ The renderer uses system UI fonts plus a Google-hosted JetBrains Mono stylesheet
 ## Known Limitations
 
 - The app is macOS-focused and depends on Electron/macOS APIs for tray, shortcuts, accessibility, and text insertion.
-- Some provider keys are stored in local app storage rather than the macOS Keychain.
 - Local Parakeet transcription defaults to the Hugging Face/NeMo `nvidia/parakeet-tdt_ctc-110m` model. On Apple Silicon it can use PyTorch MPS/Metal, and it unloads after an idle window to reduce Python memory pressure. It falls back to OpenRouter for local failures; timeout fallback is opt-in so cold starts do not silently become empty cloud transcriptions.
 - Dependency warning cleanup is still worth a pass. Some lockfile warnings come from transitive packages owned by Electron/build tooling rather than direct dependencies.
 
@@ -130,3 +131,7 @@ The renderer uses system UI fonts plus a Google-hosted JetBrains Mono stylesheet
 - **Renderer** stays focused on chat UI, conversation state, model selection, attachments, and dictionary management.
 - **Python sidecar** remains mostly stateless: it transcribes/refines audio while Electron owns personalization, correction observation, and user-facing state.
 - **ADRs and `CONTEXT.md`** document the main domain choices around voice personalization and browser control.
+
+## License
+
+Licensed under the [MIT License](./LICENSE).

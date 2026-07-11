@@ -47,6 +47,17 @@ interface ActiveTrailTarget {
   headerIndex?: number;
 }
 
+interface ActiveTrailState {
+  targets: ActiveTrailTarget[];
+  primaryTarget: ActiveTrailTarget | null;
+}
+
+interface ActiveTrailCandidate {
+  target: ActiveTrailTarget;
+  top: number;
+  bottom: number;
+}
+
 // Adaptive collapsed-trail reduction state.
 // step 1: all header levels shown, all messages
 // step 2: drop h3
@@ -133,6 +144,27 @@ const getSourceHeaderIndex = (headers: HeaderEntry[], targetHeader: HeaderEntry)
   return headers.findIndex((header) => header === targetHeader);
 };
 
+const targetKey = (target: ActiveTrailTarget | null): string => (
+  target ? `${target.messageId}:${target.headerIndex ?? 'message'}` : ''
+);
+
+const areTargetsEqual = (a: ActiveTrailTarget | null, b: ActiveTrailTarget | null): boolean => (
+  a?.messageId === b?.messageId && a?.headerIndex === b?.headerIndex
+);
+
+const areTargetListsEqual = (a: ActiveTrailTarget[], b: ActiveTrailTarget[]): boolean => {
+  if (a.length !== b.length) return false;
+  return a.every((target, index) => areTargetsEqual(target, b[index]));
+};
+
+const targetIntersectsViewport = (top: number, bottom: number, viewportTop: number, viewportBottom: number): boolean => (
+  bottom > viewportTop && top < viewportBottom
+);
+
+const isTargetActive = (targets: ActiveTrailTarget[], messageId: string, headerIndex?: number): boolean => (
+  targets.some((target) => target.messageId === messageId && target.headerIndex === headerIndex)
+);
+
 // Like getActivePreviewHeaderSourceIndex but operates on an arbitrary filtered
 // header list (the headers actually displayed after reduction). When the
 // active header's level has been dropped entirely, returns null so the caller
@@ -157,6 +189,22 @@ const getActiveDisplayHeaderSourceIndex = (
     }
     return activeSourceIndex;
   }, null);
+};
+
+const getActiveDisplayHeaderSourceIndexes = (
+  fullHeaders: HeaderEntry[],
+  displayHeaders: HeaderEntry[],
+  activeTargets: ActiveTrailTarget[],
+  messageId: string
+): Set<number> => {
+  const sourceIndexes = new Set<number>();
+  for (const activeTarget of activeTargets) {
+    const sourceIndex = getActiveDisplayHeaderSourceIndex(fullHeaders, displayHeaders, activeTarget, messageId);
+    if (sourceIndex !== null) {
+      sourceIndexes.add(sourceIndex);
+    }
+  }
+  return sourceIndexes;
 };
 
 const getPreview = (text: string, maxLength: number = 120): string => {
@@ -224,7 +272,7 @@ const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> =
 interface CollapsedTrailProps {
   messages: Message[];
   assistantEntries: AssistantTrailEntry[];
-  activeTarget: ActiveTrailTarget | null;
+  activeTargets: ActiveTrailTarget[];
   reduction: ReductionState;
   onScrollToMessage: (messageId: string, headerIndex?: number) => void;
 }
@@ -234,7 +282,7 @@ const MSG_ROW_HIDDEN_CLASS = 'min-h-0 max-h-0 opacity-0';
 const HDR_ROW_VISIBLE_CLASS = 'min-h-1.5 max-h-6 opacity-100';
 const HDR_ROW_HIDDEN_CLASS = 'min-h-0 max-h-0 opacity-0';
 
-const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, activeTarget, reduction, onScrollToMessage }) => {
+const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, activeTargets, reduction, onScrollToMessage }) => {
   const entriesByMessageId = useMemo(() => {
     return new Map(assistantEntries.map((entry) => [entry.messageId, entry]));
   }, [assistantEntries]);
@@ -255,8 +303,6 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
     return map;
   }, [assistantEntries, reduction.maxHeaderLevel]);
 
-  const offset = reduction.messageKeepRange?.start ?? 0;
-
   return (
     <div className="flex flex-col">
       {messages.map((message, messageIndex) => {
@@ -271,11 +317,15 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
           const visibleHeaders = entry
             ? entry.previewHeaders.filter((_, i) => visibleFlags[i])
             : [];
-          const activePreviewHeaderSourceIndex = entry && inRange
-            ? getActiveDisplayHeaderSourceIndex(entry.headers, visibleHeaders, activeTarget, message.id)
-            : null;
-          const isMessageActive = inRange && activeTarget?.messageId === message.id
-            && (activeTarget.headerIndex === undefined || activePreviewHeaderSourceIndex === null);
+          const activePreviewHeaderSourceIndexes = entry && inRange
+            ? getActiveDisplayHeaderSourceIndexes(entry.headers, visibleHeaders, activeTargets, message.id)
+            : new Set<number>();
+          const hasActiveTargetForMessage = activeTargets.some((target) => target.messageId === message.id);
+          const hasMessageLevelTarget = isTargetActive(activeTargets, message.id);
+          const isMessageActive = inRange && (
+            hasMessageLevelTarget ||
+            (hasActiveTargetForMessage && activePreviewHeaderSourceIndexes.size === 0)
+          );
 
           return (
             <div
@@ -296,7 +346,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
               {entry?.previewHeaders.map((header, i) => {
                 const sourceHeaderIndex = getSourceHeaderIndex(entry.headers, header);
                 const visible = visibleFlags[i];
-                const isHeaderActive = visible && inRange && activePreviewHeaderSourceIndex === sourceHeaderIndex;
+                const isHeaderActive = visible && inRange && activePreviewHeaderSourceIndexes.has(sourceHeaderIndex);
 
                 return (
                   <div
@@ -321,7 +371,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
           );
         }
 
-        const isMessageActive = inRange && activeTarget?.messageId === message.id && activeTarget.headerIndex === undefined;
+        const isMessageActive = inRange && isTargetActive(activeTargets, message.id);
 
         return (
           <div
@@ -345,7 +395,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
 
 interface ExpandedTrailProps {
   trailEntries: TrailEntry[];
-  activeTarget: ActiveTrailTarget | null;
+  primaryActiveTarget: ActiveTrailTarget | null;
   onScrollToMessage: (messageId: string, headerIndex?: number) => void;
 }
 
@@ -354,7 +404,7 @@ interface ExpandedPanelFrame {
   height: number;
 }
 
-const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarget, onScrollToMessage }) => {
+const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActiveTarget, onScrollToMessage }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const didAutoScrollRef = useRef(false);
   const visibleEntries = trailEntries.filter((entry) => (
@@ -362,10 +412,11 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
   ));
 
   useEffect(() => {
-    if (didAutoScrollRef.current || !activeTarget) return;
+    if (didAutoScrollRef.current || !primaryActiveTarget) return;
 
     const scrollContainer = scrollRef.current;
-    const activeElement = scrollContainer?.querySelector<HTMLElement>('[data-trail-active="true"]');
+    const activeElement = scrollContainer?.querySelector<HTMLElement>('[data-trail-primary-active="true"]')
+      ?? scrollContainer?.querySelector<HTMLElement>('[data-trail-active="true"]');
     if (!scrollContainer || !activeElement) return;
 
     const containerRect = scrollContainer.getBoundingClientRect();
@@ -373,7 +424,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
     const targetScrollTop = scrollContainer.scrollTop + activeRect.top - containerRect.top - (containerRect.height / 2) + (activeRect.height / 2);
     scrollContainer.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'auto' });
     didAutoScrollRef.current = true;
-  }, [activeTarget]);
+  }, [primaryActiveTarget]);
 
   return (
     <div ref={scrollRef} className="max-h-[inherit] min-h-0 overflow-x-hidden overflow-y-auto bg-[var(--color-bg-secondary)] px-1.5 py-1.5">
@@ -389,28 +440,35 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
               }`}
             >
               {entry.sender === 'user' ? (
+                (() => {
+                  const active = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
+                  const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
+                  return (
                 <button
                   type="button"
-                  data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined ? 'true' : undefined}
+                  data-trail-active={active ? 'true' : undefined}
+                  data-trail-primary-active={primaryActive ? 'true' : undefined}
                   className={`flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-1.5 py-1 text-left transition-colors hover:bg-bg-hover focus:bg-bg-hover focus:outline-none ${
-                    activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined
+                    active
                       ? 'bg-bg-hover text-text-primary'
                       : 'text-text-secondary'
                   }`}
                   onClick={() => onScrollToMessage(entry.messageId)}
                 >
-                  <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.58rem] uppercase tracking-[0.14em] text-text-tertiary">
+                  <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary">
                     You {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
                   </span>
                   <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[0.7rem] leading-[1.2]">
                     {entry.isStreaming ? 'Streaming...' : <InlineMarkdownPreview content={entry.previewText || 'Untitled message'} />}
                   </span>
                 </button>
+                  );
+                })()
               ) : (
                 <>
                   <button
                     type="button"
-                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left font-mono text-[0.58rem] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
+                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
                     onClick={() => onScrollToMessage(entry.messageId)}
                   >
                     <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -418,13 +476,17 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                     </span>
                   </button>
                   {entry.headers.length > 0 ? (
-                    entry.headers.map((header, headerIndex) => (
+                    entry.headers.map((header, headerIndex) => {
+                      const active = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId, headerIndex });
+                      const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId, headerIndex });
+                      return (
                       <button
                         key={`${entry.messageId}-${headerIndex}`}
                         type="button"
-                        data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex ? 'true' : undefined}
+                        data-trail-active={active ? 'true' : undefined}
+                        data-trail-primary-active={primaryActive ? 'true' : undefined}
                         className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]} ${
-                          activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === headerIndex
+                          active
                             ? 'bg-bg-hover text-text-primary'
                             : 'text-text-tertiary'
                         }`}
@@ -434,13 +496,19 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                           <InlineMarkdownPreview content={header.text} />
                         </span>
                       </button>
-                    ))
+                      );
+                    })
                   ) : (
+                    (() => {
+                      const active = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
+                      const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
+                      return (
                     <button
                       type="button"
-                      data-trail-active={activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined ? 'true' : undefined}
+                      data-trail-active={active ? 'true' : undefined}
+                      data-trail-primary-active={primaryActive ? 'true' : undefined}
                       className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${
-                        activeTarget?.messageId === entry.messageId && activeTarget.headerIndex === undefined
+                        active
                           ? 'bg-bg-hover text-text-primary'
                           : 'text-text-tertiary'
                       }`}
@@ -450,6 +518,8 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
                         {entry.isStreaming ? 'Streaming...' : <InlineMarkdownPreview content={entry.previewText || 'Untitled message'} />}
                       </span>
                     </button>
+                      );
+                    })()
                   )}
                 </>
               )}
@@ -468,7 +538,10 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, activeTarge
 const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRef, onScrollToMessage }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isCollapsing, setIsCollapsing] = useState(false);
-  const [activeTarget, setActiveTarget] = useState<ActiveTrailTarget | null>(null);
+  const [activeTrailState, setActiveTrailState] = useState<ActiveTrailState>({
+    targets: [],
+    primaryTarget: null,
+  });
   const [expandedPanelFrame, setExpandedPanelFrame] = useState<ExpandedPanelFrame | null>(null);
   const collapseTimeoutRef = useRef<number | null>(null);
   const hoverRecheckTimeoutRef = useRef<number | null>(null);
@@ -477,7 +550,11 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   const collapsedBarsRef = useRef<HTMLDivElement>(null);
   const collapsedHoverRef = useRef<HTMLDivElement>(null);
   const isExpandedRef = useRef(isExpanded);
-  isExpandedRef.current = isExpanded;
+
+  useEffect(() => {
+    isExpandedRef.current = isExpanded;
+  }, [isExpanded]);
+
   const trailEntries = useMemo<TrailEntry[]>(() => {
     return messages.map((message, messageIndex) => {
       const headers = message.sender === 'assistant' ? parseHeaders(message.text) : [];
@@ -545,10 +622,10 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
   // Find the index of the active message within the full `messages` array, so
   // step 5 can center the kept window on it. Falls back to the last message.
   const activeMessageIndex = useMemo(() => {
-    if (!activeTarget) return messages.length - 1;
-    const idx = messages.findIndex((m) => m.id === activeTarget.messageId);
+    if (!activeTrailState.primaryTarget) return messages.length - 1;
+    const idx = messages.findIndex((m) => m.id === activeTrailState.primaryTarget?.messageId);
     return idx === -1 ? messages.length - 1 : idx;
-  }, [activeTarget, messages]);
+  }, [activeTrailState.primaryTarget, messages]);
 
   // Calibrate row-height metrics from the real DOM once (after first render
   // with content), then (re)compute the reduction whenever the inputs change.
@@ -619,66 +696,124 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    const updateActiveTarget = () => {
+    const updateActiveTargets = () => {
       const containerRect = container.getBoundingClientRect();
+      const viewportTop = containerRect.top;
+      const viewportBottom = containerRect.bottom;
       const readingLine = containerRect.top + ACTIVE_READING_OFFSET;
-      const messageElements = new Map(
-        Array.from(container.querySelectorAll<HTMLElement>('[data-message-id]'))
-          .map((element) => [element.dataset.messageId, element] as const)
-      );
-      let activeEntry: TrailEntry | null = null;
-      let activeMessageElement: HTMLElement | null = null;
-      let activeHeader: ActiveTrailTarget | null = null;
+      const messageElements = new Map<string, HTMLElement>();
+      container.querySelectorAll<HTMLElement>('[data-message-id]').forEach((element) => {
+        if (element.dataset.messageId) {
+          messageElements.set(element.dataset.messageId, element);
+        }
+      });
+
+      const candidates: ActiveTrailCandidate[] = [];
+      const addCandidate = (target: ActiveTrailTarget, top: number, bottom: number) => {
+        if (!targetIntersectsViewport(top, bottom, viewportTop, viewportBottom)) return;
+        candidates.push({ target, top, bottom });
+      };
 
       for (const entry of trailEntries) {
         const messageElement = messageElements.get(entry.messageId);
         if (!messageElement) continue;
 
-        const messageTop = messageElement.getBoundingClientRect().top;
-        if (messageTop <= readingLine) {
-          activeEntry = entry;
-          activeMessageElement = messageElement;
+        const messageRect = messageElement.getBoundingClientRect();
+        if (!targetIntersectsViewport(messageRect.top, messageRect.bottom, viewportTop, viewportBottom)) {
+          continue;
         }
-      }
 
-      const activeMessage: ActiveTrailTarget | null = activeEntry ? { messageId: activeEntry.messageId } : null;
-      if (activeEntry?.sender === 'assistant' && activeMessageElement) {
-        const headerElements = Array.from(activeMessageElement.querySelectorAll<HTMLElement>('h1, h2, h3'));
+        if (entry.sender !== 'assistant') {
+          addCandidate({ messageId: entry.messageId }, messageRect.top, messageRect.bottom);
+          continue;
+        }
+
+        const headerElements = Array.from(messageElement.querySelectorAll<HTMLElement>('h1, h2, h3'));
+        if (headerElements.length === 0) {
+          addCandidate({ messageId: entry.messageId }, messageRect.top, messageRect.bottom);
+          continue;
+        }
+
+        const firstHeaderRect = headerElements[0].getBoundingClientRect();
+        addCandidate({ messageId: entry.messageId }, messageRect.top, firstHeaderRect.top);
+
         headerElements.forEach((headerElement, headerIndex) => {
-          if (headerElement.getBoundingClientRect().top <= readingLine) {
-            activeHeader = { messageId: activeEntry.messageId, headerIndex };
-          }
+          const headerRect = headerElement.getBoundingClientRect();
+          const nextHeaderRect = headerElements[headerIndex + 1]?.getBoundingClientRect();
+          const sectionBottom = nextHeaderRect?.top ?? messageRect.bottom;
+          addCandidate({ messageId: entry.messageId, headerIndex }, headerRect.top, sectionBottom);
         });
       }
 
-      const nextTarget = activeHeader ?? activeMessage;
-      setActiveTarget((currentTarget) => {
-        if (
-          currentTarget?.messageId === nextTarget?.messageId &&
-          currentTarget?.headerIndex === nextTarget?.headerIndex
-        ) {
-          return currentTarget;
+      const dedupedTargets: ActiveTrailTarget[] = [];
+      const seenTargets = new Set<string>();
+      for (const candidate of candidates) {
+        const key = targetKey(candidate.target);
+        if (!seenTargets.has(key)) {
+          seenTargets.add(key);
+          dedupedTargets.push(candidate.target);
         }
-        return nextTarget;
+      }
+
+      const primaryCandidate = candidates.reduce<ActiveTrailCandidate | null>((best, candidate) => {
+        const distance = readingLine < candidate.top
+          ? candidate.top - readingLine
+          : readingLine > candidate.bottom
+            ? readingLine - candidate.bottom
+            : 0;
+
+        if (!best) return candidate;
+
+        const bestDistance = readingLine < best.top
+          ? best.top - readingLine
+          : readingLine > best.bottom
+            ? readingLine - best.bottom
+            : 0;
+
+        if (distance < bestDistance) {
+          return candidate;
+        }
+
+        if (distance === bestDistance && candidate.top >= best.top) {
+          return candidate;
+        }
+
+        return best;
+      }, null);
+
+      const nextState: ActiveTrailState = {
+        targets: dedupedTargets,
+        primaryTarget: primaryCandidate?.target ?? null,
+      };
+
+      setActiveTrailState((currentState) => {
+        if (
+          areTargetListsEqual(currentState.targets, nextState.targets) &&
+          areTargetsEqual(currentState.primaryTarget, nextState.primaryTarget)
+        ) {
+          return currentState;
+        }
+        return nextState;
       });
     };
 
-    updateActiveTarget();
-    container.addEventListener('scroll', updateActiveTarget, { passive: true });
+    updateActiveTargets();
+    container.addEventListener('scroll', updateActiveTargets, { passive: true });
     const handleResize = () => {
-      updateActiveTarget();
+      updateActiveTargets();
       const wrapper = collapsedBarsRef.current;
       if (wrapper) setContainerHeight(wrapper.clientHeight);
     };
     window.addEventListener('resize', handleResize);
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => {
+      updateActiveTargets();
       const wrapper = collapsedBarsRef.current;
       if (wrapper) setContainerHeight(wrapper.clientHeight);
     }) : null;
     if (ro && collapsedBarsRef.current) ro.observe(collapsedBarsRef.current);
 
     return () => {
-      container.removeEventListener('scroll', updateActiveTarget);
+      container.removeEventListener('scroll', updateActiveTargets);
       window.removeEventListener('resize', handleResize);
       ro?.disconnect();
     };
@@ -885,7 +1020,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
           <CollapsedTrail
             messages={messages}
             assistantEntries={assistantEntries}
-            activeTarget={activeTarget}
+            activeTargets={activeTrailState.targets}
             reduction={reduction}
             onScrollToMessage={onScrollToMessage}
           />
@@ -913,7 +1048,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
           >
             <ExpandedTrail
               trailEntries={trailEntries}
-              activeTarget={activeTarget}
+              primaryActiveTarget={activeTrailState.primaryTarget}
               onScrollToMessage={onScrollToMessage}
             />
           </div>

@@ -203,6 +203,13 @@ async function stopAndProcess(): Promise<void> {
     const dictationId = randomUUID();
 
     if (result.success && result.text) {
+      console.warn('[VoiceFlow] Temporary transcription log:', {
+        raw: result.raw_text ?? '',
+        refined: result.text,
+        refinementMode: result.refinement_mode,
+        appliedEdits: result.applied_edits,
+      });
+
       showOverlay('complete', result.text);
       await new Promise(resolve => setTimeout(resolve, 300));
       const targetApp = preRecordingProjectFocused ? null : await resolveTargetApp();

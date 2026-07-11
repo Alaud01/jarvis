@@ -2,21 +2,38 @@
   "name": "jarvis",
   "version": "1.0.0",
   "description": "macOS menu bar AI assistant with chat, voice dictation, search, Notion tools, and browser control",
+  "author": "Alaud01",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Alaud01/assistant-app.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Alaud01/assistant-app/issues"
+  },
+  "homepage": "https://github.com/Alaud01/assistant-app#readme",
   "main": "dist/main/index.js",
   "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=22.13.0",
+    "pnpm": ">=10.28.2"
+  },
   "scripts": {
     "compile": "tsc -p tsconfig.node.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "lint:strict": "pnpm lint",
     "build:renderer": "vite build",
     "setup:python": "cd python-service && python3 -m venv venv && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt",
-    "test:js": "node tests/voiceLearning.test.js",
+    "test:js": "pnpm compile && node --test tests/*.test.js",
     "test:python": "cd python-service && if [ ! -d venv ]; then python3 -m venv venv; fi && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt && venv/bin/python -m unittest discover -s .",
-    "test": "pnpm compile && pnpm test:js && pnpm test:python",
+    "test": "pnpm typecheck && pnpm lint && pnpm test:js && pnpm test:python",
     "dev": "pnpm dev:all",
     "build": "pnpm compile && pnpm build:renderer && electron-builder",
     "start": "pnpm compile && pnpm build:renderer && electron .",
     "dev:all": "concurrently \"pnpm dev:vite\" \"pnpm dev:electron\"",
     "dev:vite": "vite",
-    "dev:electron": "tsc -p tsconfig.node.json && wait-on http://localhost:5174 && electron .",
+    "dev:electron": "NODE_ENV=development tsc -p tsconfig.node.json && wait-on http://localhost:5174 && electron .",
     "start:python": "cd python-service && if [ ! -d venv ]; then python3 -m venv venv; fi && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt && venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port ${VOICE_SERVICE_PORT:-8765} --reload"
   },
   "dependencies": {
@@ -26,6 +43,7 @@
     "dotenv": "^17.4.2",
     "electron-store": "^11.0.2",
     "highlight.js": "^11.11.1",
+    "ipaddr.js": "^2.2.0",
     "katex": "^0.16.44",
     "officeparser": "^7.0.3",
     "react": "^19.0.0",
@@ -35,9 +53,11 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
+    "undici": "^7.28.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@tailwindcss/postcss": "^4.2.2",
     "@types/katex": "^0.16.8",
     "@types/node": "^22.0.0",
@@ -48,11 +68,21 @@
     "concurrently": "^9.1.0",
     "electron": "^41.8.0",
     "electron-builder": "^26.0.0",
+    "eslint": "10.6.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.7.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.7.0",
+    "typescript-eslint": "8.63.0",
     "vite": "^6.0.0",
     "wait-on": "^8.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "fast-uri": "3.1.2"
+    }
   },
   "build": {
     "appId": "com.jarvis.app",

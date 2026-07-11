@@ -1,3 +1,9 @@
+import { lookup } from 'node:dns';
+import type { LookupAddress, LookupAllOptions, LookupOptions } from 'node:dns';
+import { isIP } from 'node:net';
+import ipaddr from 'ipaddr.js';
+import { Agent, fetch as undiciFetch } from 'undici';
+
 const DEFAULT_MAX_CHARS = 8000;
 const MAX_MAX_CHARS = 50000;
 const DEFAULT_TIMEOUT_MS = 15000;
@@ -8,6 +14,9 @@ const MIN_DOMAIN_FETCH_INTERVAL_MS = 3000;
 const MIN_RESPONSE_READ_BYTES = 256 * 1024;
 const MAX_RESPONSE_READ_BYTES = 1024 * 1024;
 const HARD_CONTENT_LENGTH_REJECT_BYTES = 5 * 1024 * 1024;
+const MAX_REDIRECTS = 5;
+const FETCH_POLICY_ERROR_CODE = 'ERR_FETCH_URL_NON_PUBLIC';
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 const FETCH_AVOID_HOST_PATTERNS = [
   /(^|\.)medium\.com$/i,
@@ -101,8 +110,112 @@ function normalizeUrl(input: string): string {
     throw new Error('fetch_url only supports http and https URLs.');
   }
 
+  assertPublicUrlTarget(url);
+
   return url.toString();
 }
+
+function normalizedHostname(url: URL): string {
+  return url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+}
+
+function fetchPolicyError(message: string): NodeJS.ErrnoException {
+  const error = new Error(message) as NodeJS.ErrnoException;
+  error.code = FETCH_POLICY_ERROR_CODE;
+  return error;
+}
+
+export function isPublicIpAddress(address: string): boolean {
+  try {
+    return ipaddr.process(address).range() === 'unicast';
+  } catch {
+    return false;
+  }
+}
+
+export function assertPublicAddressSet(hostname: string, addresses: string[]): void {
+  if (addresses.length === 0) {
+    throw fetchPolicyError(`fetch_url could not resolve ${hostname}.`);
+  }
+
+  const blockedAddress = addresses.find(address => !isPublicIpAddress(address));
+  if (blockedAddress) {
+    throw fetchPolicyError(
+      `fetch_url blocked ${hostname} because it resolves to a non-public network address.`
+    );
+  }
+}
+
+export function assertPublicUrlTarget(url: URL): void {
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw fetchPolicyError('fetch_url only supports http and https URLs.');
+  }
+
+  if (url.username || url.password) {
+    throw fetchPolicyError('fetch_url does not allow credentials embedded in URLs.');
+  }
+
+  const hostname = normalizedHostname(url);
+  if (!hostname) {
+    throw fetchPolicyError('fetch_url requires a URL with a hostname.');
+  }
+
+  if (isIP(hostname) && !isPublicIpAddress(hostname)) {
+    throw fetchPolicyError('fetch_url cannot access localhost or non-public network addresses.');
+  }
+}
+
+export function resolvePublicRedirectUrl(currentUrl: string, location: string): string {
+  const redirectUrl = new URL(location, currentUrl);
+  assertPublicUrlTarget(redirectUrl);
+  return redirectUrl.toString();
+}
+
+type SocketLookup = (
+  hostname: string,
+  options: LookupOptions,
+  callback: (
+    error: NodeJS.ErrnoException | null,
+    address: string | LookupAddress[],
+    family?: number,
+  ) => void,
+) => void;
+
+const publicOnlyLookup: SocketLookup = (hostname, options, callback) => {
+  const lookupOptions: LookupAllOptions = {
+    ...options,
+    all: true,
+    verbatim: true,
+  };
+
+  lookup(hostname, lookupOptions, (error, addresses) => {
+    if (error) {
+      callback(error, '', 0);
+      return;
+    }
+
+    try {
+      assertPublicAddressSet(hostname, addresses.map(address => address.address));
+    } catch (policyError) {
+      callback(policyError as NodeJS.ErrnoException, '', 0);
+      return;
+    }
+
+    if (options.all) {
+      callback(null, addresses);
+      return;
+    }
+
+    const selected = addresses[0];
+    callback(null, selected.address, selected.family);
+  });
+};
+
+const publicFetchAgent = new Agent({
+  connect: {
+    lookup: publicOnlyLookup,
+  },
+});
 
 function getHostname(value: string): string {
   try {
@@ -346,6 +459,73 @@ function detectBotChallenge(content: string, status?: number): string | null {
   return `${statusPrefix}appears to be showing an anti-bot or verification challenge. Do not retry this URL repeatedly; use search snippets or another source.`;
 }
 
+function findFetchPolicyMessage(error: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  let current = error;
+
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as NodeJS.ErrnoException & { cause?: unknown };
+    if (candidate.code === FETCH_POLICY_ERROR_CODE) {
+      return candidate.message;
+    }
+    current = candidate.cause;
+  }
+
+  return undefined;
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Redirect bodies are intentionally discarded before the next validated hop.
+  }
+}
+
+async function fetchPublicResponse(initialUrl: string, signal: AbortSignal): Promise<Response> {
+  let currentUrl = initialUrl;
+
+  for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount += 1) {
+    const target = new URL(currentUrl);
+    assertPublicUrlTarget(target);
+
+    const hostname = getHostname(currentUrl);
+    const avoidReason = shouldAvoidFetch(hostname);
+    if (avoidReason) {
+      throw new Error(avoidReason);
+    }
+
+    await waitForFetchBudget(hostname);
+    const response = await undiciFetch(target, {
+      method: 'GET',
+      redirect: 'manual',
+      dispatcher: publicFetchAgent,
+      headers: {
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.5',
+        'User-Agent': FETCH_USER_AGENT,
+      },
+      signal,
+    });
+
+    const location = response.headers.get('location');
+    if (!REDIRECT_STATUSES.has(response.status) || !location) {
+      return response;
+    }
+
+    if (redirectCount === MAX_REDIRECTS) {
+      await cancelResponseBody(response);
+      throw new Error(`fetch_url stopped after ${MAX_REDIRECTS} redirects.`);
+    }
+
+    const nextUrl = resolvePublicRedirectUrl(currentUrl, location);
+    await cancelResponseBody(response);
+    currentUrl = nextUrl;
+  }
+
+  throw new Error(`fetch_url stopped after ${MAX_REDIRECTS} redirects.`);
+}
+
 export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolResult> {
   const fetchedAt = new Date().toISOString();
   let requestedUrl = args.url;
@@ -379,17 +559,7 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
   const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
 
   try {
-    await waitForFetchBudget(hostname);
-
-    const response = await fetch(requestedUrl, {
-      method: 'GET',
-      redirect: 'follow',
-      headers: {
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,application/json;q=0.7,*/*;q=0.5',
-        'User-Agent': FETCH_USER_AGENT,
-      },
-      signal: abortController.signal,
-    });
+    const response = await fetchPublicResponse(requestedUrl, abortController.signal);
 
     const finalUrl = response.url || requestedUrl;
     const contentLength = parseContentLength(response.headers);
@@ -518,13 +688,15 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
       fetchedAt,
     };
   } catch (error) {
-    const errorMessage = error instanceof DOMException && error.name === 'AbortError'
+    const policyMessage = findFetchPolicyMessage(error);
+    const errorMessage = policyMessage
+      ?? (error instanceof DOMException && error.name === 'AbortError'
       ? `Fetch timed out after ${timeoutMs}ms.`
       : error instanceof Error
         ? error.message === 'fetch failed'
           ? 'Fetch failed. The URL may be unreachable, blocked, or unavailable from the current network environment.'
           : error.message
-        : 'Unknown fetch error.';
+        : 'Unknown fetch error.');
 
     return {
       success: false,

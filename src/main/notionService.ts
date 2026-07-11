@@ -109,12 +109,6 @@ function buildHeaders(): Record<string, string> {
   };
 }
 
-function normalizeOptionalString(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-
 function extractPlainText(richText: unknown): string {
   if (!Array.isArray(richText)) return '';
   return richText

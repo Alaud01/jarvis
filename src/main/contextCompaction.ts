@@ -1,4 +1,5 @@
-import type { ChatMessage, Provider, ToolCall } from './providers/types';
+import type { ChatMessage, Provider } from './providers/types';
+import { estimateTokenCount as estimateUsageTokens, recordUsageEvent } from './usageService';
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 const DEFAULT_CONTEXT_LENGTH_TOKENS = 128_000;
@@ -96,8 +97,18 @@ async function summarizeHistoryWithLLM(
     },
   ];
 
+  const startedAtMs = Date.now();
   const rawSummary = await provider.sendChat(model, summaryMessages);
-  return rawSummary.trim();
+  const summary = rawSummary.trim();
+  recordUsageEvent({
+    model,
+    provider: provider.id,
+    inputTokens: estimateMessagesTokens(summaryMessages),
+    outputTokens: estimateUsageTokens(summary),
+    generationMs: Math.max(1, Date.now() - startedAtMs),
+    estimated: true,
+  });
+  return summary;
 }
 
 /**

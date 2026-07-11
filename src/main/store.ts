@@ -52,14 +52,19 @@ interface StoreSchema {
   openTabIds: string[];
   currentConversationId: string | null;
   conversationDrafts: Record<string, string>;
-  opencodeGoApiKey: string;
-  openRouterApiKey: string;
   dictionaryEntries: LegacyDictionaryEntry[];
   vocabularyEntries: VocabularyEntry[];
   replacementRules: ReplacementRule[];
   vocabularyCandidates: VocabularyCandidate[];
   correctionObservations: CorrectionObservation[];
 }
+
+type RuntimeStore = {
+  path: string;
+  get<Key extends keyof StoreSchema>(key: Key, defaultValue?: StoreSchema[Key]): StoreSchema[Key];
+  set<Key extends keyof StoreSchema>(key: Key, value: StoreSchema[Key]): void;
+  delete(key: string): void;
+};
 
 const store = new Store<StoreSchema>({
   name: 'jarvis',
@@ -74,15 +79,13 @@ const store = new Store<StoreSchema>({
     openTabIds: [],
     currentConversationId: null,
     conversationDrafts: {},
-    opencodeGoApiKey: '',
-    openRouterApiKey: '',
     dictionaryEntries: [],
     vocabularyEntries: [],
     replacementRules: [],
     vocabularyCandidates: [],
     correctionObservations: [],
   },
-}) as any;
+}) as unknown as RuntimeStore;
 
 const conversationStorageDir = path.join(path.dirname((store as { path: string }).path), 'jarvis-conversations');
 
@@ -372,20 +375,9 @@ export function saveSelectedProvider(provider: string): void {
   store.set('selectedProvider', provider);
 }
 
-export function loadOpenCodeGoApiKey(): string {
-  return store.get('opencodeGoApiKey', '') as string;
-}
-
-export function saveOpenCodeGoApiKey(key: string): void {
-  store.set('opencodeGoApiKey', key);
-}
-
-export function loadOpenRouterApiKey(): string {
-  return store.get('openRouterApiKey', '') as string;
-}
-
-export function saveOpenRouterApiKey(key: string): void {
-  store.set('openRouterApiKey', key);
+export function deleteLegacyStoredProviderApiKeys(): void {
+  store.delete('opencodeGoApiKey');
+  store.delete('openRouterApiKey');
 }
 
 export function loadOpenTabIds(): string[] {

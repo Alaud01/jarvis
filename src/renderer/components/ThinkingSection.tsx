@@ -67,20 +67,15 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
     setAutoScrollEnabled(true);
   }, [setAutoScrollEnabled]);
 
-  const scrollSnapshot: ScrollSnapshot = (() => {
-    if (!isStreaming || !isExpanded || !autoScrollEnabledRef.current) {
-      return { shouldMaintain: false };
-    }
-    const container = contentRef.current;
-    return {
-      shouldMaintain: container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true,
-    };
-  })();
-
   useLayoutEffect(() => {
     if (!isStreaming || !isExpanded) return;
+    const container = contentRef.current;
+    const scrollSnapshot: ScrollSnapshot = {
+      shouldMaintain: autoScrollEnabledRef.current
+        && (container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true),
+    };
     maintainScrollAtEnd(scrollSnapshot);
-  }, [content, isStreaming, isExpanded, scrollSnapshot, maintainScrollAtEnd]);
+  }, [content, isStreaming, isExpanded, maintainScrollAtEnd]);
 
   useLayoutEffect(() => {
     const container = contentRef.current;

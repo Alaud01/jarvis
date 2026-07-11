@@ -39,8 +39,16 @@ export interface StreamChunk {
   content: string;
 }
 
+export interface StreamTurnUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  generationMs?: number;
+  estimated?: boolean;
+}
+
 export interface StreamTurnResult {
   assistantMessage?: ChatMessage;
+  usage?: StreamTurnUsage;
 }
 
 export interface StreamChatTurnOptions {

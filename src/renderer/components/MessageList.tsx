@@ -151,8 +151,8 @@ const parseMessageSegments = (
       const xmlMatches = [...remaining.matchAll(xmlThinkingRegex)];
       const ollamaMatches = [...remaining.matchAll(ollamaCompleteThinkingRegex)];
       
-      let nextXmlIndex = xmlMatches.length > 0 ? xmlMatches[0].index! : Infinity;
-      let nextOllamaIndex = ollamaMatches.length > 0 ? ollamaMatches[0].index! : Infinity;
+      const nextXmlIndex = xmlMatches.length > 0 ? xmlMatches[0].index! : Infinity;
+      const nextOllamaIndex = ollamaMatches.length > 0 ? ollamaMatches[0].index! : Infinity;
       
       const nextIndex = Math.min(nextXmlIndex, nextOllamaIndex);
       
@@ -914,12 +914,23 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const messagesColumnRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastConversationSearchTriggerRef = useRef(conversationSearchTrigger);
-  const measuredHeightsRef = useRef<Map<string, number>>(new Map());
-  const [heightVersion, setHeightVersion] = useState(0);
+  const [measuredHeights, setMeasuredHeights] = useState<Map<string, number>>(() => new Map());
   const [virtualViewport, setVirtualViewport] = useState({ scrollTop: 0, height: 0 });
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
+
+  const focusSearchInput = useCallback(() => {
+    const focusInput = () => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+
+    window.requestAnimationFrame(() => {
+      focusInput();
+      window.requestAnimationFrame(focusInput);
+    });
+  }, []);
 
   const setAutoScrollEnabled = useCallback((enabled: boolean) => {
     autoScrollEnabledRef.current = enabled;
@@ -960,18 +971,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   }, [reactivateAutoScroll, scrollContainerRef]);
 
   const heightOffsets = useMemo(() => {
-    let total = 0;
-    const offsets = messages.map(message => {
-      const offset = total;
-      total += measuredHeightsRef.current.get(message.id) ?? estimateMessageHeight(message);
-      return offset;
-    });
+    const offsets: number[] = [];
+    const totalHeight = messages.reduce((total, message) => {
+      offsets.push(total);
+      return total + (measuredHeights.get(message.id) ?? estimateMessageHeight(message));
+    }, 0);
 
-    return {
-      offsets,
-      totalHeight: total,
-    };
-  }, [messages, heightVersion]);
+    return { offsets, totalHeight };
+  }, [measuredHeights, messages]);
 
   const shouldVirtualize = messages.length > VIRTUALIZATION_THRESHOLD;
   const virtualRange = useMemo(() => {
@@ -1033,7 +1040,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       scrollTop: container.scrollTop,
       height: container.clientHeight,
     });
-  }, [scrollContainerRef]);
+  }, [scrollContainerRef, setVirtualViewport]);
 
   useLayoutEffect(() => {
     updateVirtualViewport();
@@ -1054,10 +1061,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
   useEffect(() => {
     const liveIds = new Set(messages.map(message => message.id));
-    measuredHeightsRef.current.forEach((_height, messageId) => {
-      if (!liveIds.has(messageId)) {
-        measuredHeightsRef.current.delete(messageId);
-      }
+    setMeasuredHeights(prev => {
+      let changed = false;
+      const next = new Map(prev);
+      next.forEach((_height, messageId) => {
+        if (!liveIds.has(messageId)) {
+          next.delete(messageId);
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
     });
   }, [messages]);
 
@@ -1065,15 +1078,20 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     if (element) {
       messageRefsRef.current.set(messageId, element);
       const measuredHeight = element.getBoundingClientRect().height;
-      const previousHeight = measuredHeightsRef.current.get(messageId);
-      if (Math.abs((previousHeight ?? 0) - measuredHeight) > 1) {
-        measuredHeightsRef.current.set(messageId, measuredHeight);
-        setHeightVersion(version => version + 1);
-      }
+      setMeasuredHeights(prev => {
+        const previousHeight = prev.get(messageId);
+        if (Math.abs((previousHeight ?? 0) - measuredHeight) <= 1) {
+          return prev;
+        }
+
+        const next = new Map(prev);
+        next.set(messageId, measuredHeight);
+        return next;
+      });
     } else {
       messageRefsRef.current.delete(messageId);
     }
-  }, []);
+  }, [setMeasuredHeights]);
 
   const scrollToBottomNow = useCallback((behavior: ScrollBehavior = 'auto') => {
     const container = scrollContainerRef.current;
@@ -1189,7 +1207,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
     setActiveSearchMatchIndex(nextIndex);
     scrollToSearchMatch(match);
-  }, [conversationSearchMatches, scrollToSearchMatch]);
+  }, [conversationSearchMatches, scrollToSearchMatch, setActiveSearchMatchIndex]);
 
   const goToNextSearchMatch = useCallback(() => {
     if (conversationSearchMatches.length === 0) {
@@ -1234,14 +1252,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       reactivateAutoScroll();
     }
   }), [
-    cancelAutoScroll,
-    messages,
     reactivateAutoScroll,
-    scrollContainerRef,
     scrollElementIntoView,
     scrollToMessageId,
     scrollToBottomNow,
-    shouldVirtualize,
   ]);
 
   useEffect(() => {
@@ -1251,11 +1265,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
     lastConversationSearchTriggerRef.current = conversationSearchTrigger;
     setIsSearchOpen(true);
-    window.requestAnimationFrame(() => {
-      searchInputRef.current?.focus();
-      searchInputRef.current?.select();
-    });
-  }, [conversationSearchTrigger]);
+    focusSearchInput();
+  }, [conversationSearchTrigger, focusSearchInput]);
+
+  useLayoutEffect(() => {
+    if (isSearchOpen) {
+      focusSearchInput();
+    }
+  }, [focusSearchInput, isSearchOpen]);
 
   useEffect(() => {
     if (conversationSearchMatches.length === 0) {
@@ -1280,20 +1297,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   ]);
 
   const streamingActive = messages.some(m => m.isStreaming);
-  const scrollSnapshot: ScrollSnapshot = (() => {
-    if (!streamingActive || !autoScrollEnabledRef.current) {
-      return { shouldMaintain: false };
-    }
-    const container = scrollContainerRef.current;
-    return {
-      shouldMaintain: container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true,
-    };
-  })();
 
   useLayoutEffect(() => {
     if (!streamingActive) return;
+    const container = scrollContainerRef.current;
+    const scrollSnapshot: ScrollSnapshot = {
+      shouldMaintain: autoScrollEnabledRef.current
+        && (container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true),
+    };
     maintainScrollAtEnd(scrollSnapshot);
-  }, [messages, streamingActive, scrollSnapshot, maintainScrollAtEnd]);
+  }, [messages, streamingActive, scrollContainerRef, maintainScrollAtEnd]);
 
   useLayoutEffect(() => {
     const container = scrollContainerRef.current;

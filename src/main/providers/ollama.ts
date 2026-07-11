@@ -6,7 +6,6 @@ import type {
   StreamChatTurnOptions,
   StreamChunk,
   StreamTurnResult,
-  ToolDefinition,
 } from './types';
 import { debugLog } from '../logger';
 
@@ -198,6 +197,8 @@ export class OllamaProvider implements Provider {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    let latestUsage: StreamTurnResult['usage'];
+
     const processChunk = (data: OllamaStreamResponse) => {
       if (data.message?.thinking) {
         accumulatedThinking += data.message.thinking;
@@ -209,6 +210,13 @@ export class OllamaProvider implements Provider {
       }
       if (data.message?.tool_calls?.length) {
         toolCalls.push(...data.message.tool_calls);
+      }
+      if (data.done === true) {
+        latestUsage = {
+          inputTokens: data.prompt_eval_count,
+          outputTokens: data.eval_count,
+          generationMs: data.eval_duration ? Math.round(data.eval_duration / 1e6) : undefined,
+        };
       }
     };
 
@@ -222,6 +230,7 @@ export class OllamaProvider implements Provider {
               tool_calls: toolCalls.length ? toolCalls : undefined,
             }
           : undefined,
+      usage: latestUsage,
     });
 
     while (true) {

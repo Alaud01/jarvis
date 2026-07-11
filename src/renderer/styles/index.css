@@ -101,14 +101,14 @@
   --color-bg-code: #f8f8f8;
   --color-bg-navbar: #ffffff;
   
-  --color-text-primary: #111111;
+  --color-text-primary: #1f1f1f;
   --color-text-secondary: #555555;
   --color-text-tertiary: #777777;
   --color-text-muted: #aaaaaa;
-  --color-text-inverse: #ffffff;
+  --color-text-inverse: #f7f7f7;
   
-  --color-accent-primary: #000000;
-  --color-accent-primary-hover: #333333;
+  --color-accent-primary: #1f1f1f;
+  --color-accent-primary-hover: #3a3a3a;
   --color-accent-secondary: #555555;
   --color-accent-secondary-hover: #222222;
   
@@ -133,14 +133,14 @@
   --color-bg-code: #f8f8f8;
   --color-bg-navbar: #ffffff;
   
-  --color-text-primary: #111111;
+  --color-text-primary: #1f1f1f;
   --color-text-secondary: #555555;
   --color-text-tertiary: #777777;
   --color-text-muted: #aaaaaa;
-  --color-text-inverse: #ffffff;
+  --color-text-inverse: #f7f7f7;
   
-  --color-accent-primary: #000000;
-  --color-accent-primary-hover: #333333;
+  --color-accent-primary: #1f1f1f;
+  --color-accent-primary-hover: #3a3a3a;
   --color-accent-secondary: #555555;
   --color-accent-secondary-hover: #222222;
   
@@ -163,14 +163,14 @@
   --color-bg-code: #161616;
   --color-bg-navbar: #0a0a0a;
   
-  --color-text-primary: #f5f5f5;
+  --color-text-primary: #e8e8e8;
   --color-text-secondary: #a0a0a0;
   --color-text-tertiary: #777777;
   --color-text-muted: #555555;
-  --color-text-inverse: #000000;
+  --color-text-inverse: #171717;
   
-  --color-accent-primary: #ffffff;
-  --color-accent-primary-hover: #cccccc;
+  --color-accent-primary: #e8e8e8;
+  --color-accent-primary-hover: #cfcfcf;
   
   --color-border-primary: #222222;
   --color-border-secondary: #333333;
@@ -178,6 +178,10 @@
 }
 
 html {
+  width: 100%;
+  height: 100%;
+  min-width: 720px;
+  min-height: 520px;
   font-size: 16px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -185,12 +189,23 @@ html {
 }
 
 body {
+  width: 100%;
+  height: 100%;
+  min-width: 720px;
+  min-height: 520px;
   font-family: var(--font-sans);
   background-color: var(--color-bg-primary);
   color: var(--color-text-primary);
   line-height: 1.6;
   overflow: hidden;
   font-weight: 400;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+  min-width: 720px;
+  min-height: 520px;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -773,7 +788,7 @@ select option {
 .jarvis-wordmark {
   display: inline-flex;
   align-items: baseline;
-  font-family: var(--font-sans);
+  font-family: Helvetica, 'Helvetica Neue', Arial, sans-serif;
   font-size: clamp(1.5rem, 3.6vw, 2.2rem);
   line-height: 1;
   letter-spacing: 0;
@@ -785,20 +800,9 @@ select option {
    fade-up completes before the slide begins to avoid transform conflicts. */
 .jarvis-wordmark-j {
   font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 0.56em;
-  height: 1em;
+  display: inline-block;
   opacity: 0;
   transform: translateX(var(--j-offset, 0));
-}
-
-.jarvis-wordmark-mark {
-  display: block;
-  width: 100%;
-  height: 100%;
-  color: currentColor;
 }
 
 .jarvis-wordmark-j.is-animated {
@@ -833,7 +837,7 @@ select option {
 }
 
 .jarvis-wordmark-rest.is-revealed {
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   text-decoration-color: var(--color-text-primary);
 }
 

@@ -12,17 +12,6 @@ import { debugLog } from '../logger';
 
 const BASE_URL = 'https://opencode.ai/zen/go/v1';
 
-const OPENAI_COMPATIBLE_MODELS = new Set([
-  'glm-5.1',
-  'glm-5',
-  'kimi-k2.5',
-  'kimi-k2.6',
-  'deepseek-v4-pro',
-  'deepseek-v4-flash',
-  'mimo-v2.5',
-  'mimo-v2.5-pro',
-]);
-
 const ANTHROPIC_COMPATIBLE_MODELS = new Set([
   'minimax-m2.7',
   'minimax-m2.5',
@@ -83,23 +72,10 @@ interface OpenAIStreamChunk {
   created: number;
   model: string;
   choices: OpenAIStreamChoice[];
-}
-
-interface AnthropicThinkingBlock {
-  type: 'thinking';
-  thinking: string;
-}
-
-interface AnthropicTextBlock {
-  type: 'text';
-  text: string;
-}
-
-interface AnthropicToolUseBlock {
-  type: 'tool_use';
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  };
 }
 
 interface AnthropicContentBlock {
@@ -146,6 +122,11 @@ interface AnthropicContentBlockStop {
   index: number;
 }
 
+interface AnthropicMessageDelta {
+  type: 'message_delta';
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
 interface AnthropicMessageStop {
   type: 'message_stop';
 }
@@ -163,6 +144,7 @@ type AnthropicStreamEvent =
   | AnthropicContentBlockStart
   | AnthropicContentBlockDelta
   | AnthropicContentBlockStop
+  | AnthropicMessageDelta
   | AnthropicMessageStop;
 
 function parseSSEDataLine(line: string): string | null {
@@ -196,10 +178,6 @@ function getTextFromAnthropicContentBlock(contentBlock: AnthropicContentBlock): 
   }
 
   return '';
-}
-
-function isOpenAIModel(modelId: string): boolean {
-  return OPENAI_COMPATIBLE_MODELS.has(modelId);
 }
 
 function isAnthropicModel(modelId: string): boolean {
@@ -459,10 +437,6 @@ export class OpenCodeGoProvider implements Provider {
     this.apiKey = apiKey || process.env.OPENCODE_GO_API_KEY || '';
   }
 
-  setApiKey(key: string): void {
-    this.apiKey = key;
-  }
-
   getApiKey(): string | null {
     return this.apiKey || null;
   }
@@ -658,12 +632,16 @@ export class OpenCodeGoProvider implements Provider {
     let accumulatedThinking = '';
     const toolCalls: import('./types').ToolCall[] = [];
     const toolCallAccumulators: Map<number, { id: string; name: string; arguments: string }> = new Map();
+    const startedAtMs = Date.now();
+    let firstOutputAtMs: number | undefined;
+    let usage: StreamTurnResult['usage'];
 
     const openaiMessages = convertMessagesToOpenAI(messages);
     const requestBody: Record<string, unknown> = {
       model,
       messages: openaiMessages,
       stream: true,
+      stream_options: { include_usage: true },
     };
 
     if (options?.tools) {
@@ -692,6 +670,10 @@ export class OpenCodeGoProvider implements Provider {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    const markOutput = () => {
+      if (firstOutputAtMs === undefined) firstOutputAtMs = Date.now();
+    };
+
     const processSSELine = (line: string) => {
       if (!line.startsWith('data: ')) return;
       const data = line.slice(6).trim();
@@ -699,6 +681,13 @@ export class OpenCodeGoProvider implements Provider {
 
       try {
         const chunk = JSON.parse(data) as OpenAIStreamChunk;
+        if (chunk.usage) {
+          usage = {
+            inputTokens: chunk.usage.prompt_tokens,
+            outputTokens: chunk.usage.completion_tokens,
+            generationMs: Math.max(1, Date.now() - (firstOutputAtMs ?? startedAtMs)),
+          };
+        }
         const choice = chunk.choices?.[0];
         if (!choice) return;
 
@@ -706,22 +695,26 @@ export class OpenCodeGoProvider implements Provider {
 
         if (delta.reasoning_content) {
           accumulatedThinking += delta.reasoning_content;
+          markOutput();
           onChunk({ type: 'thinking', content: delta.reasoning_content });
           return;
         }
 
         if (delta.thinking) {
           accumulatedThinking += delta.thinking;
+          markOutput();
           onChunk({ type: 'thinking', content: delta.thinking });
           return;
         }
 
         if (delta.content) {
           accumulatedContent += delta.content;
+          markOutput();
           onChunk({ type: 'content', content: delta.content });
         }
 
         if (delta.tool_calls?.length) {
+          markOutput();
           for (const tc of delta.tool_calls) {
             const idx = tc.index;
             if (!toolCallAccumulators.has(idx)) {
@@ -812,6 +805,9 @@ export class OpenCodeGoProvider implements Provider {
               tool_calls: toolCalls.length ? toolCalls : undefined,
             }
           : undefined,
+      usage: usage ?? {
+        generationMs: Math.max(1, Date.now() - (firstOutputAtMs ?? startedAtMs)),
+      },
     };
   }
 
@@ -827,6 +823,14 @@ export class OpenCodeGoProvider implements Provider {
     const toolCalls: import('./types').ToolCall[] = [];
     const currentToolCalls: Map<string, { id: string; name: string; arguments: string }> = new Map();
     const toolCallIndexToId: Map<number, string> = new Map();
+    const startedAtMs = Date.now();
+    let firstOutputAtMs: number | undefined;
+    let inputTokens: number | undefined;
+    let outputTokens: number | undefined;
+
+    const markOutput = () => {
+      if (firstOutputAtMs === undefined) firstOutputAtMs = Date.now();
+    };
 
     const { system, convertedMessages } = convertMessagesToAnthropic(messages);
     const requestBody: Record<string, unknown> = {
@@ -892,14 +896,17 @@ export class OpenCodeGoProvider implements Provider {
           observedEventTypes.add('openai_choices');
           if (delta.reasoning_content) {
             accumulatedThinking += delta.reasoning_content;
+            markOutput();
             onChunk({ type: 'thinking', content: delta.reasoning_content });
           }
           if (delta.thinking) {
             accumulatedThinking += delta.thinking;
+            markOutput();
             onChunk({ type: 'thinking', content: delta.thinking });
           }
           if (delta.content) {
             accumulatedContent += delta.content;
+            markOutput();
             onChunk({ type: 'content', content: delta.content });
           }
           return;
@@ -908,6 +915,14 @@ export class OpenCodeGoProvider implements Provider {
         const currentEventType = getAnthropicEventType(parsed, eventType);
         if (currentEventType) {
           observedEventTypes.add(currentEventType);
+        }
+
+        if (currentEventType === 'message_start' && 'message' in parsed && parsed.message?.usage) {
+          inputTokens = parsed.message.usage.input_tokens;
+          outputTokens = parsed.message.usage.output_tokens;
+        } else if (currentEventType === 'message_delta' && 'usage' in parsed && parsed.usage) {
+          if (typeof parsed.usage.input_tokens === 'number') inputTokens = parsed.usage.input_tokens;
+          if (typeof parsed.usage.output_tokens === 'number') outputTokens = parsed.usage.output_tokens;
         }
 
         if (currentEventType === 'content_block_delta') {
@@ -919,11 +934,14 @@ export class OpenCodeGoProvider implements Provider {
 
           if (delta.type === 'text_delta' && delta.text) {
             accumulatedContent += delta.text;
+            markOutput();
             onChunk({ type: 'content', content: delta.text });
           } else if (delta.type === 'thinking_delta' && delta.thinking) {
             accumulatedThinking += delta.thinking;
+            markOutput();
             onChunk({ type: 'thinking', content: delta.thinking });
           } else if (delta.type === 'input_json_delta' && delta.partial_json) {
+            markOutput();
             const blockIndex = getAnthropicBlockIndex(parsed);
             const toolId = blockIndex === undefined ? undefined : toolCallIndexToId.get(blockIndex);
             if (toolId) {
@@ -940,6 +958,7 @@ export class OpenCodeGoProvider implements Provider {
 
           const blockText = getTextFromAnthropicContentBlock(contentBlock);
           if (blockText) {
+            markOutput();
             if (contentBlock.type === 'thinking') {
               accumulatedThinking += blockText;
               onChunk({ type: 'thinking', content: blockText });
@@ -950,6 +969,7 @@ export class OpenCodeGoProvider implements Provider {
           }
 
           if (contentBlock.type === 'tool_use' && contentBlock.id && contentBlock.name) {
+            markOutput();
             const blockIndex = getAnthropicBlockIndex(parsed);
             if (blockIndex !== undefined) {
               toolCallIndexToId.set(blockIndex, contentBlock.id);
@@ -1043,7 +1063,15 @@ export class OpenCodeGoProvider implements Provider {
           thinkingLength: fallbackMessage.thinking?.length || 0,
           toolCallCount: fallbackMessage.tool_calls?.length || 0,
         });
-        return { assistantMessage: fallbackMessage };
+        return {
+          assistantMessage: fallbackMessage,
+          usage: {
+            inputTokens,
+            outputTokens,
+            generationMs: Math.max(1, Date.now() - startedAtMs),
+            estimated: inputTokens === undefined || outputTokens === undefined,
+          },
+        };
       }
     }
 
@@ -1057,6 +1085,12 @@ export class OpenCodeGoProvider implements Provider {
               tool_calls: toolCalls.length ? toolCalls : undefined,
             }
           : undefined,
+      usage: {
+        inputTokens,
+        outputTokens,
+        generationMs: Math.max(1, Date.now() - (firstOutputAtMs ?? startedAtMs)),
+        estimated: inputTokens === undefined || outputTokens === undefined,
+      },
     };
   }
 }

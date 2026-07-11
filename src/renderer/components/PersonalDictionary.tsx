@@ -27,7 +27,7 @@ function formatScope(rule: ReplacementRule): string {
     : rule.scope.app.name || rule.scope.app.bundleId || 'App-specific';
 }
 
-function statusPill(value: string): JSX.Element {
+function statusPill(value: string): React.ReactElement {
   return (
     <span className="rounded border border-border-primary px-1.5 py-0.5 font-mono text-[0.5rem] uppercase tracking-wider text-text-muted">
       {value}

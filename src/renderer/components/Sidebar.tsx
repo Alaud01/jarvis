@@ -39,8 +39,9 @@ interface SidebarProps {
   onRenameFolder: (id: string, name: string) => void;
   onDeleteFolder: (id: string) => void;
   onMoveConversation: (conversationId: string, folderId: string | null) => void;
-  activeWorkspace: 'chat' | 'dictionary';
+  activeWorkspace: 'chat' | 'dictionary' | 'usage';
   onDictionaryOpen: () => void;
+  onUsageOpen: () => void;
 }
 
 interface ContextMenuState {
@@ -426,6 +427,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onMoveConversation,
   activeWorkspace,
   onDictionaryOpen,
+  onUsageOpen,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [focusedFolderId, setFocusedFolderId] = useState<string | null>(null);
@@ -760,7 +762,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       onDragEnd={handleDragEnd}
       onDragOver={handleDragOver}
     >
-      <aside className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-primary transition-[width] duration-200 ${isOpen ? 'w-64' : 'w-0 border-r-0'}`}>
+      <aside className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-primary transition-[width,min-width] duration-200 ${isOpen ? 'min-w-64 w-64' : 'w-0 min-w-0 border-r-0'}`}>
         <div className="flex-1 overflow-y-auto px-2 py-2">
           <div className="p-2">
             <button
@@ -783,7 +785,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 </span>
                 <button
                   type="button"
-                  className="rounded p-0.5 opacity-0 transition-opacity group-hover/label:opacity-100 hover:bg-bg-hover"
+                  className="rounded p-0.5 transition-colors hover:bg-bg-hover"
                   onClick={handleCreateFolderRequest}
                   title="Create a new folder"
                 >
@@ -861,21 +863,42 @@ const Sidebar: React.FC<SidebarProps> = ({
 
         <div className="flex shrink-0 items-center gap-3 border-t border-border-primary px-5 py-3">
           <ThemeSwitcher />
-          <button
-            type="button"
-            className={`group relative ml-auto flex h-6 w-6 items-center justify-center transition-all duration-[150ms] ${activeWorkspace === 'dictionary' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:text-text-secondary'}`}
-            title="Personal dictionary"
-            aria-label="Personal dictionary"
-            onClick={onDictionaryOpen}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
-            </svg>
-            <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-2 whitespace-nowrap rounded border border-border-primary bg-bg-secondary px-2 py-1 font-mono text-[0.6rem] text-text-primary opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
-              Personal dictionary
-            </span>
-          </button>
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              type="button"
+              className={`group relative flex h-6 w-6 items-center justify-center transition-all duration-[150ms] ${activeWorkspace === 'usage' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:text-text-secondary'}`}
+              title="Usage dashboard"
+              aria-label="Usage dashboard"
+              onClick={onUsageOpen}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19V5" />
+                <path d="M4 19h16" />
+                <path d="M8 15v-3" />
+                <path d="M12 15V8" />
+                <path d="M16 15v-5" />
+                <path d="M20 15v-7" />
+              </svg>
+              <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-2 whitespace-nowrap rounded border border-border-primary bg-bg-secondary px-2 py-1 font-mono text-[0.6rem] text-text-primary opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
+                Usage dashboard
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`group relative flex h-6 w-6 items-center justify-center transition-all duration-[150ms] ${activeWorkspace === 'dictionary' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:text-text-secondary'}`}
+              title="Personal dictionary"
+              aria-label="Personal dictionary"
+              onClick={onDictionaryOpen}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+              </svg>
+              <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-2 whitespace-nowrap rounded border border-border-primary bg-bg-secondary px-2 py-1 font-mono text-[0.6rem] text-text-primary opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
+                Personal dictionary
+              </span>
+            </button>
+          </div>
         </div>
       </aside>
 

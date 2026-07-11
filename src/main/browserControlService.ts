@@ -3,8 +3,6 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 
-type BrowserTargetKind = 'text' | 'role' | 'selector' | 'coordinates';
-
 export type BrowserTarget =
   | { kind: 'text'; text: string; exact?: boolean }
   | { kind: 'role'; role: string; name?: string }

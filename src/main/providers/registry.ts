@@ -16,20 +16,6 @@ export function initializeProviders(opencodeGoApiKey?: string, openRouterApiKey?
   providers.set(openRouter.id, openRouter);
 }
 
-export function setOpenCodeGoApiKey(key: string): void {
-  const provider = providers.get('opencode-go');
-  if (provider && provider instanceof OpenCodeGoProvider) {
-    provider.setApiKey(key);
-  }
-}
-
-export function setOpenRouterApiKey(key: string): void {
-  const provider = providers.get('openrouter');
-  if (provider && provider instanceof OpenRouterProvider) {
-    provider.setApiKey(key);
-  }
-}
-
 export function getProvider(providerId: string): Provider | undefined {
   return providers.get(providerId);
 }

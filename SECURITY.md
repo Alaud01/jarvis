@@ -4,9 +4,9 @@ Jarvis is a local macOS desktop assistant. It is designed for personal productiv
 
 ## Local Data
 
-Conversations, drafts, selected models, dictionary entries, and some provider keys are stored locally through Electron storage. The repository does not intentionally send this local state anywhere except when the user invokes a model/provider or tool that needs relevant context.
+Conversations, drafts, selected models, and dictionary entries are stored locally through Electron storage. The repository does not intentionally send this local state anywhere except when the user invokes a model/provider or tool that needs relevant context.
 
-OpenRouter and OpenCode Go keys saved through the UI currently use `electron-store`. That keeps setup simple, but it is not the same as storing secrets in the macOS Keychain. A production hardening pass should move saved API keys to OS-backed secure storage such as Electron `safeStorage` or Keychain integration.
+Provider credentials are read only from `.env` or the parent process environment. Jarvis does not expose credential storage through renderer IPC and removes legacy OpenRouter and OpenCode Go keys from its Electron store during startup. The `.env` file is intentionally excluded from Git; users should still protect it as a plaintext local configuration file.
 
 ## External Services
 
@@ -19,6 +19,12 @@ Depending on configuration, Jarvis may send requests to:
 - Ollama for local or optional cloud model access
 
 Only configure provider keys for services you intend to use.
+
+The `fetch_url` assistant tool is restricted to the public internet. It rejects localhost,
+private, link-local, reserved, and other non-public IP ranges after DNS resolution, and it
+repeats that validation for every redirect. Browser Control is the separate interactive
+workspace; neither capability is intended to provide unattended access to local-network
+services.
 
 ## Voice Dictation
 

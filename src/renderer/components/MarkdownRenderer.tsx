@@ -26,7 +26,7 @@ hljs.registerLanguage('html', xml);
 hljs.registerLanguage('xml', xml);
 
 interface CodeProps {
-  node?: any;
+  node?: unknown;
   inline?: boolean;
   className?: string;
   children?: React.ReactNode;

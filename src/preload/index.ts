@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
@@ -24,19 +24,6 @@ type ChatMessagePayload = {
   content: string;
   images?: string[];
   imageMimeTypes?: string[];
-};
-
-type ModelInfo = {
-  id: string;
-  name: string;
-  provider: string;
-  contextLength?: number;
-};
-
-type ProviderInfo = {
-  id: string;
-  name: string;
-  available: boolean;
 };
 
 type SendMessageStreamRequest = {
@@ -75,7 +62,7 @@ contextBridge.exposeInMainWorld('assistant', {
     return () => ipcRenderer.removeListener('ollama-error', listener);
   },
   onSearchSources: (callback: (event: SearchSourcesEvent) => void) => {
-    const listener = (_event: any, event: SearchSourcesEvent) => callback(event);
+    const listener = (_event: IpcRendererEvent, event: SearchSourcesEvent) => callback(event);
     ipcRenderer.on('search-sources-event', listener);
     return () => ipcRenderer.removeListener('search-sources-event', listener);
   },
@@ -85,17 +72,17 @@ contextBridge.exposeInMainWorld('assistant', {
   getLocalVoiceModelStatus: (): Promise<LocalVoiceModelStatus> => ipcRenderer.invoke('voice-model:status'),
   installLocalVoiceModel: (): Promise<LocalVoiceModelInstallResult> => ipcRenderer.invoke('voice-model:install'),
   onVoiceFlowState: (callback: (state: 'idle' | 'recording' | 'processing') => void) => {
-    const listener = (_event: any, state: 'idle' | 'recording' | 'processing') => callback(state);
+    const listener = (_event: IpcRendererEvent, state: 'idle' | 'recording' | 'processing') => callback(state);
     ipcRenderer.on('voice-flow-state', listener);
     return () => ipcRenderer.removeListener('voice-flow-state', listener);
   },
   onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => {
-    const listener = (_event: any, payload: VoiceTranscriptPayload) => callback(payload);
+    const listener = (_event: IpcRendererEvent, payload: VoiceTranscriptPayload) => callback(payload);
     ipcRenderer.on('voice-transcript', listener);
     return () => ipcRenderer.removeListener('voice-transcript', listener);
   },
   onVoiceError: (callback: (error: string) => void) => {
-    const listener = (_event: any, error: string) => callback(error);
+    const listener = (_event: IpcRendererEvent, error: string) => callback(error);
     ipcRenderer.on('voice-error', listener);
     return () => ipcRenderer.removeListener('voice-error', listener);
   },
@@ -121,10 +108,6 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
   storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
-  storeLoadOpenCodeGoApiKey: () => ipcRenderer.invoke('store:load-opencode-go-api-key'),
-  storeSaveOpenCodeGoApiKey: (key: string) => ipcRenderer.invoke('store:save-opencode-go-api-key', key),
-  storeLoadOpenRouterApiKey: () => ipcRenderer.invoke('store:load-openrouter-api-key'),
-  storeSaveOpenRouterApiKey: (key: string) => ipcRenderer.invoke('store:save-openrouter-api-key', key),
   storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),
   storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),
@@ -140,6 +123,8 @@ contextBridge.exposeInMainWorld('assistant', {
   dictionaryRuleDelete: (id: string) => ipcRenderer.invoke('dictionary:rule-delete', id),
   dictionaryCandidateUpdate: (id: string, input: UpdateVocabularyCandidateInput) =>
     ipcRenderer.invoke('dictionary:candidate-update', id, input),
+  usageDashboard: (query: { range: 'hour' | 'day' | 'week' | 'month'; tokenMode?: 'total' | 'input' | 'output' }) =>
+    ipcRenderer.invoke('usage:dashboard', query),
   generateTitle: (message: string, model: string, provider: string) => ipcRenderer.invoke('generate-title', message, model, provider),
   setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

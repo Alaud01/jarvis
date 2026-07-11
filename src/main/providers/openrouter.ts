@@ -30,13 +30,21 @@ interface OpenRouterModelsResponse {
 
 interface OpenAIStreamDelta {
   content?: string;
+  reasoning?: string;
   reasoning_content?: string;
   thinking?: string;
+  reasoning_details?: OpenRouterReasoningDetail[];
   tool_calls?: Array<{
     index: number;
     id?: string;
     function?: { name?: string; arguments?: string };
   }>;
+}
+
+interface OpenRouterReasoningDetail {
+  type?: string;
+  text?: string;
+  summary?: string;
 }
 
 interface OpenAIStreamChoice {
@@ -47,6 +55,10 @@ interface OpenAIStreamChoice {
 
 interface OpenAIStreamChunk {
   choices?: OpenAIStreamChoice[];
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  };
 }
 
 type OpenAIMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
@@ -122,13 +134,56 @@ function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
   });
 }
 
-function convertToolsToOpenAI(tools: ToolDefinition[]) {
+function extractReasoningDetails(details?: OpenRouterReasoningDetail[]): string {
+  if (!details) return '';
+
+  return details.map((detail) => {
+    if (typeof detail.text === 'string') return detail.text;
+    if (typeof detail.summary === 'string') return detail.summary;
+    return '';
+  }).join('');
+}
+
+function getThinkingDelta(delta: OpenAIStreamDelta): string {
+  return delta.reasoning
+    || delta.reasoning_content
+    || delta.thinking
+    || extractReasoningDetails(delta.reasoning_details);
+}
+
+function normalizeXaiToolSchema(value: unknown, isRootSchema = true): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeXaiToolSchema(entry, false));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => {
+      // OpenRouter's xAI adapter rejects boolean schemas used by nested
+      // additionalProperties entries. An empty schema object is the standard
+      // non-boolean equivalent of `true`, while keeping the root tool schema
+      // unchanged preserves its intended argument validation.
+      if (!isRootSchema && key === 'additionalProperties' && typeof entry === 'boolean') {
+        return [key, {}];
+      }
+
+      return [key, normalizeXaiToolSchema(entry, false)];
+    }),
+  );
+}
+
+function convertToolsToOpenAI(tools: ToolDefinition[], useXaiSchemaCompatibility: boolean) {
   return tools.map((tool) => ({
     type: 'function' as const,
     function: {
       name: tool.function.name,
       description: tool.function.description,
-      parameters: tool.function.parameters,
+      parameters: useXaiSchemaCompatibility
+        ? normalizeXaiToolSchema(tool.function.parameters)
+        : tool.function.parameters,
     },
   }));
 }
@@ -156,20 +211,58 @@ function hasTextOutput(model: OpenRouterModel): boolean {
 
 async function buildOpenRouterError(response: Response): Promise<Error> {
   const fallbackMessage = response.statusText.trim() || `HTTP ${response.status}`;
+  const requestId = response.headers.get('x-request-id')
+    || response.headers.get('x-openrouter-request-id')
+    || undefined;
+
+  const appendRequestId = (message: string): string => (
+    requestId ? `${message} (request_id=${requestId})` : message
+  );
+
+  const asRecord = (value: unknown): Record<string, unknown> | undefined => (
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined
+  );
+
+  const asString = (value: unknown): string | undefined => (
+    typeof value === 'string' && value.trim() ? value.trim() : undefined
+  );
+
+  const truncate = (value: string, maxLength = 800): string => (
+    value.length <= maxLength ? value : `${value.slice(0, maxLength)}…`
+  );
+
   try {
     const body = await response.text();
     const trimmed = body.trim();
-    if (!trimmed) return new Error(`OpenRouter request failed (${response.status}): ${fallbackMessage}`);
+    if (!trimmed) {
+      return new Error(appendRequestId(`OpenRouter request failed (${response.status}): ${fallbackMessage}`));
+    }
 
     try {
-      const parsed = JSON.parse(trimmed);
-      const errorMsg = parsed?.error?.message || parsed?.error || parsed?.message || trimmed;
-      return new Error(`OpenRouter request failed (${response.status}): ${errorMsg}`);
+      const parsed = asRecord(JSON.parse(trimmed));
+      const errorValue = parsed?.error;
+      const errorRecord = asRecord(errorValue);
+      const metadata = asRecord(errorRecord?.metadata);
+      const errorMessage = asString(errorRecord?.message)
+        || asString(errorValue)
+        || asString(parsed?.message)
+        || truncate(trimmed);
+      const details = [
+        asString(errorRecord?.code) ? `code=${asString(errorRecord?.code)}` : undefined,
+        asString(metadata?.provider_name) ? `provider=${asString(metadata?.provider_name)}` : undefined,
+        asString(metadata?.raw) && asString(metadata?.raw) !== errorMessage
+          ? `raw=${truncate(asString(metadata?.raw)!)}`
+          : undefined,
+      ].filter(Boolean).join('; ');
+      const suffix = details ? ` [${details}]` : '';
+      return new Error(appendRequestId(`OpenRouter request failed (${response.status}): ${errorMessage}${suffix}`));
     } catch {
-      return new Error(`OpenRouter request failed (${response.status}): ${trimmed}`);
+      return new Error(appendRequestId(`OpenRouter request failed (${response.status}): ${truncate(trimmed)}`));
     }
   } catch {
-    return new Error(`OpenRouter request failed (${response.status}): ${fallbackMessage}`);
+    return new Error(appendRequestId(`OpenRouter request failed (${response.status}): ${fallbackMessage}`));
   }
 }
 
@@ -182,10 +275,6 @@ export class OpenRouterProvider implements Provider {
   constructor(apiKey?: string, baseUrl?: string) {
     this.apiKey = apiKey || process.env.OPENROUTER_API_KEY || '';
     this.baseUrl = (baseUrl || process.env.OPENROUTER_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-  }
-
-  setApiKey(key: string): void {
-    this.apiKey = key;
   }
 
   getApiKey(): string | null {
@@ -275,33 +364,72 @@ export class OpenRouterProvider implements Provider {
     const toolCalls: import('./types').ToolCall[] = [];
     const toolCallAccumulators: Map<number, { id: string; name: string; arguments: string }> = new Map();
 
+    const startedAtMs = Date.now();
+    let firstOutputAtMs: number | undefined;
+    let usage: StreamTurnResult['usage'];
+
     const requestBody: Record<string, unknown> = {
       model,
       messages: convertMessagesToOpenAI(messages),
       stream: true,
+      stream_options: { include_usage: true },
     };
-    if (options?.tools) {
-      requestBody.tools = convertToolsToOpenAI(options.tools);
+    const isXaiModel = model.toLowerCase().startsWith('x-ai/');
+    if (isXaiModel) {
+      requestBody.reasoning = { effort: 'high', exclude: false };
+    }
+    const tools = options?.tools ?? [];
+    const hasTools = tools.length > 0;
+    if (hasTools) {
+      requestBody.tools = convertToolsToOpenAI(tools, isXaiModel);
     }
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    const sendStreamRequest = (body: Record<string, unknown>) => fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: this.buildHeaders(),
-      body: JSON.stringify(requestBody),
+      body: JSON.stringify(body),
       signal: abortController.signal,
     });
 
+    const response = await sendStreamRequest(requestBody);
     if (!response.ok) {
-      throw await buildOpenRouterError(response);
+      const error = await buildOpenRouterError(response);
+      console.error('[OpenRouter] Chat request rejected:', {
+        model,
+        status: response.status,
+        requestId: response.headers.get('x-request-id')
+          || response.headers.get('x-openrouter-request-id')
+        || undefined,
+        hasTools,
+        toolCount: tools.length,
+        toolNames: tools.map((tool) => tool.function.name),
+        error: error.message,
+      });
+      throw error;
     }
 
     if (!response.body) {
       throw new Error('Response body is null');
     }
 
+    debugLog('[OpenRouter] Stream response accepted:', {
+      model,
+      status: response.status,
+      requestId: response.headers.get('x-request-id')
+        || response.headers.get('x-openrouter-request-id')
+      || undefined,
+      hasTools,
+      toolCount: tools.length,
+      toolNames: tools.map((tool) => tool.function.name),
+    });
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let sawDoneSentinel = false;
+    let chunkCount = 0;
+    let parseErrorCount = 0;
+    let lastFinishReason: string | undefined;
 
     const finalizeToolCalls = () => {
       for (const [, acc] of toolCallAccumulators) {
@@ -327,30 +455,49 @@ export class OpenRouterProvider implements Provider {
       }
     };
 
+    const markOutput = () => {
+      if (firstOutputAtMs === undefined) firstOutputAtMs = Date.now();
+    };
+
     const processSSELine = (line: string) => {
       if (!line.startsWith('data:')) return;
       const data = line.slice(5).trim();
-      if (!data || data === '[DONE]') {
+      if (!data) {
+        return;
+      }
+      if (data === '[DONE]') {
+        sawDoneSentinel = true;
         finalizeToolCalls();
         return;
       }
 
       try {
         const chunk = JSON.parse(data) as OpenAIStreamChunk;
+        chunkCount += 1;
+        if (chunk.usage) {
+          usage = {
+            inputTokens: chunk.usage.prompt_tokens,
+            outputTokens: chunk.usage.completion_tokens,
+            generationMs: Math.max(1, Date.now() - (firstOutputAtMs ?? startedAtMs)),
+          };
+        }
         const choice = chunk.choices?.[0];
         if (!choice) return;
 
-        const delta = choice.delta;
-        if (delta.reasoning_content) {
-          accumulatedThinking += delta.reasoning_content;
-          onChunk({ type: 'thinking', content: delta.reasoning_content });
+        if (choice.finish_reason) {
+          lastFinishReason = choice.finish_reason;
         }
-        if (delta.thinking) {
-          accumulatedThinking += delta.thinking;
-          onChunk({ type: 'thinking', content: delta.thinking });
+
+        const delta = choice.delta;
+        const thinkingDelta = getThinkingDelta(delta);
+        if (thinkingDelta) {
+          accumulatedThinking += thinkingDelta;
+          markOutput();
+          onChunk({ type: 'thinking', content: thinkingDelta });
         }
         if (delta.content) {
           accumulatedContent += delta.content;
+          markOutput();
           onChunk({ type: 'content', content: delta.content });
         }
 
@@ -378,6 +525,7 @@ export class OpenRouterProvider implements Provider {
           finalizeToolCalls();
         }
       } catch (error) {
+        parseErrorCount += 1;
         console.error('[OpenRouter] Error parsing SSE chunk:', error);
       }
     };
@@ -407,6 +555,27 @@ export class OpenRouterProvider implements Provider {
         processSSELine(buffer.trim());
       }
       finalizeToolCalls();
+
+      if (abortController.signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+
+      if (!sawDoneSentinel) {
+        const diagnostic = {
+          model,
+          chunkCount,
+          parseErrorCount,
+          lastFinishReason: lastFinishReason ?? null,
+          contentLength: accumulatedContent.length,
+          thinkingLength: accumulatedThinking.length,
+          toolCallCount: toolCalls.length,
+        };
+        console.error('[OpenRouter] Stream ended before [DONE]:', diagnostic);
+        throw new Error(
+          `OpenRouter stream ended unexpectedly before [DONE] (chunks=${chunkCount}, `
+          + `finish_reason=${lastFinishReason ?? 'none'}, content_length=${accumulatedContent.length}).`
+        );
+      }
     } catch (error) {
       if (abortController.signal.aborted) {
         throw new DOMException('Aborted', 'AbortError');
@@ -419,6 +588,10 @@ export class OpenRouterProvider implements Provider {
       contentLength: accumulatedContent.length,
       thinkingLength: accumulatedThinking.length,
       toolCallCount: toolCalls.length,
+      chunkCount,
+      parseErrorCount,
+      sawDoneSentinel,
+      finishReason: lastFinishReason,
     });
 
     return {
@@ -431,6 +604,9 @@ export class OpenRouterProvider implements Provider {
               tool_calls: toolCalls.length ? toolCalls : undefined,
             }
           : undefined,
+      usage: usage ?? {
+        generationMs: Math.max(1, Date.now() - (firstOutputAtMs ?? startedAtMs)),
+      },
     };
   }
 }

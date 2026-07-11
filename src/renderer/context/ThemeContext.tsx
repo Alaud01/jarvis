@@ -1,17 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
-
-type Theme = 'light' | 'dark' | 'system' | 'custom';
-
-interface ThemeContextType {
-  theme: Theme;
-  setTheme: (theme: Theme) => void;
-  customColors: Record<string, string>;
-  setCustomColors: (colors: Record<string, string>) => void;
-  isDark: boolean;
-  resolvedTheme: 'light' | 'dark';
-}
-
-const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
+import React, { useState, useEffect, type ReactNode } from 'react';
+import { ThemeContext, type Theme } from './theme';
 
 const STORAGE_KEY = 'openchat-theme';
 const CUSTOM_COLORS_KEY = 'openchat-custom-colors';
@@ -135,12 +123,4 @@ export const ThemeProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       {children}
     </ThemeContext.Provider>
   );
-};
-
-export const useTheme = (): ThemeContextType => {
-  const context = useContext(ThemeContext);
-  if (context === undefined) {
-    throw new Error('useTheme must be used within a ThemeProvider');
-  }
-  return context;
 };

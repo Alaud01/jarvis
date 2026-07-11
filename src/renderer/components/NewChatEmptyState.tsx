@@ -58,9 +58,7 @@ const WordmarkVariant: React.FC = () => {
       <span
         className={`jarvis-wordmark-j${measured ? ' is-animated' : ''}`}
         style={{ '--j-offset': `${restWidth / 2}px` } as React.CSSProperties}
-      >
-        <JarvisIconMark />
-      </span>
+      >J</span>
       <span
         ref={restRef}
         className={`jarvis-wordmark-rest${restRevealed ? ' is-revealed' : ''}`}
@@ -69,20 +67,6 @@ const WordmarkVariant: React.FC = () => {
     </div>
   );
 };
-
-const JarvisIconMark: React.FC = () => (
-  <svg
-    className="jarvis-wordmark-mark"
-    viewBox="604 366 699 1253"
-    aria-hidden="true"
-    focusable="false"
-  >
-    <path
-      d="M1302.98 1222.43C1302.98 1325.36 1287.76 1405.32 1257.32 1462.32C1200.88 1566.35 1093.52 1618.37 935.254 1618.37C843.945 1618.37 765.918 1593.75 701.172 1544.5C636.426 1494.69 604.053 1406.43 604.053 1279.7V1192.54H759.277V1279.7C759.277 1346.11 773.942 1396.19 803.271 1429.95C833.154 1463.15 879.362 1479.75 941.895 1479.75C1029.88 1479.75 1087.43 1449.59 1114.55 1389.27C1131.15 1352.19 1139.45 1282.19 1139.45 1179.26V366.615H1302.98V1222.43Z"
-      fill="currentColor"
-    />
-  </svg>
-);
 
 /* ------------------------------------------------------------------ */
 /* Shared hook                                                         */
