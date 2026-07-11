@@ -1,136 +1,132 @@
 # Jarvis
 
-Jarvis is a macOS menu bar assistant for fast everyday work: chat with local or hosted models, dictate into any focused app, search the web, work with Notion, inspect documents, and drive a local browser workspace from the assistant loop.
+Jarvis is a local-first macOS desktop assistant for chat, voice dictation, web research, Notion workflows, document inspection, and browser automation. It supports local Ollama models and hosted models through OpenRouter or OpenCode Go.
 
-The project is intentionally local-first. Electron owns the desktop shell, React renders the chat workspace, and a small FastAPI sidecar handles voice transcription and refinement.
+![Jarvis desktop app showing the dark chat workspace](./docs/images/jarvis-app.png)
 
-## What It Does
+## What You Can Do
 
-- **Chat across providers** - Switch between Ollama, OpenRouter, and OpenCode Go models.
-- **Voice dictation anywhere** - Press `Cmd+Shift+Space`, speak, and route the transcript either into Jarvis or the app that was focused before recording.
-- **Personal dictionary learning** - Capture recurring dictation corrections as vocabulary guidance and scoped replacement rules.
-- **Web search and fetch tools** - Use Tavily search and a guarded URL fetch tool for current information.
-- **Notion workspace tools** - Search, query databases, create pages, and append blocks through a Notion integration token.
-- **Browser Control** - Open and control a Jarvis-owned Chromium workspace through small assistant-directed actions with page state feedback.
-- **Attachments and rich rendering** - Read local attachments, render Markdown, math, code blocks, and source links in the chat UI.
+- Chat with local or hosted language models.
+- Dictate into Jarvis or another focused macOS app with `Cmd+Shift+Space`.
+- Build a personal vocabulary from recurring dictation corrections.
+- Search the web and fetch public pages for current information.
+- Search Notion, query databases, create pages, and append blocks.
+- Open and control a separate Jarvis-owned browser workspace.
+- Attach documents and render Markdown, code, math, and citations.
+- Review local token usage and model response performance.
 
-## Stack
+## Requirements
 
-- **Electron** - Menu bar app, tray, windows, IPC, global shortcuts, macOS integration
-- **React + TypeScript** - Chat UI and stateful productivity workspace
-- **Vite + Tailwind CSS** - Renderer build and styling
-- **FastAPI Python sidecar** - Voice activity detection, speech-to-text, and transcript refinement
-- **Provider adapters** - Ollama, OpenRouter, OpenCode Go, Tavily, and Notion
+- macOS
+- Node.js 22.13 or newer
+- pnpm 10.28 or newer
+- Python 3.11 or newer for voice features
+- Optional: a running [Ollama](https://ollama.com/) server for local models
 
-## Project Structure
-
-```text
-jarvis/
-├── python-service/      # Voice sidecar, default port 8765
-├── src/
-│   ├── main/            # Electron main process, providers, tools, storage
-│   ├── preload/         # Secure IPC bridge
-│   ├── renderer/        # React UI
-│   └── shared/          # Shared types and pure logic
-├── tests/               # Node-based shared logic tests
-├── docs/adr/            # Architecture decision records
-├── CONTEXT.md           # Domain glossary for voice personalization
-└── package.json
-```
-
-## Setup
+## Quick Start
 
 ```bash
+git clone https://github.com/Alaud01/assistant-app.git
+cd assistant-app
 pnpm install
 cp .env.example .env
+```
+
+Open `.env` and add only the credentials for the services you intend to use. You can leave every cloud key empty when using a local Ollama server.
+
+Start the development app:
+
+```bash
+pnpm dev
+```
+
+Jarvis runs in the macOS menu bar. Open it from the tray icon after Electron starts.
+
+## Provider Configuration
+
+| Variable | Enables |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Hosted chat, cloud transcription, and transcript refinement |
+| `OPENCODE_GO_API_KEY` | OpenCode Go models |
+| `TAVILY_KEY` | Web search |
+| `NOTION_TOKEN` | Notion search and page/database tools |
+| `OLLAMA_BASE_URL` | Local Ollama server; defaults to `http://localhost:11434` |
+| `OLLAMA_API_KEY` | Optional Ollama cloud access |
+
+See [.env.example](./.env.example) for optional provider, voice-model, and timeout settings. Credentials are read from the environment and are not copied into Jarvis application storage.
+
+## Voice Setup
+
+Install the lightweight Python sidecar dependencies:
+
+```bash
 pnpm setup:python
 ```
 
-Fill in whichever provider keys you want to use in `.env`. Ollama can run without a cloud key if a local Ollama server is available.
-Provider credentials are read only from environment variables; Jarvis does not copy them into its application data store.
+Jarvis will offer to install the larger local Parakeet speech-recognition runtime when voice features are first configured. That managed runtime and its model weights are stored under `~/Library/Application Support/Jarvis`, not in this repository.
 
-## Development
+Without the local model, Jarvis can use OpenRouter for transcription when `OPENROUTER_API_KEY` is configured. Voice features may request microphone, Accessibility, and Automation permissions for recording, app detection, and cross-app text insertion.
 
-```bash
-pnpm dev              # Vite dev server + Electron app
-pnpm start:python     # Voice service only, default port 8765
-pnpm start            # Compile, build renderer, and launch Electron
-```
-
-The voice service uses one canonical port: `VOICE_SERVICE_PORT`, defaulting to `8765`. Electron, `pnpm start:python`, and direct `python-service/main.py` startup all use that same default so the app does not depend on how the sidecar was started.
-
-## Local Voice Model Setup
-
-Jarvis can run voice transcription locally with Parakeet, but the heavy PyTorch/NeMo runtime and model weights are not installed by `pnpm setup:python`. When the app detects that the local runtime is missing, the chat workspace shows a **Local voice model** setup panel. Choosing **Install** creates a managed runtime under `~/Library/Application Support/Jarvis/python-service`, installs the pinned local ASR dependencies, and downloads `nvidia/parakeet-tdt_ctc-110m`.
-
-If the user skips setup or installation fails, Jarvis falls back to OpenRouter transcription/refinement when `OPENROUTER_API_KEY` is configured. The packaged Electron app includes the lightweight `python-service` source as an app resource, while the heavyweight local ML runtime stays in the user's application-support directory.
-
-## Test And Build
+## Running and Building
 
 ```bash
-pnpm test             # TypeScript compile + JS tests + Python sidecar tests
-pnpm test:js          # Shared voice-learning tests
-pnpm test:python      # Sync requirements and run the FastAPI sidecar unittest suite
-pnpm compile          # Electron main/preload/shared TypeScript
-pnpm build            # Compile, build renderer, and package with electron-builder
+pnpm dev              # Vite dev server and Electron app
+pnpm start            # Production-style local build and launch
+pnpm start:python     # Run only the voice sidecar on port 8765
+pnpm test             # TypeScript, lint, JavaScript, and Python tests
+pnpm build            # Build the macOS application, ZIP, and DMG
 ```
 
-If Python tests fail because dependencies are missing, run `pnpm setup:python` first.
+The generated macOS application is ad-hoc signed for local development. Public binary distribution requires an Apple Developer certificate and notarization.
 
-## Environment
+## Using Jarvis
 
-| Variable | Required | Used by | Purpose |
-| --- | --- | --- | --- |
-| `OPENROUTER_API_KEY` | For OpenRouter and cloud voice | Main + python-service | Chat models, speech transcription, transcript refinement |
-| `TAVILY_KEY` | For web search | Main | Tavily search tool |
-| `NOTION_TOKEN` | For Notion tools | Main | Search, query, create, and append to Notion pages/databases |
-| `OPENCODE_GO_API_KEY` | For OpenCode Go | Main | OpenCode Go model provider |
-| `VOICE_SERVICE_PORT` | No | Main + python-service | Voice sidecar port, defaults to `8765` |
-| `OLLAMA_BASE_URL` | No | Main | Local Ollama endpoint, defaults to `http://localhost:11434` |
-| `OLLAMA_API_KEY` | No | Main | Optional Ollama cloud model access |
-| `OLLAMA_INCLUDE_CLOUD_MODELS` | No | Main | Set to `false` to hide Ollama cloud models |
-| `OPENROUTER_BASE_URL` | No | Main | Override OpenRouter-compatible API base URL |
-| `OPENROUTER_REFERER` / `OPENROUTER_TITLE` | No | Main + python-service | Optional OpenRouter request metadata |
-| `VOICE_LOCAL_PARAKEET_ENABLED` | No | python-service | Try local Parakeet transcription before OpenRouter fallback |
-| `VOICE_LOCAL_PARAKEET_MODEL` | No | python-service | Local Hugging Face/NeMo ASR model, defaults to `nvidia/parakeet-tdt_ctc-110m` |
-| `VOICE_LOCAL_PARAKEET_DEVICE` | No | python-service | Local Parakeet torch device: `mps`, `cpu`, or `auto` |
-| `VOICE_LOCAL_PARAKEET_PRELOAD_ENABLED` | No | python-service | Preload local Parakeet on service startup for faster first dictation |
-| `VOICE_LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS` | No | python-service | How long a dictation may wait for the local model to finish loading |
-| `VOICE_LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED` | No | python-service | Set to `true` to fall back to OpenRouter when local Parakeet times out |
-| `VOICE_LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS` | No | python-service | Unload local Parakeet after this many idle seconds; `0` disables unloading |
+1. Select a provider and model from the composer.
+2. Enter a message, attach a document, or press `Cmd+Shift+Space` to dictate.
+3. Configure `TAVILY_KEY` or `NOTION_TOKEN` before requesting their corresponding tools.
+4. Browser Control opens a separate Chromium workspace and reports page state after each action.
+5. Review learned vocabulary in **Personal Dictionary** and local metrics in **Usage Dashboard**.
 
-See `.env.example` for copyable defaults.
+## Security and Privacy
 
-## Security And Privacy
+- `.env` is ignored by Git but is still a plaintext local file; do not share or commit it.
+- Hosted providers receive the prompts, attachments, audio, or tool context required for requests sent to them.
+- `fetch_url` accepts only public-internet destinations and rejects non-public DNS results and redirects.
+- Browser Control uses its own browser profile rather than the user's normal browser profile.
+- `browser_evaluate` can execute JavaScript inside the Jarvis-owned page. Treat it as a trusted debugging/recovery capability.
+- Voice refinement and correction learning may inspect bounded text around the focused field.
 
-Jarvis is a local desktop assistant, but it can touch sensitive workflows. Before using it with personal data, review [SECURITY.md](./SECURITY.md).
+Read [SECURITY.md](./SECURITY.md) before using Jarvis with sensitive accounts or data.
 
-Important points:
+## Current Limitations
 
-- The `fetch_url` tool is public-internet-only: DNS results and redirects to localhost, private, link-local, reserved, or other non-public addresses are blocked.
-- Provider API keys are read from `.env` or the parent process environment and are never persisted in `electron-store`. Keep `.env` private; it is excluded by `.gitignore`.
-- Browser Control uses a Jarvis-owned local browser window. It does not control the user's normal browser profile.
-- `browser_evaluate` can run JavaScript inside the Jarvis-owned browser page. Treat it as a powerful debugging/recovery tool, not as a general-purpose sandbox.
-- Voice dictation may capture nearby focused-field context for refinement and correction learning.
-- macOS automation permissions are used for app focus, text insertion, and dictation workflows.
+- Jarvis is macOS-specific and depends on macOS tray, accessibility, and automation APIs.
+- Browser Control and cross-app dictation are powerful local capabilities; review requested permissions carefully.
+- The optional local Parakeet runtime is a large download and can use significant memory during transcription.
+- Release builds are not notarized unless signing credentials are configured separately.
 
-## Notes On Assets
+## Architecture
 
-The renderer uses system UI fonts plus a Google-hosted JetBrains Mono stylesheet. Unused local font bundles were removed to keep the repository small and avoid unnecessary font redistribution questions.
+- **Electron main process:** provider orchestration, tool execution, IPC, storage, Browser Control, and voice routing
+- **React + TypeScript renderer:** conversations, model selection, attachments, dictionary management, and usage views
+- **Secure preload bridge:** narrow renderer-to-main IPC surface with context isolation
+- **FastAPI sidecar:** voice activity detection, transcription, and transcript refinement
 
-## Known Limitations
+Architecture decisions live in [docs/adr](./docs/adr), and the voice-personalization glossary lives in [CONTEXT.md](./CONTEXT.md).
 
-- The app is macOS-focused and depends on Electron/macOS APIs for tray, shortcuts, accessibility, and text insertion.
-- Local Parakeet transcription defaults to the Hugging Face/NeMo `nvidia/parakeet-tdt_ctc-110m` model. On Apple Silicon it can use PyTorch MPS/Metal, and it unloads after an idle window to reduce Python memory pressure. It falls back to OpenRouter for local failures; timeout fallback is opt-in so cold starts do not silently become empty cloud transcriptions.
-- Dependency warning cleanup is still worth a pass. Some lockfile warnings come from transitive packages owned by Electron/build tooling rather than direct dependencies.
+## Project Layout
 
-## Architecture Highlights
-
-- **Electron main process** owns provider orchestration, tool execution, storage, voice routing, and Browser Control.
-- **Preload bridge** exposes narrow IPC methods with `contextIsolation` enabled and `nodeIntegration` disabled.
-- **Renderer** stays focused on chat UI, conversation state, model selection, attachments, and dictionary management.
-- **Python sidecar** remains mostly stateless: it transcribes/refines audio while Electron owns personalization, correction observation, and user-facing state.
-- **ADRs and `CONTEXT.md`** document the main domain choices around voice personalization and browser control.
+```text
+jarvis/
+├── assets/              # Application and tray icons
+├── docs/adr/            # Architecture decision records
+├── python-service/      # FastAPI voice sidecar
+├── src/main/            # Electron main process and tools
+├── src/preload/         # IPC bridge
+├── src/renderer/        # React application
+├── src/shared/          # Shared types and pure logic
+└── tests/               # JavaScript tests
+```
 
 ## License
 
