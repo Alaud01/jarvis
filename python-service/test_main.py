@@ -206,7 +206,7 @@ class RefinementTests(unittest.TestCase):
         self.assertEqual(result.refinement_mode, "rule_fallback")
         self.assertEqual(result.applied_edits, ["self_correction"])
 
-    def test_openrouter_refinement_uses_mercury_nitro_with_low_reasoning(self):
+    def test_openrouter_refinement_uses_mercury_nitro_with_medium_reasoning(self):
         response = FakeResponse(
             {
                 "choices": [
@@ -233,7 +233,7 @@ class RefinementTests(unittest.TestCase):
 
         self.assertEqual(result.text, "Hello, world.")
         self.assertEqual(payload["model"], "inception/mercury-2:nitro")
-        self.assertEqual(payload["reasoning"], {"effort": "low"})
+        self.assertEqual(payload["reasoning"], {"effort": "medium"})
         self.assertEqual(payload["provider"]["sort"], "latency")
         self.assertEqual(
             payload["provider"]["preferred_min_throughput"],

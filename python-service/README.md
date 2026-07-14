@@ -14,7 +14,7 @@ for cold starts, local model failures, and transcript refinement. Optional OpenR
 ```bash
 export OPENROUTER_TRANSCRIPTION_MODEL="nvidia/parakeet-tdt-0.6b-v3"
 export OPENROUTER_REFINEMENT_MODEL="inception/mercury-2:nitro"
-export OPENROUTER_REFINEMENT_REASONING_EFFORT="low"
+export OPENROUTER_REFINEMENT_REASONING_EFFORT="medium"
 export OPENROUTER_REFERER="https://your-site.example"
 export OPENROUTER_TITLE="Jarvis"
 export OPENROUTER_MAX_ATTEMPTS="3"
