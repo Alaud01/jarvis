@@ -51,9 +51,20 @@ export interface StreamTurnResult {
   usage?: StreamTurnUsage;
 }
 
+export interface ToolExecutionResult {
+  content: string;
+  success: boolean;
+}
+
 export interface StreamChatTurnOptions {
   tools?: ToolDefinition[] | null;
   keepAlive?: string | number;
+  conversationId?: string;
+  prepareReplayMessages?: (messages: ChatMessage[]) => Promise<ChatMessage[]>;
+  executeTool?: (
+    name: string,
+    argumentsValue: Record<string, unknown>,
+  ) => Promise<ToolExecutionResult>;
 }
 
 export interface SendChatOptions {
@@ -76,6 +87,7 @@ export interface ProviderInfo {
 export interface Provider {
   readonly id: string;
   readonly name: string;
+  readonly conversationMode?: 'stateless' | 'threaded';
   fetchModels(): Promise<ModelInfo[]>;
   streamChat(
     model: string,
@@ -86,4 +98,6 @@ export interface Provider {
   ): Promise<StreamTurnResult>;
   sendChat(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string>;
   getApiKey(): string | null;
+  deleteConversation?(conversationId: string): Promise<void>;
+  shutdown?(): Promise<void>;
 }

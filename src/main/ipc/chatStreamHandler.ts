@@ -2,7 +2,7 @@ import { ipcMain } from 'electron';
 import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../../shared/stream';
 import type { SearchSourcesEvent } from '../../shared/search';
 import { getAllModels, getProvider } from '../providers/registry';
-import type { ChatMessage, ModelInfo, StreamChunk } from '../providers/types';
+import type { ChatMessage, ModelInfo, StreamChunk, ToolExecutionResult } from '../providers/types';
 import { compactMessagesIfNeeded, estimateTotalTokens, getContextThresholdTokens } from '../contextCompaction';
 import { closeBrowserControl } from '../browserControlService';
 import {
@@ -149,30 +149,183 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       const modelContextLength = selectedModelInfo?.contextLength;
       const contextThresholdTokens = getContextThresholdTokens(modelContextLength);
 
-      while (true) {
-        const estimatedTokens = estimateTotalTokens(baseMessages);
-        if (estimatedTokens > contextThresholdTokens) {
-          logMainProcess('LLM', 'Context window approaching limit; compacting conversation history', {
-            conversationId: request.conversationId,
-            model: request.model,
-            estimatedTokens,
-            contextThresholdTokens,
-            modelContextLength: modelContextLength ?? 'default (128k)',
+      const executeTool = async (
+        toolName: string,
+        rawArguments: Record<string, unknown> | string,
+      ): Promise<ToolExecutionResult> => {
+        if (toolName === 'tavily_search') {
+          if (tavilySearchCallsThisTurn >= MAX_TAVILY_SEARCH_CALLS_PER_TURN) {
+            return {
+              success: false,
+              content: [
+                'Tavily search skipped.',
+                `Error: Search limit reached for this user turn (${MAX_TAVILY_SEARCH_CALLS_PER_TURN}).`,
+                'Use the existing search results to answer directly, or ask the user whether to run more searches.',
+              ].join('\n'),
+            };
+          }
+
+          let args;
+          try {
+            args = parseTavilySearchToolArgs(rawArguments);
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Invalid tavily_search arguments.';
+            return { success: false, content: `Tavily search failed.\nError: ${errorMessage}` };
+          }
+
+          tavilySearchCallsThisTurn += 1;
+          const searchResult = await tavilySearch(args);
+          const searchContent = formatTavilySearchToolResult(searchResult);
+          const sourceGroup = createSearchSourceGroup(searchResult);
+          if (sourceGroup) {
+            const payload: SearchSourcesEvent = {
+              assistantMessageId: request.assistantMessageId,
+              group: sourceGroup,
+            };
+            sendToRenderer('search-sources-event', payload);
+          }
+          logMainProcess('LLM', 'Tavily search result returned to LLM', {
+            query: args.query,
+            success: searchResult.success,
+            resultCount: searchResult.results?.length,
+            error: searchResult.error?.slice(0, 300),
           });
-          const preCompactionCount = baseMessages.length;
-          const compacted = await compactMessagesIfNeeded(baseMessages, {
-            provider,
-            model: request.model,
-            modelContextLength,
+          return { success: searchResult.success, content: searchContent };
+        }
+
+        if (toolName === 'fetch_url') {
+          if (fetchUrlCallsThisTurn >= MAX_FETCH_URL_CALLS_PER_TURN) {
+            return {
+              success: false,
+              content: [
+                'Fetch skipped.',
+                `Error: Fetch limit reached for this user turn (${MAX_FETCH_URL_CALLS_PER_TURN}).`,
+                'Use the search snippets, previous fetch results, or cited source URLs to answer directly.',
+              ].join('\n'),
+            };
+          }
+
+          let args;
+          try {
+            args = parseFetchToolArgs(rawArguments);
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : 'Invalid fetch_url arguments.';
+            return { success: false, content: `Fetch failed.\nError: ${errorMessage}` };
+          }
+
+          fetchUrlCallsThisTurn += 1;
+          const fetchResult = await fetchUrlContent(args);
+          const fetchContent = formatFetchToolResult(fetchResult);
+          logMainProcess('LLM', 'Fetch tool result returned to LLM', {
+            url: args.url,
+            success: fetchResult.success,
+            status: fetchResult.status,
+            contentLength: fetchResult.content?.length ?? 0,
+            error: fetchResult.error?.slice(0, 300),
+            preview: fetchContent.slice(0, 600),
           });
-          if (compacted.length < baseMessages.length || estimateTotalTokens(compacted) < estimatedTokens) {
-            baseMessages.splice(0, baseMessages.length, ...compacted);
-            logMainProcess('LLM', 'Conversation history compacted', {
-              conversationId: request.conversationId,
-              previousMessageCount: preCompactionCount,
-              compactedMessageCount: compacted.length,
-              estimatedTokensAfter: estimateTotalTokens(baseMessages),
+          return { success: fetchResult.success, content: fetchContent };
+        }
+
+        if (BROWSER_CONTROL_TOOL_NAMES.has(toolName)) {
+          try {
+            const args = parseToolArgumentsObject(toolName, rawArguments);
+            const browserResult = await runBrowserControlTool(
+              toolName,
+              args,
+              abortController.signal,
+              request.conversationId,
+            );
+            const browserContent = formatBrowserControlResult(toolName, browserResult);
+            logMainProcess('BrowserControl', 'Browser Control tool result returned to LLM', {
+              tool: toolName,
+              success: browserResult.success,
+              url: browserResult.state?.url,
+              title: browserResult.state?.title,
+              error: browserResult.error?.slice(0, 300),
             });
+            return { success: browserResult.success, content: browserContent };
+          } catch (error) {
+            if (isAbortLikeError(error)) throw error;
+            const errorMessage = error instanceof Error ? error.message : 'Invalid Browser Control tool arguments.';
+            return {
+              success: false,
+              content: `Browser Control failed.\nTool: ${toolName}\nError: ${errorMessage}`,
+            };
+          }
+        }
+
+        if (NOTION_TOOL_NAMES.has(toolName)) {
+          if (notionCallsThisTurn >= MAX_NOTION_CALLS_PER_TURN) {
+            return {
+              success: false,
+              content: [
+                'Notion tool skipped.',
+                `Error: Notion call limit reached for this user turn (${MAX_NOTION_CALLS_PER_TURN}).`,
+                'Use the results already returned to answer, or ask the user whether to continue with more Notion operations.',
+              ].join('\n'),
+            };
+          }
+
+          notionCallsThisTurn += 1;
+          try {
+            const args = parseToolArgumentsObject(toolName, rawArguments);
+            const notionContent = await runNotionTool(toolName, args, abortController.signal);
+            logMainProcess('LLM', 'Notion tool result returned to LLM', {
+              tool: toolName,
+              contentPreview: notionContent.slice(0, 600),
+            });
+            return { success: true, content: notionContent };
+          } catch (error) {
+            if (isAbortLikeError(error)) throw error;
+            const errorMessage = error instanceof Error ? error.message : 'Invalid Notion tool arguments.';
+            return {
+              success: false,
+              content: `Notion failed.\nTool: ${toolName}\nError: ${errorMessage}`,
+            };
+          }
+        }
+
+        return { success: false, content: `Unknown tool: ${toolName}` };
+      };
+
+      const compactMessagesForContext = async (
+        messages: ChatMessage[],
+        reason: 'active-context' | 'thread-replay',
+      ): Promise<ChatMessage[]> => {
+        const estimatedTokens = estimateTotalTokens(messages);
+        if (estimatedTokens <= contextThresholdTokens) return messages;
+
+        logMainProcess('LLM', 'Context window approaching limit; compacting conversation history', {
+          conversationId: request.conversationId,
+          model: request.model,
+          reason,
+          estimatedTokens,
+          contextThresholdTokens,
+          modelContextLength: modelContextLength ?? 'default (128k)',
+        });
+        const compacted = await compactMessagesIfNeeded(messages, {
+          provider,
+          model: request.model,
+          modelContextLength,
+        });
+        if (compacted.length < messages.length || estimateTotalTokens(compacted) < estimatedTokens) {
+          logMainProcess('LLM', 'Conversation history compacted', {
+            conversationId: request.conversationId,
+            reason,
+            previousMessageCount: messages.length,
+            compactedMessageCount: compacted.length,
+            estimatedTokensAfter: estimateTotalTokens(compacted),
+          });
+        }
+        return compacted;
+      };
+
+      while (true) {
+        if (provider.conversationMode !== 'threaded') {
+          const compacted = await compactMessagesForContext(baseMessages, 'active-context');
+          if (compacted !== baseMessages) {
+            baseMessages.splice(0, baseMessages.length, ...compacted);
           }
         }
 
@@ -182,7 +335,15 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           baseMessages,
           abortController,
           emitStreamChunk,
-          { tools: CHAT_TOOLS, keepAlive: CHAT_MODEL_KEEP_ALIVE }
+          {
+            tools: CHAT_TOOLS,
+            keepAlive: CHAT_MODEL_KEEP_ALIVE,
+            conversationId: request.conversationId,
+            prepareReplayMessages: replayMessages => (
+              compactMessagesForContext(replayMessages, 'thread-replay')
+            ),
+            executeTool: (toolName, argumentsValue) => executeTool(toolName, argumentsValue),
+          }
         );
         const turnEndedAtMs = Date.now();
         const assistantMessage = turnResult.assistantMessage;
@@ -207,201 +368,12 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         const toolResultMessages: ChatMessage[] = [];
 
         for (const toolCall of toolCalls) {
-          if (toolCall.function.name === 'tavily_search') {
-            if (tavilySearchCallsThisTurn >= MAX_TAVILY_SEARCH_CALLS_PER_TURN) {
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: [
-                  'Tavily search skipped.',
-                  `Error: Search limit reached for this user turn (${MAX_TAVILY_SEARCH_CALLS_PER_TURN}).`,
-                  'Use the existing search results to answer directly, or ask the user whether to run more searches.',
-                ].join('\n'),
-              });
-              continue;
-            }
-
-            let args;
-            try {
-              args = parseTavilySearchToolArgs(toolCall.function.arguments);
-            } catch (error) {
-              const errorMessage = error instanceof Error ? error.message : 'Invalid tavily_search arguments.';
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: `Tavily search failed.\nError: ${errorMessage}`,
-              });
-              continue;
-            }
-
-            tavilySearchCallsThisTurn += 1;
-            const searchResult = await tavilySearch(args);
-            const searchContent = formatTavilySearchToolResult(searchResult);
-            const sourceGroup = createSearchSourceGroup(searchResult);
-            if (sourceGroup) {
-              const payload: SearchSourcesEvent = {
-                assistantMessageId: request.assistantMessageId,
-                group: sourceGroup,
-              };
-              sendToRenderer('search-sources-event', payload);
-            }
-            logMainProcess('LLM', 'Tavily search result returned to LLM', {
-              query: args.query,
-              success: searchResult.success,
-              resultCount: searchResult.results?.length,
-              error: searchResult.error?.slice(0, 300),
-            });
-            toolResultMessages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id || toolCall.function.name,
-              tool_name: toolCall.function.name,
-              content: searchContent,
-            });
-            continue;
-          }
-
-          if (toolCall.function.name === 'fetch_url') {
-            if (fetchUrlCallsThisTurn >= MAX_FETCH_URL_CALLS_PER_TURN) {
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: [
-                  'Fetch skipped.',
-                  `Error: Fetch limit reached for this user turn (${MAX_FETCH_URL_CALLS_PER_TURN}).`,
-                  'Use the search snippets, previous fetch results, or cited source URLs to answer directly.',
-                ].join('\n'),
-              });
-              continue;
-            }
-
-            let args;
-            try {
-              args = parseFetchToolArgs(toolCall.function.arguments);
-            } catch (error) {
-              const errorMessage = error instanceof Error ? error.message : 'Invalid fetch_url arguments.';
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: `Fetch failed.\nError: ${errorMessage}`,
-              });
-              continue;
-            }
-
-            fetchUrlCallsThisTurn += 1;
-            const fetchResult = await fetchUrlContent(args);
-            const fetchContent = formatFetchToolResult(fetchResult);
-            logMainProcess('LLM', 'Fetch tool result returned to LLM', {
-              url: args.url,
-              success: fetchResult.success,
-              status: fetchResult.status,
-              contentLength: fetchResult.content?.length ?? 0,
-              error: fetchResult.error?.slice(0, 300),
-              preview: fetchContent.slice(0, 600),
-            });
-            toolResultMessages.push({
-              role: 'tool',
-              tool_call_id: toolCall.id || toolCall.function.name,
-              tool_name: toolCall.function.name,
-              content: fetchContent,
-            });
-            continue;
-          }
-
-          if (BROWSER_CONTROL_TOOL_NAMES.has(toolCall.function.name)) {
-            try {
-              const args = parseToolArgumentsObject(toolCall.function.name, toolCall.function.arguments);
-              const browserResult = await runBrowserControlTool(
-                toolCall.function.name,
-                args,
-                abortController.signal,
-                request.conversationId,
-              );
-              const browserContent = formatBrowserControlResult(toolCall.function.name, browserResult);
-              logMainProcess('BrowserControl', 'Browser Control tool result returned to LLM', {
-                tool: toolCall.function.name,
-                success: browserResult.success,
-                url: browserResult.state?.url,
-                title: browserResult.state?.title,
-                error: browserResult.error?.slice(0, 300),
-              });
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: browserContent,
-              });
-            } catch (error) {
-              if (isAbortLikeError(error)) {
-                throw error;
-              }
-              const errorMessage = error instanceof Error ? error.message : 'Invalid Browser Control tool arguments.';
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: `Browser Control failed.\nTool: ${toolCall.function.name}\nError: ${errorMessage}`,
-              });
-            }
-            continue;
-          }
-
-          if (NOTION_TOOL_NAMES.has(toolCall.function.name)) {
-            if (notionCallsThisTurn >= MAX_NOTION_CALLS_PER_TURN) {
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: [
-                  'Notion tool skipped.',
-                  `Error: Notion call limit reached for this user turn (${MAX_NOTION_CALLS_PER_TURN}).`,
-                  'Use the results already returned to answer, or ask the user whether to continue with more Notion operations.',
-                ].join('\n'),
-              });
-              continue;
-            }
-
-            notionCallsThisTurn += 1;
-            try {
-              const args = parseToolArgumentsObject(toolCall.function.name, toolCall.function.arguments);
-              const notionContent = await runNotionTool(
-                toolCall.function.name,
-                args,
-                abortController.signal,
-              );
-              logMainProcess('LLM', 'Notion tool result returned to LLM', {
-                tool: toolCall.function.name,
-                contentPreview: notionContent.slice(0, 600),
-              });
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: notionContent,
-              });
-            } catch (error) {
-              if (isAbortLikeError(error)) {
-                throw error;
-              }
-              const errorMessage = error instanceof Error ? error.message : 'Invalid Notion tool arguments.';
-              toolResultMessages.push({
-                role: 'tool',
-                tool_call_id: toolCall.id || toolCall.function.name,
-                tool_name: toolCall.function.name,
-                content: `Notion failed.\nTool: ${toolCall.function.name}\nError: ${errorMessage}`,
-              });
-            }
-            continue;
-          }
-
+          const result = await executeTool(toolCall.function.name, toolCall.function.arguments);
           toolResultMessages.push({
             role: 'tool',
             tool_call_id: toolCall.id || toolCall.function.name,
             tool_name: toolCall.function.name,
-            content: `Unknown tool: ${toolCall.function.name}`,
+            content: result.content,
           });
         }
 

@@ -42,6 +42,7 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'ollama': 'Ollama',
   'opencode-go': 'Go',
   'openrouter': 'OpenRouter',
+  'codex': 'Codex',
 };
 
 function getProviderDisplayName(providerId: string): string {

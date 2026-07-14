@@ -336,7 +336,7 @@ export function saveFolders(folders: SerializedFolder[]): void {
   store.set('folders', folders);
 }
 
-export function deleteFolderAndConversations(id: string): void {
+export function deleteFolderAndConversations(id: string): string[] {
   ensureConversationStorageMigrated();
   const metadata = loadConversationMetadata();
   const deletedIds = new Set(metadata.filter(c => c.folderId === id).map(c => c.id));
@@ -357,6 +357,7 @@ export function deleteFolderAndConversations(id: string): void {
   pruneConversationDrafts(validIds);
   const folders: SerializedFolder[] = store.get('folders', []);
   store.set('folders', folders.filter(f => f.id !== id));
+  return [...deletedIds];
 }
 
 export function loadSelectedModel(): string {

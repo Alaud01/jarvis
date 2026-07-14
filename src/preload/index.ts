@@ -91,6 +91,11 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.on('menu:new-conversation', listener);
     return () => ipcRenderer.removeListener('menu:new-conversation', listener);
   },
+  onModelsRefresh: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('menu:models-refresh', listener);
+    return () => ipcRenderer.removeListener('menu:models-refresh', listener);
+  },
   connectAudioPort: (port: TransferableMessagePort) => ipcRenderer.postMessage('audio-port', null, [port]),
   sendAudioData: (chunk: ArrayBuffer | ArrayBufferView) => ipcRenderer.send('audio-data', chunk),
   storeLoadConversations: () => ipcRenderer.invoke('store:load-conversations'),

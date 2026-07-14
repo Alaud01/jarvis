@@ -89,6 +89,20 @@ const App: React.FC = () => {
     refreshModels,
   } = modelsHook;
 
+  useEffect(() => {
+    return window.assistant.onModelsRefresh(() => {
+      void refreshModels();
+    });
+  }, [refreshModels]);
+
+  useEffect(() => {
+    const refreshModelsOnFocus = () => {
+      void refreshModels();
+    };
+    window.addEventListener('focus', refreshModelsOnFocus);
+    return () => window.removeEventListener('focus', refreshModelsOnFocus);
+  }, [refreshModels]);
+
   const streaming = useStreaming(conversations, currentConversationId, setConversations, setUnreadCompleteConversationIds);
   const {
     registerStreamSession,

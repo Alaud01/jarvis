@@ -1,0 +1,3 @@
+# Keep Codex state inside a Jarvis-owned runtime
+
+Jarvis integrates ChatGPT subscription access through a bundled Codex app-server, but runs it with a dedicated `CODEX_HOME`, state database, working directory, and account lifecycle under Jarvis application data. Jarvis conversations remain the only user-visible conversation model and map to private app-server threads; Jarvis never reads, copies, or writes the user’s normal `~/.codex`, and one-off work uses ephemeral threads. This preserves the supported app-server protocol while avoiding the cross-client auth and thread overlap that would result from sharing the user’s Codex installation or state directory.

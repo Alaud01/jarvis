@@ -130,6 +130,7 @@ declare global {
       onVoiceTranscript: (callback: (payload: VoiceTranscriptPayload) => void) => () => void;
       onVoiceError: (callback: (error: string) => void) => () => void;
       onMenuNewConversation: (callback: () => void) => () => void;
+      onModelsRefresh: (callback: () => void) => () => void;
       connectAudioPort: (port: MessagePort) => void;
       sendAudioData: (chunk: ArrayBuffer | ArrayBufferView) => void;
       storeLoadConversations: () => Promise<SerializedConversation[]>;

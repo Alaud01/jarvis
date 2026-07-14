@@ -5,6 +5,7 @@ import { setMainWindow } from '../audioRecorder';
 import { cleanupVoiceFlow } from '../voiceFlow';
 import { closeBrowserControl } from '../browserControlService';
 import { stopPythonService } from '../pythonService';
+import { shutdownProviders } from '../providers/registry';
 import { debugLog, infoLog } from '../logger';
 
 // `electron .` is not packaged in either development or the local production
@@ -15,6 +16,11 @@ export const CHAT_MODEL_KEEP_ALIVE = '2m';
 export const ONE_OFF_MODEL_KEEP_ALIVE = 0;
 const MAIN_WINDOW_MIN_WIDTH = 720;
 const MAIN_WINDOW_MIN_HEIGHT = 520;
+
+export interface AppMenuActions {
+  onConnectCodex?: () => void;
+  onDisconnectCodex?: () => void;
+}
 
 const REGENERABLE_CACHE_PATHS = [
   'Cache',
@@ -154,7 +160,7 @@ export function broadcastMenuAction(action: string): void {
   }
 }
 
-export function buildAppMenu(): Electron.MenuItemConstructorOptions[] {
+export function buildAppMenu(actions: AppMenuActions = {}): Electron.MenuItemConstructorOptions[] {
   const template: Electron.MenuItemConstructorOptions[] = [];
 
   if (process.platform === 'darwin') {
@@ -175,6 +181,27 @@ export function buildAppMenu(): Electron.MenuItemConstructorOptions[] {
   });
 
   template.push({ role: 'editMenu' });
+
+  template.push({
+    label: 'Codex',
+    submenu: [
+      {
+        label: 'Connect ChatGPT Account…',
+        enabled: Boolean(actions.onConnectCodex),
+        click: () => actions.onConnectCodex?.(),
+      },
+      {
+        label: 'Disconnect ChatGPT Account…',
+        enabled: Boolean(actions.onDisconnectCodex),
+        click: () => actions.onDisconnectCodex?.(),
+      },
+      { type: 'separator' },
+      {
+        label: 'Refresh Models',
+        click: () => broadcastMenuAction('models-refresh'),
+      },
+    ],
+  });
 
   // View menu: standard items, with toggleDevTools only in dev.
   const viewSubmenu: Electron.MenuItemConstructorOptions[] = [
@@ -241,6 +268,7 @@ export async function shutdownApplicationServices(): Promise<void> {
     cleanupVoiceFlow(),
     closeBrowserControl(),
     stopPythonService(),
+    shutdownProviders(),
   ]);
 
   for (const result of results) {

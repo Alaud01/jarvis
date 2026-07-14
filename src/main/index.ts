@@ -1,12 +1,14 @@
 import dotenv from 'dotenv';
-import { app, BrowserWindow, Menu, ipcMain } from 'electron';
+import * as path from 'node:path';
+import { app, BrowserWindow, dialog, Menu, ipcMain, shell } from 'electron';
 import { startPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC } from './voiceFlow';
 import { setOverlayThemeBackground } from './overlayWindow';
-import { initializeProviders } from './providers/registry';
+import { getCodexProvider, initializeProviders } from './providers/registry';
 import { deleteLegacyStoredProviderApiKeys } from './store';
 import {
   buildAppMenu,
+  broadcastMenuAction,
   clearRegenerableAppCaches,
   createTray,
   createWindow,
@@ -62,9 +64,70 @@ app.whenReady().then(async () => {
   initializeProviders(
     process.env.OPENCODE_GO_API_KEY,
     process.env.OPENROUTER_API_KEY,
+    {
+      codexHome: path.join(app.getPath('userData'), 'codex-runtime'),
+      workspaceRoot: path.join(app.getPath('userData'), 'codex-workspace'),
+      openExternal: url => shell.openExternal(url),
+    },
   );
 
-  Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenu()));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenu({
+    onConnectCodex: () => {
+      void (async () => {
+        try {
+          const provider = getCodexProvider();
+          if (!provider) throw new Error('The Codex provider is unavailable.');
+          const account = await provider.connectAccount();
+          const models = await provider.fetchModels();
+          const accountLabel = [account.email, account.planType].filter(Boolean).join(' · ');
+          broadcastMenuAction('models-refresh');
+          await dialog.showMessageBox({
+            type: 'info',
+            title: 'Codex connected',
+            message: 'Jarvis is connected to your ChatGPT account.',
+            detail: [
+              accountLabel || 'The account is stored only in Jarvis’s private Codex runtime.',
+              models.length > 0
+                ? `${models.length} Codex models are available. Choose one with the model button at the lower-left of the chat composer.`
+                : 'Codex returned no picker-visible models. Use Codex → Refresh Models after checking the account.',
+            ].join('\n\n'),
+          });
+        } catch (error) {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Unable to connect Codex',
+            message: error instanceof Error ? error.message : 'ChatGPT sign-in failed.',
+          });
+        }
+      })();
+    },
+    onDisconnectCodex: () => {
+      void (async () => {
+        const confirmation = await dialog.showMessageBox({
+          type: 'warning',
+          buttons: ['Cancel', 'Disconnect'],
+          defaultId: 0,
+          cancelId: 0,
+          title: 'Disconnect Codex?',
+          message: 'Disconnect Jarvis from this ChatGPT account?',
+          detail: 'This affects only Jarvis’s private Codex runtime and does not sign out the Codex app or CLI.',
+        });
+        if (confirmation.response !== 1) return;
+        try {
+          const provider = getCodexProvider();
+          if (!provider) throw new Error('The Codex provider is unavailable.');
+          await provider.disconnectAccount();
+          broadcastMenuAction('models-refresh');
+        } catch (error) {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Unable to disconnect Codex',
+            message: error instanceof Error ? error.message : 'ChatGPT sign-out failed.',
+          });
+        }
+      })();
+    },
+  })));
 
   // Start in tray-only mode on macOS; the Dock icon appears when the main
   // window is shown (ready-to-show) and disappears again when it's hidden.

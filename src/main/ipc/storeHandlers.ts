@@ -24,7 +24,13 @@ import {
   type SerializedConversationMetadata,
   type SerializedFolder,
 } from '../store';
-import { getProvider } from '../providers/registry';
+import {
+  deleteProviderConversationState,
+  getAllModels,
+  getAvailableProviders,
+  getModelsForProvider,
+  getProvider,
+} from '../providers/registry';
 import { ATTACHMENT_DIALOG_FILTERS, readAttachments } from '../attachmentService';
 import { getLocalVoiceModelStatus, installLocalVoiceModel } from '../localVoiceModelSetup';
 import { stopPythonService, startPythonService } from '../pythonService';
@@ -48,8 +54,6 @@ import {
   updateReplacementRule,
   updateVocabularyCandidate,
 } from '../dictionaryService';
-import { getAvailableProviders, getAllModels, getModelsForProvider } from '../providers/registry';
-
 export function registerStoreHandlers(): void {
   ipcMain.handle('store:load-conversations', async () => {
     return loadConversations();
@@ -84,6 +88,7 @@ export function registerStoreHandlers(): void {
 
   ipcMain.handle('store:delete-conversation', async (_event, id: string) => {
     await deleteConversation(id);
+    await deleteProviderConversationState([id]);
     return { success: true };
   });
 
@@ -97,7 +102,8 @@ export function registerStoreHandlers(): void {
   });
 
   ipcMain.handle('store:delete-folder', async (_event, id: string) => {
-    deleteFolderAndConversations(id);
+    const deletedConversationIds = deleteFolderAndConversations(id);
+    await deleteProviderConversationState(deletedConversationIds);
     return { success: true };
   });
 
