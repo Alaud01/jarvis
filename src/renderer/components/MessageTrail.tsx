@@ -404,12 +404,103 @@ interface ExpandedPanelFrame {
   height: number;
 }
 
+interface ExpandedTrailHoverFrame {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
 const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActiveTarget, onScrollToMessage }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const didAutoScrollRef = useRef(false);
+  const [hoveredTargetKey, setHoveredTargetKey] = useState<string | null>(null);
+  const [hoverFrame, setHoverFrame] = useState<ExpandedTrailHoverFrame | null>(null);
   const visibleEntries = trailEntries.filter((entry) => (
     entry.sender === 'user' || entry.headers.length > 0 || entry.previewText.length > 0 || entry.isStreaming
   ));
+
+  const updateHoverFrame = useCallback(() => {
+    const content = contentRef.current;
+    if (!content || !hoveredTargetKey) {
+      setHoverFrame(null);
+      return;
+    }
+
+    const target = content.querySelector<HTMLElement>(
+      `[data-expanded-trail-target="${CSS.escape(hoveredTargetKey)}"]`,
+    );
+    if (!target) {
+      setHoverFrame(null);
+      return;
+    }
+
+    const contentRect = content.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const nextFrame = {
+      top: targetRect.top - contentRect.top,
+      left: targetRect.left - contentRect.left,
+      width: targetRect.width,
+      height: targetRect.height,
+    };
+    setHoverFrame((current) => (
+      current?.top === nextFrame.top
+      && current.left === nextFrame.left
+      && current.width === nextFrame.width
+      && current.height === nextFrame.height
+        ? current
+        : nextFrame
+    ));
+  }, [hoveredTargetKey]);
+
+  useLayoutEffect(() => {
+    updateHoverFrame();
+  }, [trailEntries, updateHoverFrame]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+
+    const resizeObserver = typeof ResizeObserver !== 'undefined'
+      ? new ResizeObserver(updateHoverFrame)
+      : null;
+    resizeObserver?.observe(content);
+    window.addEventListener('resize', updateHoverFrame);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', updateHoverFrame);
+    };
+  }, [updateHoverFrame]);
+
+  useEffect(() => {
+    if (!hoveredTargetKey) return;
+
+    let hoverRecheckTimeout: number | null = null;
+    const recheckHover = () => {
+      const target = contentRef.current?.querySelector<HTMLElement>(
+        `[data-expanded-trail-target="${CSS.escape(hoveredTargetKey)}"]`,
+      );
+      if (!document.hasFocus() || (!target?.matches(':hover') && !target?.matches(':focus'))) {
+        setHoveredTargetKey((current) => current === hoveredTargetKey ? null : current);
+        return;
+      }
+      hoverRecheckTimeout = window.setTimeout(recheckHover, TRAIL_HOVER_RECHECK_MS);
+    };
+
+    hoverRecheckTimeout = window.setTimeout(recheckHover, TRAIL_HOVER_RECHECK_MS);
+    return () => {
+      if (hoverRecheckTimeout !== null) window.clearTimeout(hoverRecheckTimeout);
+    };
+  }, [hoveredTargetKey]);
+
+  const hoverTargetProps = (key: string) => ({
+    'data-expanded-trail-target': key,
+    onMouseEnter: () => setHoveredTargetKey(key),
+    onMouseLeave: () => setHoveredTargetKey((current) => current === key ? null : current),
+    onFocus: () => setHoveredTargetKey(key),
+    onBlur: () => setHoveredTargetKey((current) => current === key ? null : current),
+  });
 
   useEffect(() => {
     if (didAutoScrollRef.current || !primaryActiveTarget) return;
@@ -429,30 +520,37 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
   return (
     <div ref={scrollRef} className="max-h-[inherit] min-h-0 overflow-x-hidden overflow-y-auto bg-[var(--color-bg-secondary)] px-1.5 py-1.5">
       {visibleEntries.length > 0 ? (
-        <div className="flex min-w-0 flex-col gap-2">
+        <div ref={contentRef} className="relative flex min-w-0 flex-col gap-0">
+          {hoverFrame ? (
+            <div
+              aria-hidden="true"
+              data-expanded-trail-highlight
+              className="pointer-events-none absolute z-0 bg-bg-active transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
+              style={{
+                width: hoverFrame.width,
+                height: hoverFrame.height,
+                transform: `translate3d(${hoverFrame.left}px, ${hoverFrame.top}px, 0)`,
+              }}
+            />
+          ) : null}
           {visibleEntries.map((entry) => (
             <div
               key={entry.messageId}
-              className={`flex min-w-0 flex-col gap-0.5 ${
+              className={`relative z-10 flex min-w-0 flex-col gap-0 ${
                 entry.sender === 'user'
-                  ? 'rounded border border-border-secondary bg-bg-secondary px-1 py-0.5'
+                  ? 'rounded border border-border-secondary px-1 py-0.5'
                   : ''
               }`}
             >
               {entry.sender === 'user' ? (
                 (() => {
-                  const active = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
                   const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
                   return (
                 <button
                   type="button"
-                  data-trail-active={active ? 'true' : undefined}
                   data-trail-primary-active={primaryActive ? 'true' : undefined}
-                  className={`flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-1.5 py-1 text-left transition-colors hover:bg-bg-hover focus:bg-bg-hover focus:outline-none ${
-                    active
-                      ? 'bg-bg-hover text-text-primary'
-                      : 'text-text-secondary'
-                  }`}
+                  {...hoverTargetProps(targetKey({ messageId: entry.messageId }))}
+                  className="flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-text-secondary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
                   onClick={() => onScrollToMessage(entry.messageId)}
                 >
                   <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary">
@@ -466,30 +564,32 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                 })()
               ) : (
                 <>
+                  {(() => {
+                    const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
+                    return (
                   <button
                     type="button"
-                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:bg-bg-hover hover:text-text-secondary focus:bg-bg-hover focus:text-text-secondary focus:outline-none"
+                    data-trail-primary-active={primaryActive ? 'true' : undefined}
+                    {...hoverTargetProps(`${entry.messageId}:label`)}
+                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:text-text-secondary focus:text-text-secondary focus:outline-none"
                     onClick={() => onScrollToMessage(entry.messageId)}
                   >
                     <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
                       Jarvis {entry.messageIndex + 1}{entry.isStreaming ? ' / Streaming' : ''}
                     </span>
                   </button>
+                    );
+                  })()}
                   {entry.headers.length > 0 ? (
                     entry.headers.map((header, headerIndex) => {
-                      const active = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId, headerIndex });
                       const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId, headerIndex });
                       return (
                       <button
                         key={`${entry.messageId}-${headerIndex}`}
                         type="button"
-                        data-trail-active={active ? 'true' : undefined}
                         data-trail-primary-active={primaryActive ? 'true' : undefined}
-                        className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]} ${
-                          active
-                            ? 'bg-bg-hover text-text-primary'
-                            : 'text-text-tertiary'
-                        }`}
+                        {...hoverTargetProps(targetKey({ messageId: entry.messageId, headerIndex }))}
+                        className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] text-text-tertiary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]}`}
                         onClick={() => onScrollToMessage(entry.messageId, headerIndex)}
                       >
                         <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -500,18 +600,13 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                     })
                   ) : (
                     (() => {
-                      const active = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
                       const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId });
                       return (
                     <button
                       type="button"
-                      data-trail-active={active ? 'true' : undefined}
                       data-trail-primary-active={primaryActive ? 'true' : undefined}
-                      className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] transition-colors hover:bg-bg-hover hover:text-text-primary focus:bg-bg-hover focus:text-text-primary focus:outline-none ${
-                        active
-                          ? 'bg-bg-hover text-text-primary'
-                          : 'text-text-tertiary'
-                      }`}
+                      {...hoverTargetProps(targetKey({ messageId: entry.messageId }))}
+                      className="block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] text-text-tertiary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
                       onClick={() => onScrollToMessage(entry.messageId)}
                     >
                       <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
