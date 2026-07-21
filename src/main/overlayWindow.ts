@@ -11,12 +11,15 @@ let overlayWindow: BrowserWindow | null = null;
 let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 let overlayWidthAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let overlayReady = false;
+let overlayDesiredVisible = false;
+let overlayPresentationId = 0;
 let overlayAnchorBounds: OverlayAnchorBounds | null = null;
 let pendingOverlayPayload: {
   payload: ReturnType<typeof getOverlayPayload>;
   state: OverlayState;
   transcript?: string;
   errorMessage?: string;
+  presentationId: number;
 } | null = null;
 let overlayThemeIsDark = true;
 
@@ -304,29 +307,13 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       width: ${payload.width}px;
       display: flex;
       align-items: center;
+      opacity: 1;
+      transform: translateY(0) scale(1);
       transform-origin: center center;
-      animation: overlayIn 220ms ${OVERLAY_EASE} both;
-      transition: width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE};
-    }
-    @keyframes overlayIn {
-      from {
-        opacity: 0;
-        transform: translateY(-6px) scale(0.985);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-    }
-    @keyframes overlayOut {
-      from {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-      to {
-        opacity: 0;
-        transform: translateY(-4px) scale(0.985);
-      }
+      transition:
+        width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE},
+        opacity ${OVERLAY_EXIT_MS}ms ${OVERLAY_EASE},
+        transform ${OVERLAY_EXIT_MS}ms ${OVERLAY_EASE};
     }
     .overlay {
       display: flex;
@@ -337,8 +324,14 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       height: 100%;
       padding: ${OVERLAY_Y_PADDING}px ${OVERLAY_X_PADDING}px;
     }
+    body.preparing {
+      opacity: 0;
+      transform: translateY(-6px) scale(0.985);
+      transition: none;
+    }
     body.exiting {
-      animation: overlayOut ${OVERLAY_EXIT_MS}ms cubic-bezier(0.4, 0, 1, 1) both;
+      opacity: 0;
+      transform: translateY(-4px) scale(0.985);
     }
     .pixel-spinner {
       display: inline-grid;
@@ -424,7 +417,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
     }
   </style>
 </head>
-<body>
+<body class="preparing">
   <div class="overlay">
     <div class="pixel-spinner stage-${payload.stage}" id="spinner">
       ${PIXEL_SPINNER_CELLS}
@@ -501,6 +494,18 @@ ${PIXEL_SPINNER_KEYFRAMES}
 
         applyPayload(payload);
       };
+      window.prepareOverlayShow = function() {
+        document.body.classList.remove('exiting');
+        document.body.classList.add('preparing');
+        void document.body.offsetWidth;
+      };
+      window.startOverlayShow = function() {
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() {
+            document.body.classList.remove('preparing');
+          });
+        });
+      };
       window.updateOverlayTheme = function(colors) {
         document.body.style.setProperty('--overlay-bg', colors.background);
         document.body.style.setProperty('--overlay-text', colors.text);
@@ -550,19 +555,19 @@ function stopOverlayWidthAnimation(): void {
   }
 }
 
-function animateOverlayBounds(targetWidth: number): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) {
+function animateOverlayBounds(win: BrowserWindow, targetWidth: number): void {
+  if (win !== overlayWindow || win.isDestroyed()) {
     return;
   }
 
   stopOverlayWidthAnimation();
 
-  const startBounds = overlayWindow.getBounds();
+  const startBounds = win.getBounds();
   const startWidth = startBounds.width;
   const centerX = startBounds.x + startWidth / 2;
 
   if (startWidth === targetWidth) {
-    overlayWindow.setBounds({
+    win.setBounds({
       x: Math.round(centerX - targetWidth / 2),
       y: startBounds.y,
       width: targetWidth,
@@ -574,7 +579,7 @@ function animateOverlayBounds(targetWidth: number): void {
   const startTime = Date.now();
 
   overlayWidthAnimationTimer = setInterval(() => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) {
+    if (win !== overlayWindow || win.isDestroyed()) {
       stopOverlayWidthAnimation();
       return;
     }
@@ -585,7 +590,7 @@ function animateOverlayBounds(targetWidth: number): void {
     const currentWidth = Math.round(startWidth + (targetWidth - startWidth) * eased);
     const currentX = Math.round(centerX - currentWidth / 2);
 
-    overlayWindow.setBounds({
+    win.setBounds({
       x: currentX,
       y: startBounds.y,
       width: currentWidth,
@@ -598,47 +603,116 @@ function animateOverlayBounds(targetWidth: number): void {
   }, 16);
 }
 
-function applyOverlayPayload(
+async function applyOverlayPayload(
+  win: BrowserWindow,
   payload: ReturnType<typeof getOverlayPayload>,
-  state: OverlayState,
-  transcript?: string,
-  errorMessage?: string,
-): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) {
+  prepareForReveal: boolean,
+): Promise<void> {
+  if (win !== overlayWindow || win.isDestroyed()) {
     return;
   }
 
-  hideOverlayWindowButtons(overlayWindow);
-  overlayWindow.webContents.executeJavaScript(`
-    if (window.updateOverlayState) {
-      window.updateOverlayState(${JSON.stringify(payload)});
+  hideOverlayWindowButtons(win);
+  await win.webContents.executeJavaScript(`
+    if (!window.updateOverlayState) {
+      throw new Error('Overlay renderer is not ready');
     }
-  `).catch(() => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.webContents.loadURL(
-        `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
-      );
+    window.updateOverlayState(${JSON.stringify(payload)});
+    if (${prepareForReveal} && window.prepareOverlayShow) {
+      window.prepareOverlayShow();
     }
-  });
-  animateOverlayBounds(payload.width);
+  `);
 }
 
-function revealOverlay(
+function destroyOverlayWindow(win: BrowserWindow): void {
+  if (win === overlayWindow) {
+    overlayWindow = null;
+    overlayReady = false;
+  }
+  if (!win.isDestroyed()) {
+    win.destroy();
+  }
+}
+
+function recreateOverlayAfterRendererFailure(
+  win: BrowserWindow,
+  payload: ReturnType<typeof getOverlayPayload>,
+  state: OverlayState,
+  transcript: string | undefined,
+  errorMessage: string | undefined,
+  presentationId: number,
+): void {
+  if (
+    win !== overlayWindow ||
+    win.isDestroyed() ||
+    !overlayDesiredVisible ||
+    presentationId !== overlayPresentationId
+  ) {
+    return;
+  }
+
+  destroyOverlayWindow(win);
+  pendingOverlayPayload = { payload, state, transcript, errorMessage, presentationId };
+  createOverlayWindow(state, transcript, errorMessage);
+}
+
+async function revealOverlay(
+  win: BrowserWindow,
   payload: ReturnType<typeof getOverlayPayload>,
   state: OverlayState,
   transcript?: string,
   errorMessage?: string,
-): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) {
+  presentationId = overlayPresentationId,
+): Promise<void> {
+  if (
+    win !== overlayWindow ||
+    win.isDestroyed() ||
+    !overlayDesiredVisible ||
+    presentationId !== overlayPresentationId
+  ) {
     return;
   }
 
-  applyOverlayPayload(payload, state, transcript, errorMessage);
+  const shouldShowWindow = !win.isVisible();
+  try {
+    await applyOverlayPayload(win, payload, shouldShowWindow);
+  } catch {
+    recreateOverlayAfterRendererFailure(
+      win,
+      payload,
+      state,
+      transcript,
+      errorMessage,
+      presentationId,
+    );
+    return;
+  }
 
-  if (!overlayWindow.isVisible()) {
+  if (
+    win !== overlayWindow ||
+    win.isDestroyed() ||
+    !overlayDesiredVisible ||
+    presentationId !== overlayPresentationId
+  ) {
+    return;
+  }
+
+  if (shouldShowWindow) {
     const pos = getOverlayPosition(payload.width);
-    overlayWindow.setBounds({ x: pos.x, y: pos.y, width: payload.width, height: OVERLAY_HEIGHT });
-    showOverlayWithoutFocus(overlayWindow);
+    win.setBounds({ x: pos.x, y: pos.y, width: payload.width, height: OVERLAY_HEIGHT });
+    showOverlayWithoutFocus(win);
+    void win.webContents.executeJavaScript('window.startOverlayShow?.();').catch(() => {
+      recreateOverlayAfterRendererFailure(
+        win,
+        payload,
+        state,
+        transcript,
+        errorMessage,
+        presentationId,
+      );
+    });
+  } else {
+    animateOverlayBounds(win, payload.width);
   }
 }
 
@@ -647,6 +721,7 @@ function recreateHiddenOverlayForCurrentMacSpace(): void {
     process.platform !== 'darwin' ||
     !overlayWindow ||
     overlayWindow.isDestroyed() ||
+    !overlayReady ||
     overlayWindow.isVisible()
   ) {
     return;
@@ -655,9 +730,7 @@ function recreateHiddenOverlayForCurrentMacSpace(): void {
   // Hidden macOS windows can remain tied to the Space where they were created.
   stopOverlayWidthAnimation();
   const previousOverlayWindow = overlayWindow;
-  overlayWindow = null;
-  overlayReady = false;
-  previousOverlayWindow.close();
+  destroyOverlayWindow(previousOverlayWindow);
 }
 
 function createOverlayWindow(
@@ -674,12 +747,13 @@ function createOverlayWindow(
   const payload = getOverlayPayload(state, transcript, errorMessage);
   const pos = getOverlayPosition(payload.width);
 
-  overlayWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: payload.width,
     height: OVERLAY_HEIGHT,
     x: pos.x,
     y: pos.y,
     transparent: true,
+    backgroundColor: '#00000000',
     frame: false,
     alwaysOnTop: true,
     resizable: false,
@@ -696,36 +770,55 @@ function createOverlayWindow(
       contextIsolation: true,
     },
   });
+  overlayWindow = win;
 
-  overlayWindow.setVisibleOnAllWorkspaces(true, {
+  win.setVisibleOnAllWorkspaces(true, {
     visibleOnFullScreen: true,
     skipTransformProcessType: process.platform === 'darwin',
   });
-  overlayWindow.setIgnoreMouseEvents(true);
-  overlayWindow.setAlwaysOnTop(true, 'floating', 1);
-  hideOverlayWindowButtons(overlayWindow);
+  win.setIgnoreMouseEvents(true);
+  win.setAlwaysOnTop(true, 'floating', 1);
+  hideOverlayWindowButtons(win);
 
-  overlayWindow.webContents.loadURL(
+  win.once('closed', () => {
+    if (overlayWindow === win) {
+      overlayWindow = null;
+      overlayReady = false;
+    }
+  });
+
+  win.webContents.loadURL(
     `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
   );
 
-  overlayWindow.once('ready-to-show', () => {
-    if (!overlayWindow || overlayWindow.isDestroyed()) {
+  win.once('ready-to-show', () => {
+    if (win !== overlayWindow || win.isDestroyed()) {
       return;
     }
 
     overlayReady = true;
-    hideOverlayWindowButtons(overlayWindow);
+    hideOverlayWindowButtons(win);
 
     const pending = pendingOverlayPayload;
-    if (pending) {
+    if (
+      pending &&
+      overlayDesiredVisible &&
+      pending.presentationId === overlayPresentationId
+    ) {
       pendingOverlayPayload = null;
-      revealOverlay(pending.payload, pending.state, pending.transcript, pending.errorMessage);
+      void revealOverlay(
+        win,
+        pending.payload,
+        pending.state,
+        pending.transcript,
+        pending.errorMessage,
+        pending.presentationId,
+      );
       return;
     }
 
-    if (revealOnReady) {
-      revealOverlay(payload, state, transcript, errorMessage);
+    if (revealOnReady && overlayDesiredVisible) {
+      void revealOverlay(win, payload, state, transcript, errorMessage);
     }
   });
 }
@@ -784,6 +877,8 @@ export function setOverlayThemeBackground(isDark: boolean): void {
 
 export function showOverlay(state: OverlayState, transcript?: string, errorMessage?: string): void {
   const payload = getOverlayPayload(state, transcript, errorMessage);
+  const presentationId = ++overlayPresentationId;
+  overlayDesiredVisible = true;
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
@@ -792,44 +887,62 @@ export function showOverlay(state: OverlayState, transcript?: string, errorMessa
   recreateHiddenOverlayForCurrentMacSpace();
 
   if (!overlayWindow || overlayWindow.isDestroyed()) {
-    pendingOverlayPayload = { payload, state, transcript, errorMessage };
+    pendingOverlayPayload = { payload, state, transcript, errorMessage, presentationId };
     createOverlayWindow(state, transcript, errorMessage);
     return;
   }
 
   if (!overlayReady) {
-    pendingOverlayPayload = { payload, state, transcript, errorMessage };
+    pendingOverlayPayload = { payload, state, transcript, errorMessage, presentationId };
     return;
   }
 
-  revealOverlay(payload, state, transcript, errorMessage);
+  pendingOverlayPayload = null;
+  void revealOverlay(overlayWindow, payload, state, transcript, errorMessage, presentationId);
 }
 
 export function hideOverlay(): void {
+  const presentationId = ++overlayPresentationId;
+  overlayDesiredVisible = false;
+  pendingOverlayPayload = null;
   stopOverlayWidthAnimation();
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.webContents.executeJavaScript("document.body.classList.add('exiting');").catch(() => {
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.hide();
-      }
-    });
-    hideOverlayTimer = setTimeout(() => {
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.hide();
-      }
-      hideOverlayTimer = null;
-    }, OVERLAY_EXIT_MS);
+  if (hideOverlayTimer) {
+    clearTimeout(hideOverlayTimer);
+    hideOverlayTimer = null;
   }
+
+  const win = overlayWindow;
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  if (!overlayReady || !win.isVisible()) {
+    win.hide();
+    return;
+  }
+
+  void win.webContents.executeJavaScript("document.body.classList.add('exiting');").catch(() => {
+    if (win === overlayWindow && presentationId === overlayPresentationId && !win.isDestroyed()) {
+      win.hide();
+    }
+  });
+  hideOverlayTimer = setTimeout(() => {
+    if (win === overlayWindow && presentationId === overlayPresentationId && !win.isDestroyed()) {
+      win.hide();
+    }
+    hideOverlayTimer = null;
+  }, OVERLAY_EXIT_MS);
 }
 
 export function destroyOverlay(): void {
+  ++overlayPresentationId;
+  overlayDesiredVisible = false;
   stopOverlayWidthAnimation();
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
   }
   if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.close();
+    destroyOverlayWindow(overlayWindow);
   }
   overlayWindow = null;
   overlayReady = false;
