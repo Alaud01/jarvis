@@ -1,4 +1,5 @@
 import type { ChatMessage } from './providers/types';
+import { getNotionPromptStatusLine } from './notionMcpService';
 
 export function formatLocalUtcOffset(date: Date): string {
   const offsetMinutes = -date.getTimezoneOffset();
@@ -52,7 +53,7 @@ export async function buildSystemPrompt(_conversationId: string): Promise<ChatMe
       'Each conversation has its own Browser Control window. The Browser Control page persists across turns within the same conversation only. If the user asks you to continue or try again, inspect the current browser state before reopening the page.',
       'Use browser_open with external=true only when the user specifically wants the page opened in their default browser or needs their normal browser session; after external handoff, do not claim you can inspect or control that default-browser page.',
       'When providing self-contained HTML, CSS, or JavaScript for the user to copy or save, put it in a fenced Markdown code block with the correct language. Do not use Browser Control to create or preview generated local HTML unless the user explicitly asks you to preview it.',
-      'Use Notion tools when the user asks to find, read, add to, or create content in their Notion pages or databases. When the target page or database is ambiguous, ask the user; never invent Notion IDs. Use notion_search to resolve a name to a Notion ID and (for databases) to learn its property schema, then notion_query_database to read rows with filters (e.g. upcoming tasks, incomplete items, items with a certain status). If a Notion call returns 404, tell the user to open the page in Notion via the "..." menu -> Connections -> add the integration, since integrations only see pages and databases where they were explicitly added.',
+      getNotionPromptStatusLine(),
       'When web access is unnecessary, answer normally without calling a tool.',
       'After using a tool, answer the user with the result instead of repeating raw tool output verbatim.',
     ].join(' ')

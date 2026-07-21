@@ -1,0 +1,17 @@
+# Use the official hosted Notion MCP as the primary Notion backend
+
+Jarvis will connect to Notion's official hosted MCP service from Electron and adapt its tools into the existing provider-neutral assistant tool catalog, rather than continue expanding the hand-written REST integration or configure Notion only inside the Codex provider. This adds OAuth and MCP client lifecycle work, but keeps Notion behavior consistent across providers while delegating evolving page, database, and data-source semantics to Notion's maintained agent interface. One global Notion Connection is shared by every Jarvis conversation and model provider, with its OAuth credentials protected by the operating system through Electron secure storage. Direct REST access is reserved for future, explicitly approved capability gaps that the hosted MCP does not support.
+
+Reads and the explicitly enabled write operations run without per-call approval. When a target or requested change is ambiguous, the assistant must stop and clarify in the conversation before issuing a write; a model-selected question tool is not treated as an authorization boundary.
+
+Jarvis exposes a curated, stable Notion Tool Contract instead of passing the hosted MCP catalog directly to models. It may discover native MCP tools and schemas at connection time, but only adapters for search, recursive page fetch, data-source query, page or row creation, block append, and page-property update enter the shared provider tool catalog; new upstream tools require an explicit Jarvis change.
+
+The adapters narrow overloaded native tools as well as hiding whole tools: creation requires an explicit parent and exactly one page, append permits only insert commands and content parameters, and property update permits only page identity plus properties. Private top-level creation, replacement, archive/delete, icon/cover changes, and unrelated update commands remain outside the contract.
+
+Notion tools are omitted from the model-facing catalog while the global Notion Connection is absent or expired. Jarvis reports that state in the system prompt and application menu, refreshes the catalog after connection changes, and asks the user to reconnect instead of exposing tools that are expected to fail.
+
+The user starts OAuth from the application menu, authorizes in the operating-system default browser, and returns through a short-lived loopback callback bound to `127.0.0.1` on an ephemeral port. Jarvis uses Authorization Code with PKCE and state validation, encrypts the dynamic client registration and rotating token set with Electron secure storage, serializes token refreshes, and treats `invalid_grant` as a terminal connection that must be cleared and reauthorized.
+
+The previous `NOTION_TOKEN` integration and its hand-written REST tools are removed rather than retained as an automatic fallback. Existing users reconnect through OAuth, and any future direct REST adapter must be introduced as an explicit capability-gap decision instead of creating a second hidden permission and resource model.
+
+Jarvis negotiates the hosted MCP catalog after connection and exposes each curated tool only when its native backing capability is present. The dynamic tool catalog is authoritative; the system prompt contains only a short generated Notion state line, while detailed capability and authentication diagnostics stay in the application UI and tool errors.

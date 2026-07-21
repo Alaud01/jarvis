@@ -30,6 +30,12 @@ import {
   registerUsageHandlers,
   registerVoiceModelHandlers,
 } from './ipc/storeHandlers';
+import {
+  connectNotionMcp,
+  disconnectNotionMcp,
+  getNotionConnectionStatus,
+  initializeNotionMcp,
+} from './notionMcpService';
 
 dotenv.config({ quiet: true });
 
@@ -70,6 +76,7 @@ app.whenReady().then(async () => {
       openExternal: url => shell.openExternal(url),
     },
   );
+  await initializeNotionMcp();
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(buildAppMenu({
     onConnectCodex: () => {
@@ -126,6 +133,67 @@ app.whenReady().then(async () => {
           });
         }
       })();
+    },
+    onConnectNotion: () => {
+      void (async () => {
+        try {
+          const notionStatus = await connectNotionMcp();
+          await dialog.showMessageBox({
+            type: 'info',
+            title: 'Notion connected',
+            message: 'Jarvis is connected to Notion through the hosted Notion MCP server.',
+            detail: notionStatus.unavailableCoreCapabilities.length > 0
+              ? `Unavailable capabilities: ${notionStatus.unavailableCoreCapabilities.join(', ')}`
+              : `${notionStatus.availableCapabilities.length} approved Notion capabilities are available.`,
+          });
+        } catch (error) {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Unable to connect Notion',
+            message: error instanceof Error ? error.message : 'Notion sign-in failed.',
+          });
+        }
+      })();
+    },
+    onDisconnectNotion: () => {
+      void (async () => {
+        const confirmation = await dialog.showMessageBox({
+          type: 'warning',
+          buttons: ['Cancel', 'Disconnect'],
+          defaultId: 0,
+          cancelId: 0,
+          title: 'Disconnect Notion?',
+          message: 'Disconnect Jarvis from this Notion workspace?',
+          detail: 'Jarvis will remove its encrypted Notion authorization data from this installation.',
+        });
+        if (confirmation.response !== 1) return;
+        try {
+          await disconnectNotionMcp();
+        } catch (error) {
+          await dialog.showMessageBox({
+            type: 'error',
+            title: 'Unable to disconnect Notion',
+            message: error instanceof Error ? error.message : 'Notion disconnect failed.',
+          });
+        }
+      })();
+    },
+    onShowNotionStatus: () => {
+      const notionStatus = getNotionConnectionStatus();
+      void dialog.showMessageBox({
+        type: notionStatus.state === 'connected' ? 'info' : 'warning',
+        title: 'Notion connection',
+        message: `Notion is ${notionStatus.state}.`,
+        detail: [
+          notionStatus.availableCapabilities.length > 0
+            ? `Available: ${notionStatus.availableCapabilities.join(', ')}`
+            : 'No Notion tools are currently exposed to chat models.',
+          notionStatus.unavailableCoreCapabilities.length > 0
+            ? `Unavailable: ${notionStatus.unavailableCoreCapabilities.join(', ')}`
+            : '',
+          notionStatus.message || '',
+        ].filter(Boolean).join('\n\n'),
+      });
     },
   })));
 

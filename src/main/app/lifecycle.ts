@@ -6,6 +6,7 @@ import { cleanupVoiceFlow } from '../voiceFlow';
 import { closeBrowserControl } from '../browserControlService';
 import { stopPythonService } from '../pythonService';
 import { shutdownProviders } from '../providers/registry';
+import { shutdownNotionMcp } from '../notionMcpService';
 import { debugLog, infoLog } from '../logger';
 
 // `electron .` is not packaged in either development or the local production
@@ -20,6 +21,9 @@ const MAIN_WINDOW_MIN_HEIGHT = 520;
 export interface AppMenuActions {
   onConnectCodex?: () => void;
   onDisconnectCodex?: () => void;
+  onConnectNotion?: () => void;
+  onDisconnectNotion?: () => void;
+  onShowNotionStatus?: () => void;
 }
 
 const REGENERABLE_CACHE_PATHS = [
@@ -183,6 +187,28 @@ export function buildAppMenu(actions: AppMenuActions = {}): Electron.MenuItemCon
   template.push({ role: 'editMenu' });
 
   template.push({
+    label: 'Notion',
+    submenu: [
+      {
+        label: 'Connect…',
+        enabled: Boolean(actions.onConnectNotion),
+        click: () => actions.onConnectNotion?.(),
+      },
+      {
+        label: 'Disconnect…',
+        enabled: Boolean(actions.onDisconnectNotion),
+        click: () => actions.onDisconnectNotion?.(),
+      },
+      { type: 'separator' },
+      {
+        label: 'Connection Status…',
+        enabled: Boolean(actions.onShowNotionStatus),
+        click: () => actions.onShowNotionStatus?.(),
+      },
+    ],
+  });
+
+  template.push({
     label: 'Codex',
     submenu: [
       {
@@ -269,6 +295,7 @@ export async function shutdownApplicationServices(): Promise<void> {
     closeBrowserControl(),
     stopPythonService(),
     shutdownProviders(),
+    shutdownNotionMcp(),
   ]);
 
   for (const result of results) {

@@ -49,7 +49,6 @@ Jarvis runs in the macOS menu bar. Open it from the tray icon after Electron sta
 | `OPENROUTER_API_KEY` | Hosted chat, cloud transcription, and transcript refinement |
 | `OPENCODE_GO_API_KEY` | OpenCode Go models |
 | `TAVILY_KEY` | Web search |
-| `NOTION_TOKEN` | Notion search and page/database tools |
 | `OLLAMA_BASE_URL` | Local Ollama server; defaults to `http://localhost:11434` |
 | `OLLAMA_API_KEY` | Optional Ollama cloud access |
 
@@ -83,7 +82,7 @@ The generated macOS application is ad-hoc signed for local development. Public b
 
 1. Select a provider and model from the composer.
 2. Enter a message, attach a document, or press `Cmd+Shift+Space` to dictate.
-3. Configure `TAVILY_KEY` or `NOTION_TOKEN` before requesting their corresponding tools.
+3. Configure `TAVILY_KEY` for web search, and use **Notion → Connect…** to authorize Notion through OAuth.
 4. Browser Control opens a separate Chromium workspace and reports page state after each action.
 5. Review learned vocabulary in **Personal Dictionary** and local metrics in **Usage Dashboard**.
 
@@ -93,6 +92,7 @@ The generated macOS application is ad-hoc signed for local development. Public b
 - Hosted providers receive the prompts, attachments, audio, or tool context required for requests sent to them.
 - `fetch_url` accepts only public-internet destinations and rejects non-public DNS results and redirects.
 - Browser Control uses its own browser profile rather than the user's normal browser profile.
+- Notion authorization is encrypted with Electron secure storage; Jarvis exposes only the approved hosted-MCP capabilities negotiated at connection time.
 - `browser_evaluate` can execute JavaScript inside the Jarvis-owned page. Treat it as a trusted debugging/recovery capability.
 - Voice refinement and correction learning may inspect bounded text around the focused field.
 

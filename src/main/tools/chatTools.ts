@@ -1,10 +1,11 @@
 import type { ToolDefinition } from '../providers/types';
+import { getNotionToolDefinitions } from '../notionMcpService';
 
 export const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 5;
 export const MAX_FETCH_URL_CALLS_PER_TURN = 5;
 export const MAX_NOTION_CALLS_PER_TURN = 8;
 
-export const CHAT_TOOLS: ToolDefinition[] = [
+const STATIC_CHAT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
@@ -302,157 +303,15 @@ export const CHAT_TOOLS: ToolDefinition[] = [
       }
     }
   },
-  {
-    type: 'function',
-    function: {
-      name: 'notion_search',
-      description: 'Search the user\'s Notion workspace for pages and databases by title. Returns each result with its Notion ID, URL, and (for databases) the full property schema including select/multi_select/status options. Use this to resolve a page or database by name before creating pages or appending blocks, and to learn a database\'s required property names and types before calling notion_create_page.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'Title text to search for. Matches pages and databases whose titles include this string.'
-          },
-          filter: {
-            type: 'string',
-            enum: ['page', 'database'],
-            description: 'Optional filter to restrict results to "page" or "database" only.'
-          },
-          pageSize: {
-            type: 'number',
-            description: 'Optional number of results, clamped to 1-100. Defaults to 20.'
-          }
-        },
-        required: ['query'],
-        additionalProperties: false,
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'notion_query_database',
-      description: 'Query a Notion database for its rows with full property values, optional filter, and optional sort. Use this to read what is in a database (e.g. upcoming tasks, items with a certain status, items created this week). Resolve the database ID via notion_search first. Returns each row with its properties flattened to human-readable values (title, Done, Date, Priority, etc.). Filters use Notion\'s native filter grammar and pass through verbatim — Notion validates and returns a 400 with details if the filter is malformed. Common filter examples: {"property":"Done","checkbox":{"equals":false}} (incomplete tasks), {"property":"Date","date":{"next_week":{}}} (dates in next week, also supports this_week/past_week/past_month/next_month/past_year/next_year or explicit ISO dates via before/after/on_or_before/on_or_after/equals), {"property":"Priority","select":{"equals":"High"}}. Compound: {"and":[...]} or {"or":[...]}. Sorts: [{"property":"Date","direction":"ascending"}] or [{"timestamp":"created_time","direction":"descending"}].',
-      parameters: {
-        type: 'object',
-        properties: {
-          databaseId: {
-            type: 'string',
-            description: 'The Notion ID (UUID, dashes optional) of the database to query. Resolve via notion_search before calling.'
-          },
-          filter: {
-            type: 'object',
-            description: 'Optional Notion filter object. Single property filter: {"property":"<name>","<type>":{<comparator>}}. Compound: {"and":[...]} or {"or":[...]. Property types: title/rich_text/url/email/phone_number (equals/contains/starts_with/ends_with/does_not_equal/does_not_contain/is_empty/is_not_empty), number (equals/greater_than/less_than/greater_than_or_equal_to/less_than_or_equal_to/does_not_equal), checkbox (equals/does_not_equal, boolean), select/multi_select/status (equals/does_not_equal/contains/does_not_contain/is_empty/is_not_empty), date (equals/before/after/on_or_before/on_or_after/this_week/past_week/past_month/past_year/next_week/next_month/next_year, plus is_empty/is_not_empty), people/relation (contains/does_not_contain/is_empty/is_not_empty), formula (string/number/boolean/date sub-filter), created_time/last_edited_time (same as date filters). Pass through verbatim — Notion validates.',
-            additionalProperties: true,
-          },
-          sorts: {
-            type: 'array',
-            description: 'Optional sort criteria, in priority order. Each sort: {"property":"<name>","direction":"ascending"|"descending"} or {"timestamp":"created_time"|"last_edited_time","direction":"ascending"|"descending"}.',
-            items: {
-              type: 'object',
-              properties: {
-                property: { type: 'string' },
-                timestamp: { type: 'string', enum: ['created_time', 'last_edited_time'] },
-                direction: { type: 'string', enum: ['ascending', 'descending'] }
-              },
-              additionalProperties: false,
-            }
-          },
-          pageSize: {
-            type: 'number',
-            description: 'Optional number of rows per page, clamped to 1-100. Defaults to 20.'
-          },
-          startCursor: {
-            type: 'string',
-            description: 'Optional pagination cursor from a previous notion_query_database response\'s nextCursor. Use to fetch the next page of rows when hasMore is true.'
-          }
-        },
-        required: ['databaseId'],
-        additionalProperties: false,
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'notion_create_page',
-      description: 'Create a new page in Notion under a parent page or database. When the parent is a database, supply properties matching the database schema returned by notion_search (wrong property names or types will be rejected). When the parent is a page, supply a title and optionally children blocks. Optional children blocks use the same {type, text, checked?, language?} shape as notion_append_block.',
-      parameters: {
-        type: 'object',
-        properties: {
-          parentType: {
-            type: 'string',
-            enum: ['page_id', 'database_id'],
-            description: 'Whether the parent is a page or a database.'
-          },
-          parentId: {
-            type: 'string',
-            description: 'The Notion ID (UUID, dashes optional) of the parent page or database. Resolve via notion_search before calling.'
-          },
-          title: {
-            type: 'string',
-            description: 'Optional page title. When parentType is "database_id" and no "title" property is supplied in properties, this is written into the database\'s title property. When parentType is "page_id", this sets the page title.'
-          },
-          properties: {
-            type: 'object',
-            description: 'Optional Notion page properties keyed by property name. Each value must match the property\'s Notion type (e.g. { "title": { "title": [...] } }, { "Status": { "status": { "name": "In Progress" } } }). Inspect notion_search results for the exact property names and options of the target database.',
-            additionalProperties: true,
-          },
-          children: {
-            type: 'array',
-            description: 'Optional initial content blocks appended to the new page. Same shape as notion_append_block blocks.',
-            items: {
-              type: 'object',
-              properties: {
-                type: { type: 'string', enum: ['paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item', 'to_do', 'quote', 'code', 'divider'] },
-                text: { type: 'string' },
-                checked: { type: 'boolean' },
-                language: { type: 'string' }
-              },
-              additionalProperties: false,
-            }
-          }
-        },
-        required: ['parentType', 'parentId'],
-        additionalProperties: false,
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'notion_append_block',
-      description: 'Append content blocks to an existing Notion page. Use this to add paragraphs, headings, list items, to-dos, quotes, code, or dividers to a page the user names or has previously worked with. Resolve the page via notion_search first. Supported block types: paragraph, heading_1, heading_2, heading_3, bulleted_list_item, numbered_list_item, to_do, quote, code, divider. Each block is {type, text?, checked?, language?}; divider takes no text, to_do takes optional checked, code takes optional language.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pageId: {
-            type: 'string',
-            description: 'The Notion ID (UUID, dashes optional) of the page to append to. Resolve via notion_search before calling.'
-          },
-          blocks: {
-            type: 'array',
-            description: 'Content blocks to append, in order. Each block: {type, text?, checked?, language?}.',
-            items: {
-              type: 'object',
-              properties: {
-                type: { type: 'string', enum: ['paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item', 'to_do', 'quote', 'code', 'divider'] },
-                text: { type: 'string', description: 'Block text. Omitted for divider. Long text is auto-split at Notion\'s 2000-char per-run limit.' },
-                checked: { type: 'boolean', description: 'For to_do blocks only: whether the item is checked.' },
-                language: { type: 'string', description: 'For code blocks only: the language identifier (e.g. "typescript", "plain text"). Defaults to "plain text".' }
-              },
-              required: ['type'],
-              additionalProperties: false,
-            }
-          }
-        },
-        required: ['pageId', 'blocks'],
-        additionalProperties: false,
-      }
-    }
-  }
 ];
+
+export const CHAT_TOOLS: ToolDefinition[] = STATIC_CHAT_TOOLS.filter(
+  tool => !tool.function.name.startsWith('notion_'),
+);
+
+export function getChatTools(): ToolDefinition[] {
+  return [...CHAT_TOOLS, ...getNotionToolDefinitions()];
+}
 
 export const BROWSER_CONTROL_TOOL_NAMES = new Set([
   'browser_open',
@@ -468,7 +327,9 @@ export const BROWSER_CONTROL_TOOL_NAMES = new Set([
 
 export const NOTION_TOOL_NAMES = new Set([
   'notion_search',
-  'notion_query_database',
+  'notion_fetch_page',
+  'notion_query_data_source',
   'notion_create_page',
-  'notion_append_block',
+  'notion_append_blocks',
+  'notion_update_page_properties',
 ]);

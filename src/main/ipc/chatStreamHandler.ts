@@ -9,7 +9,7 @@ import {
   buildSystemPrompt,
 } from '../systemPrompt';
 import {
-  CHAT_TOOLS,
+  getChatTools,
   BROWSER_CONTROL_TOOL_NAMES,
   NOTION_TOOL_NAMES,
   MAX_TAVILY_SEARCH_CALLS_PER_TURN,
@@ -28,8 +28,8 @@ import {
   parseToolArgumentsObject,
   requiresToolResultSynthesis,
   runBrowserControlTool,
-  runNotionTool,
 } from '../tools/dispatcher';
+import { executeNotionMcpTool } from '../notionMcpService';
 import { tavilySearch } from '../tavilySearchService';
 import { fetchUrlContent } from '../fetchService';
 import { logMainProcess, CHAT_MODEL_KEEP_ALIVE } from '../app/lifecycle';
@@ -135,6 +135,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         await buildSystemPrompt(request.conversationId),
         ...request.messages,
       ];
+      const chatTools = getChatTools();
       let tavilySearchCallsThisTurn = 0;
       let fetchUrlCallsThisTurn = 0;
       let notionCallsThisTurn = 0;
@@ -270,12 +271,13 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           notionCallsThisTurn += 1;
           try {
             const args = parseToolArgumentsObject(toolName, rawArguments);
-            const notionContent = await runNotionTool(toolName, args, abortController.signal);
+            const notionResult = await executeNotionMcpTool(toolName, args, abortController.signal);
             logMainProcess('LLM', 'Notion tool result returned to LLM', {
               tool: toolName,
-              contentPreview: notionContent.slice(0, 600),
+              success: notionResult.success,
+              contentPreview: notionResult.content.slice(0, 600),
             });
-            return { success: true, content: notionContent };
+            return notionResult;
           } catch (error) {
             if (isAbortLikeError(error)) throw error;
             const errorMessage = error instanceof Error ? error.message : 'Invalid Notion tool arguments.';
@@ -336,7 +338,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           abortController,
           emitStreamChunk,
           {
-            tools: CHAT_TOOLS,
+            tools: chatTools,
             keepAlive: CHAT_MODEL_KEEP_ALIVE,
             conversationId: request.conversationId,
             prepareReplayMessages: replayMessages => (

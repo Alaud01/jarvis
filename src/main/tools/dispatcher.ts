@@ -11,24 +11,6 @@ import {
   browserWait,
   type BrowserControlResult,
 } from '../browserControlService';
-import {
-  notionAppendBlock,
-  notionCreatePage,
-  notionQueryDatabase,
-  notionSearch,
-  parseNotionAppendBlockArgs,
-  parseNotionCreatePageArgs,
-  parseNotionQueryDatabaseArgs,
-  parseNotionSearchArgs,
-  formatNotionAppendBlockResult,
-  formatNotionCreatePageResult,
-  formatNotionQueryDatabaseResult,
-  formatNotionSearchResult,
-  type NotionAppendBlockResult,
-  type NotionCreatePageResult,
-  type NotionQueryDatabaseResult,
-  type NotionSearchResult,
-} from '../notionService';
 import type { FetchToolArgs, FetchToolResult } from '../fetchService';
 import type { TavilySearchToolArgs, TavilySearchToolResult } from '../tavilySearchService';
 import { toSearchSource } from '../tavilySearchService';
@@ -160,7 +142,9 @@ export function formatBrowserControlResult(
       lines.push(`Last action: ${state.lastAction.name} ${state.lastAction.success ? 'succeeded' : 'failed'}${state.lastAction.message ? ` (${state.lastAction.message})` : ''}`);
     }
     if (state.screenshotArtifact) {
-      lines.push(`Screenshot: ${state.screenshotArtifact.path}`);
+      lines.push('Screenshot: captured and saved as a local artifact (image attached).');
+    } else if (result.imageDataUrl) {
+      lines.push('Screenshot: captured (image attached).');
     }
     if (state.externalUrl) {
       lines.push(`External URL: ${state.externalUrl}`);
@@ -268,34 +252,6 @@ export function buildToolResultSynthesisMessages(
   });
 
   return synthesisMessages;
-}
-
-export async function runNotionTool(
-  toolName: string,
-  args: Record<string, unknown>,
-  signal?: AbortSignal,
-): Promise<string> {
-  if (toolName === 'notion_search') {
-    const parsed = parseNotionSearchArgs(args);
-    const result: NotionSearchResult = await notionSearch(parsed, signal);
-    return formatNotionSearchResult(result);
-  }
-  if (toolName === 'notion_query_database') {
-    const parsed = parseNotionQueryDatabaseArgs(args);
-    const result: NotionQueryDatabaseResult = await notionQueryDatabase(parsed, signal);
-    return formatNotionQueryDatabaseResult(result);
-  }
-  if (toolName === 'notion_create_page') {
-    const parsed = parseNotionCreatePageArgs(args);
-    const result: NotionCreatePageResult = await notionCreatePage(parsed, signal);
-    return formatNotionCreatePageResult(result);
-  }
-  if (toolName === 'notion_append_block') {
-    const parsed = parseNotionAppendBlockArgs(args);
-    const result: NotionAppendBlockResult = await notionAppendBlock(parsed, signal);
-    return formatNotionAppendBlockResult(result);
-  }
-  throw new Error(`Unknown Notion tool: ${toolName}`);
 }
 
 export async function runBrowserControlTool(
