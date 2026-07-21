@@ -33,7 +33,7 @@
     "start": "pnpm compile && pnpm build:renderer && electron .",
     "dev:all": "concurrently \"pnpm dev:vite\" \"pnpm dev:electron\"",
     "dev:vite": "vite",
-    "dev:electron": "NODE_ENV=development tsc -p tsconfig.node.json && wait-on http://localhost:5174 && electron .",
+    "dev:electron": "tsc -p tsconfig.node.json && wait-on http://localhost:5174 && NODE_ENV=development electron .",
     "start:python": "cd python-service && if [ ! -d venv ]; then python3 -m venv venv; fi && PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1 venv/bin/python -m pip install -q -r requirements.txt && venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port ${VOICE_SERVICE_PORT:-8765} --reload"
   },
   "dependencies": {
