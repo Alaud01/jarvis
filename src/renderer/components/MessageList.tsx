@@ -5,16 +5,7 @@ import TypingIndicator from './TypingIndicator';
 import NewChatEmptyState from './NewChatEmptyState';
 import type { SearchSource, SearchSourceGroup } from '../../shared/search';
 import type { FileAttachment } from '../../shared/attachments';
-
-interface Message {
-  id: string;
-  text: string;
-  sender: 'user' | 'assistant';
-  timestamp: Date;
-  isStreaming?: boolean;
-  searchSources?: SearchSourceGroup[];
-  attachments?: FileAttachment[];
-}
+import type { Message } from '../types';
 
 interface MessageListProps {
   messages: Message[];
@@ -603,6 +594,32 @@ const formatMessageTime = (date: Date): string => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
+const CompactionMarker: React.FC<{
+  compaction: NonNullable<Message['compactions']>[number];
+  isMessageStreaming?: boolean;
+}> = ({ compaction, isMessageStreaming }) => {
+  const isActive = compaction.status === 'in_progress' && isMessageStreaming;
+  const timestamp = compaction.completedAt ?? compaction.startedAt;
+  const label = isActive
+    ? 'Compacting conversation context…'
+    : compaction.status === 'completed'
+      ? `Conversation context compacted at ${formatMessageTime(timestamp)}`
+      : `Context compaction interrupted at ${formatMessageTime(timestamp)}`;
+
+  return (
+    <div
+      role="status"
+      className="flex items-center gap-2 border-y border-border-secondary py-2 font-mono text-[0.525rem] text-text-tertiary"
+    >
+      <span
+        aria-hidden="true"
+        className={`h-1.5 w-1.5 shrink-0 rounded-full ${isActive ? 'animate-pulse bg-text-primary' : 'bg-text-muted'}`}
+      />
+      <span>{label}</span>
+    </div>
+  );
+};
+
 interface MessageRowProps {
   message: Message;
   isEditing: boolean;
@@ -685,6 +702,14 @@ const MessageRow = React.memo(({
           </span>
         )}
       </div>
+
+      {message.sender === 'assistant' && message.compactions?.map(compaction => (
+        <CompactionMarker
+          key={compaction.id}
+          compaction={compaction}
+          isMessageStreaming={message.isStreaming}
+        />
+      ))}
 
       {message.sender === 'user' && message.attachments && message.attachments.length > 0 && (
         <div className="flex items-center gap-2 flex-wrap">
@@ -820,7 +845,6 @@ const MessageRow = React.memo(({
 });
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
-const STREAMING_STICKY_BOTTOM_THRESHOLD = 50;
 const SMOOTH_AUTO_SCROLL_TRACKING_MS = 500;
 const VIRTUALIZATION_THRESHOLD = 80;
 const VIRTUALIZATION_OVERSCAN = 8;
@@ -838,15 +862,12 @@ const isNearBottom = (
   container.scrollHeight - container.scrollTop - container.clientHeight < threshold
 );
 
-interface ScrollSnapshot {
-  shouldMaintain: boolean;
-}
-
 const estimateMessageHeight = (message: Message): number => {
   const lineEstimate = Math.ceil(message.text.length / 88);
   const sourcesEstimate = message.searchSources?.length ? 44 : 0;
+  const compactionsEstimate = (message.compactions?.length ?? 0) * 36;
   const baseHeight = message.sender === 'user' ? 74 : 112;
-  return Math.max(baseHeight, baseHeight + lineEstimate * 28 + sourcesEstimate);
+  return Math.max(baseHeight, baseHeight + lineEstimate * 28 + sourcesEstimate + compactionsEstimate);
 };
 
 const findOffsetIndex = (offsets: number[], target: number): number => {
@@ -1098,10 +1119,11 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     if (!container) return;
     if (behavior === 'smooth') {
       trackSmoothAutoScroll();
+      container.scrollTo({ top: container.scrollHeight, behavior });
     } else {
       clearSmoothAutoScrollTracking();
+      container.scrollTop = container.scrollHeight;
     }
-    container.scrollTo({ top: container.scrollHeight, behavior });
     setAutoScrollEnabled(true);
   }, [clearSmoothAutoScrollTracking, scrollContainerRef, setAutoScrollEnabled, trackSmoothAutoScroll]);
 
@@ -1119,18 +1141,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       lastMessage.id !== previousLastId &&
       (lastMessage.sender === 'user' || lastMessage.isStreaming)
     ) {
-      scrollToBottomNow(lastMessage.isStreaming ? 'smooth' : 'auto');
+      scrollToBottomNow('auto');
     }
   }, [messages, scrollToBottomNow]);
-
-  const maintainScrollAtEnd = useCallback((snapshot: ScrollSnapshot) => {
-    if (!snapshot.shouldMaintain) {
-      setAutoScrollEnabled(false);
-      return;
-    }
-
-    scrollToBottomNow('smooth');
-  }, [scrollToBottomNow, setAutoScrollEnabled]);
 
   const scrollElementIntoView = useCallback((element: Element, offset: number = 16) => {
     const container = scrollContainerRef.current;
@@ -1299,14 +1312,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const streamingActive = messages.some(m => m.isStreaming);
 
   useLayoutEffect(() => {
-    if (!streamingActive) return;
-    const container = scrollContainerRef.current;
-    const scrollSnapshot: ScrollSnapshot = {
-      shouldMaintain: autoScrollEnabledRef.current
-        && (container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true),
-    };
-    maintainScrollAtEnd(scrollSnapshot);
-  }, [messages, streamingActive, scrollContainerRef, maintainScrollAtEnd]);
+    if (!streamingActive || !autoScrollEnabledRef.current) return;
+
+    // Streaming updates arrive faster than a smooth scroll can finish. Restarting
+    // the animation for every update makes its target race the virtualized layout
+    // as message heights change. Pin synchronously instead; smooth scrolling is
+    // reserved for explicit navigation such as the scroll-to-bottom button.
+    scrollToBottomNow('auto');
+  }, [messages, streamingActive, scrollToBottomNow]);
 
   useLayoutEffect(() => {
     const container = scrollContainerRef.current;
@@ -1436,7 +1449,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         <NewChatEmptyState refreshKey={emptyStateRefreshKey ?? 0} />
       ) : (
       <div className="py-4">
-        <div ref={messagesColumnRef} className="max-w-[838px] mx-auto pl-[38px]">
+        <div ref={messagesColumnRef} className="max-w-[826px] mx-auto pr-[26px]">
           {shouldVirtualize && virtualRange.topPadding > 0 && (
             <div aria-hidden="true" style={{ height: virtualRange.topPadding }} />
           )}

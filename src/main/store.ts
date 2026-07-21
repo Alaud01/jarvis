@@ -18,6 +18,12 @@ export interface SerializedMessage {
   timestamp: string;
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
+  compactions?: {
+    id: string;
+    status: 'in_progress' | 'completed' | 'failed';
+    startedAt: string;
+    completedAt?: string;
+  }[];
 }
 
 export interface SerializedConversation {

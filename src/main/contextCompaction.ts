@@ -11,6 +11,7 @@ interface CompactionOptions {
   model: string;
   modelContextLength?: number;
   reserveFraction?: number;
+  onCompactionStart?: () => void;
 }
 
 function estimateTokenCount(text: string): number {
@@ -165,6 +166,7 @@ export async function compactMessagesIfNeeded(
   }
 
   const latestUserRequest = rest[latestUserIndex]?.content ?? 'Continue the task.';
+  options.onCompactionStart?.();
   const summary = await summarizeHistoryWithLLM(
     options.provider,
     options.model,

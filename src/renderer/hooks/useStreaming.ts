@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { Conversation, Message } from '../types';
-import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext } from '../../shared/stream';
+import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext } from '../../shared/stream';
 import type { SearchSourcesEvent } from '../../shared/search';
 import { STREAM_FLUSH_MS } from '../utils/conversation';
 
@@ -211,16 +211,55 @@ export function useStreaming(
       );
     };
 
+    const handleCompaction = (event: CompactionEvent) => {
+      const conversationId = getConversationIdForMessage(event.assistantMessageId);
+      if (!conversationId) return;
+
+      updateMessageInConversation(
+        conversationId,
+        event.assistantMessageId,
+        message => {
+          const compactions = message.compactions ?? [];
+          if (event.phase === 'started') {
+            if (compactions.some(compaction => compaction.id === event.compactionId)) return message;
+            return {
+              ...message,
+              compactions: [...compactions, {
+                id: event.compactionId,
+                status: 'in_progress',
+                startedAt: new Date(event.timestamp),
+              }],
+            };
+          }
+
+          return {
+            ...message,
+            compactions: compactions.map(compaction => (
+              compaction.id === event.compactionId
+                ? {
+                    ...compaction,
+                    status: event.phase === 'completed' ? 'completed' : 'failed',
+                    completedAt: new Date(event.timestamp),
+                  }
+                : compaction
+            )),
+          };
+        }
+      );
+    };
+
     const chunkCleanup = window.assistant.onChunk(handleChunk);
     const doneCleanup = window.assistant.onDone(handleDone);
     const errorCleanup = window.assistant.onError(handleError);
     const searchSourcesCleanup = window.assistant.onSearchSources(handleSearchSources);
+    const compactionCleanup = window.assistant.onCompaction(handleCompaction);
 
     return () => {
       chunkCleanup();
       doneCleanup();
       errorCleanup();
       searchSourcesCleanup();
+      compactionCleanup();
     };
   }, [finishStreaming, flushStreamChunkBuffer, markConversationCompleteUnread, scheduleStreamFlush, unregisterStreamSession, updateMessageInConversation]);
 

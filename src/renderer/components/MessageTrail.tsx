@@ -339,7 +339,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
                 }`}
               >
                 <div
-                  className={`w-5 h-[3px] bg-border-secondary rounded-[1px] transition-[width,background-color,box-shadow] duration-200 ease-in-out
+                  className={`w-5 h-[3px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out
                     group-hover/bar:w-6 group-hover/bar:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
                 />
               </div>
@@ -361,7 +361,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
                     }}
                   >
                     <div
-                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary rounded-[1px] transition-[width,background-color,box-shadow] duration-200 ease-in-out
+                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out
                         ${HEADER_HOVER_WIDTHS[header.level]} group-hover/bar:bg-text-tertiary ${isHeaderActive ? 'message-trail-bar-active' : ''}`}
                     />
                   </div>
@@ -383,7 +383,6 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
           >
             <div
               className={`w-3 h-[3px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out relative
-                rounded-sm
                 group-hover:w-4 group-hover:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
             />
           </div>
@@ -401,6 +400,7 @@ interface ExpandedTrailProps {
 
 interface ExpandedPanelFrame {
   top: number;
+  left: number;
   height: number;
 }
 
@@ -424,7 +424,6 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
   const updateHoverFrame = useCallback(() => {
     const content = contentRef.current;
     if (!content || !hoveredTargetKey) {
-      setHoverFrame(null);
       return;
     }
 
@@ -432,7 +431,6 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
       `[data-expanded-trail-target="${CSS.escape(hoveredTargetKey)}"]`,
     );
     if (!target) {
-      setHoverFrame(null);
       return;
     }
 
@@ -529,6 +527,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
               style={{
                 width: hoverFrame.width,
                 height: hoverFrame.height,
+                opacity: hoveredTargetKey ? 1 : 0,
                 transform: `translate3d(${hoverFrame.left}px, ${hoverFrame.top}px, 0)`,
               }}
             />
@@ -536,11 +535,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
           {visibleEntries.map((entry) => (
             <div
               key={entry.messageId}
-              className={`relative z-10 flex min-w-0 flex-col gap-0 ${
-                entry.sender === 'user'
-                  ? 'rounded border border-border-secondary px-1 py-0.5'
-                  : ''
-              }`}
+              className="relative z-10 flex min-w-0 flex-col gap-0"
             >
               {entry.sender === 'user' ? (
                 (() => {
@@ -550,7 +545,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                   type="button"
                   data-trail-primary-active={primaryActive ? 'true' : undefined}
                   {...hoverTargetProps(targetKey({ messageId: entry.messageId }))}
-                  className="flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-text-secondary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
+                  className="flex w-full min-w-0 flex-col gap-1 overflow-hidden border border-border-secondary px-1.5 py-1 text-left text-text-secondary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
                   onClick={() => onScrollToMessage(entry.messageId)}
                 >
                   <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary">
@@ -571,7 +566,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                     type="button"
                     data-trail-primary-active={primaryActive ? 'true' : undefined}
                     {...hoverTargetProps(`${entry.messageId}:label`)}
-                    className="w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-0.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:text-text-secondary focus:text-text-secondary focus:outline-none"
+                    className="w-full min-w-0 overflow-hidden px-1.5 py-0.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:text-text-secondary focus:text-text-secondary focus:outline-none"
                     onClick={() => onScrollToMessage(entry.messageId)}
                   >
                     <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -580,17 +575,21 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                   </button>
                     );
                   })()}
-                  {entry.headers.length > 0 ? (
-                    entry.headers.map((header, headerIndex) => {
-                      const primaryActive = areTargetsEqual(primaryActiveTarget, { messageId: entry.messageId, headerIndex });
+                  {entry.previewHeaders.length > 0 ? (
+                    entry.previewHeaders.map((header) => {
+                      const sourceHeaderIndex = getSourceHeaderIndex(entry.headers, header);
+                      const primaryActive = areTargetsEqual(primaryActiveTarget, {
+                        messageId: entry.messageId,
+                        headerIndex: sourceHeaderIndex,
+                      });
                       return (
                       <button
-                        key={`${entry.messageId}-${headerIndex}`}
+                        key={`${entry.messageId}-${sourceHeaderIndex}`}
                         type="button"
                         data-trail-primary-active={primaryActive ? 'true' : undefined}
-                        {...hoverTargetProps(targetKey({ messageId: entry.messageId, headerIndex }))}
-                        className={`block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] text-text-tertiary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]}`}
-                        onClick={() => onScrollToMessage(entry.messageId, headerIndex)}
+                        {...hoverTargetProps(targetKey({ messageId: entry.messageId, headerIndex: sourceHeaderIndex }))}
+                        className={`block w-full min-w-0 overflow-hidden px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] text-text-tertiary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none ${HEADER_INDENT[header.level]}`}
+                        onClick={() => onScrollToMessage(entry.messageId, sourceHeaderIndex)}
                       >
                         <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
                           <InlineMarkdownPreview content={header.text} />
@@ -606,7 +605,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                       type="button"
                       data-trail-primary-active={primaryActive ? 'true' : undefined}
                       {...hoverTargetProps(targetKey({ messageId: entry.messageId }))}
-                      className="block w-full min-w-0 overflow-hidden rounded-[4px] px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] text-text-tertiary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
+                      className="block w-full min-w-0 overflow-hidden px-1.5 py-1 text-left text-[0.7rem] leading-[1.2] text-text-tertiary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
                       onClick={() => onScrollToMessage(entry.messageId)}
                     >
                       <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -659,7 +658,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
         sender: message.sender,
         headers,
         previewHeaders: getPreviewHeaders(headers),
-        // Full header list kept for the expanded panel and active-header logic.
+        // Keep the full list for source indexes and active-header tracking.
         previewText: getPreview(message.text),
         isStreaming: message.isStreaming,
       };
@@ -1058,10 +1057,12 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
         const height = Math.max(0, rect.height - EXPANDED_PANEL_VERTICAL_MARGIN * 2);
         const next = {
           top: rect.top + EXPANDED_PANEL_VERTICAL_MARGIN,
+          left: rect.left + 12,
           height,
         };
         if (
           current?.top === next.top &&
+          current.left === next.left &&
           current.height === next.height
         ) {
           return current;
@@ -1096,11 +1097,12 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
     <div
       role="navigation"
       aria-label="Message headers"
+      data-message-trail
       className="relative z-[200] w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
     >
       <div
         ref={collapsedBarsRef}
-        className={`h-full max-h-full min-w-full overflow-hidden px-1 py-2 flex items-center ${barsAnimationClass} ${
+        className={`h-full max-h-full min-w-full overflow-hidden pl-2 py-2 flex items-center ${barsAnimationClass} ${
           isExpanded && !isCollapsing ? 'pointer-events-none' : ''
         }`}
       >
@@ -1124,16 +1126,17 @@ const MessageTrail: React.FC<MessageTrailProps> = ({ messages, scrollContainerRe
 
       {showPanel ? (
         <div
-          className="pointer-events-none fixed right-3 z-[200] flex w-[240px] items-center"
+          className="pointer-events-none fixed z-[200] flex w-[240px] items-center"
           style={{
             top: expandedPanelFrame?.top ?? 0,
+            left: expandedPanelFrame?.left ?? 0,
             height: expandedPanelFrame?.height ?? '100%',
             maxHeight: expandedPanelFrame?.height ?? '100%',
           }}
         >
           <div
             ref={expandedPanelRef}
-            className={`pointer-events-auto max-h-[inherit] overflow-hidden rounded-md border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
+            className={`pointer-events-auto max-h-[inherit] overflow-hidden border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
               isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
             }`}
             onMouseEnter={expandTrail}

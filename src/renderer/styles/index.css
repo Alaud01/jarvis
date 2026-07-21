@@ -274,8 +274,10 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .message-scroll-container {
-  overflow-anchor: auto;
+  /* MessageList owns scroll anchoring, including virtualized spacer changes. */
+  overflow-anchor: none;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
   margin-inline: 2px;
   box-sizing: border-box;
 }
@@ -629,6 +631,11 @@ select option {
   display: inline;
 }
 
+[data-message-trail],
+[data-message-trail] * {
+  border-radius: 0 !important;
+}
+
 .message-trail-bar-active {
   background-color: var(--color-text-primary) !important;
   box-shadow:
@@ -659,14 +666,14 @@ select option {
   }
   to {
     opacity: 0;
-    transform: translateX(3rem);
+    transform: translateX(-3rem);
   }
 }
 
 @keyframes messageTrailBarsEnter {
   from {
     opacity: 0;
-    transform: translateX(3rem);
+    transform: translateX(-3rem);
   }
   to {
     opacity: 1;
@@ -677,7 +684,7 @@ select option {
 @keyframes messageTrailPanelEnter {
   from {
     opacity: 0;
-    transform: translateX(1.75rem);
+    transform: translateX(-1.75rem);
   }
   to {
     opacity: 1;
@@ -692,7 +699,7 @@ select option {
   }
   to {
     opacity: 0;
-    transform: translateX(1.75rem);
+    transform: translateX(-1.75rem);
   }
 }
 

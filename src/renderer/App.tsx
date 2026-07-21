@@ -753,6 +753,11 @@ const App: React.FC = () => {
               <UsageDashboard />
             ) : <>
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
+              <MessageTrail
+                messages={messages}
+                scrollContainerRef={chatScrollContainerRef}
+                onScrollToMessage={handleScrollToMessage}
+              />
               <MessageList
                 ref={messageListRef}
                 scrollContainerRef={chatScrollContainerRef}
@@ -765,11 +770,6 @@ const App: React.FC = () => {
                 onCancelEdit={handleCancelEdit}
                 onResubmitMessage={handleResubmitMessage}
                 onRegenerateResponse={handleRegenerateResponse}
-              />
-              <MessageTrail
-                messages={messages}
-                scrollContainerRef={chatScrollContainerRef}
-                onScrollToMessage={handleScrollToMessage}
               />
               {showScrollButton && <ScrollToBottomButton onClick={handleScrollToBottom} />}
             </div>

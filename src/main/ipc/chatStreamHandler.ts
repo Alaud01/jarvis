@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron';
-import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../../shared/stream';
+import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../../shared/stream';
 import type { SearchSourcesEvent } from '../../shared/search';
 import { getAllModels, getProvider } from '../providers/registry';
 import type { ChatMessage, ModelInfo, StreamChunk, ToolExecutionResult } from '../providers/types';
@@ -52,6 +52,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       conversationId: request.conversationId,
       assistantMessageId: request.assistantMessageId,
     };
+    const activeCompactionIds = new Set<string>();
 
     const sendToRenderer = (channel: string, ...args: unknown[]) => {
       try {
@@ -63,6 +64,30 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       } catch {
         activeStreams.get(streamKey)?.abort();
       }
+    };
+
+    const beginCompaction = (): string => {
+      const compactionId = `${request.assistantMessageId}-${Date.now()}-${activeCompactionIds.size}`;
+      activeCompactionIds.add(compactionId);
+      const payload: CompactionEvent = {
+        ...streamContext,
+        compactionId,
+        phase: 'started',
+        timestamp: new Date().toISOString(),
+      };
+      sendToRenderer('context-compaction', payload);
+      return compactionId;
+    };
+
+    const finishCompaction = (compactionId: string, phase: 'completed' | 'failed') => {
+      if (!activeCompactionIds.delete(compactionId)) return;
+      const payload: CompactionEvent = {
+        ...streamContext,
+        compactionId,
+        phase,
+        timestamp: new Date().toISOString(),
+      };
+      sendToRenderer('context-compaction', payload);
     };
 
     try {
@@ -310,11 +335,16 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           contextThresholdTokens,
           modelContextLength: modelContextLength ?? 'default (128k)',
         });
+        let compactionId: string | null = null;
         const compacted = await compactMessagesIfNeeded(messages, {
           provider,
           model: request.model,
           modelContextLength,
+          onCompactionStart: () => {
+            compactionId = beginCompaction();
+          },
         });
+        if (compactionId) finishCompaction(compactionId, 'completed');
         if (compacted.length < messages.length || estimateTotalTokens(compacted) < estimatedTokens) {
           logMainProcess('LLM', 'Conversation history compacted', {
             conversationId: request.conversationId,
@@ -398,11 +428,16 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
               synthesisEstimatedTokens,
               contextThresholdTokens,
             });
+            let compactionId: string | null = null;
             const compactedSynthesis = await compactMessagesIfNeeded(synthesisMessages, {
               provider,
               model: request.model,
               modelContextLength,
+              onCompactionStart: () => {
+                compactionId = beginCompaction();
+              },
             });
+            if (compactionId) finishCompaction(compactionId, 'completed');
             synthesisMessages = compactedSynthesis;
           }
           const synthesisStartedAtMs = Date.now();
@@ -443,6 +478,9 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         baseMessages.push(...toolResultMessages);
       }
     } catch (error) {
+      for (const compactionId of [...activeCompactionIds]) {
+        finishCompaction(compactionId, 'failed');
+      }
       flushThinkingConsoleBuffer('stream-error');
       if (isAbortLikeError(error)) {
         closeThinkingSection('stream-abort');

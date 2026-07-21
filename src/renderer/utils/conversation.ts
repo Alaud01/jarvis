@@ -32,6 +32,11 @@ export function serializeConversation(c: Conversation): SerializedConversation {
       timestamp: m.timestamp.toISOString(),
       searchSources: m.searchSources,
       attachments: m.attachments,
+      compactions: m.compactions?.map(compaction => ({
+        ...compaction,
+        startedAt: compaction.startedAt.toISOString(),
+        completedAt: compaction.completedAt?.toISOString(),
+      })),
     })),
     folderId: c.folderId,
   };
@@ -58,6 +63,11 @@ export function deserializeConversation(c: SerializedConversation): Conversation
       timestamp: new Date(m.timestamp),
       searchSources: m.searchSources,
       attachments: m.attachments,
+      compactions: m.compactions?.map(compaction => ({
+        ...compaction,
+        startedAt: new Date(compaction.startedAt),
+        completedAt: compaction.completedAt ? new Date(compaction.completedAt) : undefined,
+      })),
     })),
     folderId: c.folderId ?? null,
     isLoaded: true,
@@ -141,6 +151,7 @@ export function getConversationRevision(conversation: Conversation): string {
     nextHash = hashString(message.text, nextHash);
     nextHash = hashUnknown(message.searchSources, nextHash);
     nextHash = hashUnknown(message.attachments, nextHash);
+    nextHash = hashUnknown(message.compactions, nextHash);
     return nextHash;
   }, hashString(
     `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,

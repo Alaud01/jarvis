@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { SearchSourcesEvent } from '../shared/search';
-import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
+import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult } from '../shared/attachments';
 import type { LocalVoiceModelInstallResult, LocalVoiceModelStatus } from '../shared/voiceSetup';
 import type {
@@ -60,6 +60,11 @@ contextBridge.exposeInMainWorld('assistant', {
     const listener = (_event: unknown, payload: StreamErrorEvent) => callback(payload);
     ipcRenderer.on('ollama-error', listener);
     return () => ipcRenderer.removeListener('ollama-error', listener);
+  },
+  onCompaction: (callback: (event: CompactionEvent) => void) => {
+    const listener = (_event: unknown, payload: CompactionEvent) => callback(payload);
+    ipcRenderer.on('context-compaction', listener);
+    return () => ipcRenderer.removeListener('context-compaction', listener);
   },
   onSearchSources: (callback: (event: SearchSourcesEvent) => void) => {
     const listener = (_event: IpcRendererEvent, event: SearchSourcesEvent) => callback(event);

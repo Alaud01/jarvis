@@ -1,5 +1,5 @@
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
-import type { StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
+import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
 import type { LocalVoiceModelInstallResult, LocalVoiceModelStatus } from '../shared/voiceSetup';
 import type {
@@ -20,6 +20,14 @@ export interface Message {
   isStreaming?: boolean;
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
+  compactions?: CompactionActivity[];
+}
+
+export interface CompactionActivity {
+  id: string;
+  status: 'in_progress' | 'completed' | 'failed';
+  startedAt: Date;
+  completedAt?: Date;
 }
 
 export interface Conversation {
@@ -44,6 +52,14 @@ export interface SerializedMessage {
   timestamp: string;
   searchSources?: SearchSourceGroup[];
   attachments?: FileAttachment[];
+  compactions?: SerializedCompactionActivity[];
+}
+
+export interface SerializedCompactionActivity {
+  id: string;
+  status: 'in_progress' | 'completed' | 'failed';
+  startedAt: string;
+  completedAt?: string;
 }
 
 export interface SerializedConversation {
@@ -120,6 +136,7 @@ declare global {
       onChunk: (callback: (event: StreamChunkEvent) => void) => () => void;
       onDone: (callback: (event: StreamEventContext) => void) => () => void;
       onError: (callback: (event: StreamErrorEvent) => void) => () => void;
+      onCompaction: (callback: (event: CompactionEvent) => void) => () => void;
       onSearchSources: (callback: (event: SearchSourcesEvent) => void) => () => void;
       startVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
       stopVoiceRecording: () => Promise<{ success: boolean; error?: string }>;
