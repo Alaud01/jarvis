@@ -206,7 +206,9 @@ const StackedBarChart: React.FC<ChartSeriesProps> = ({
           })}
 
           {points.map((point, index) => {
-            const x = pad.left + (plotW * index) / Math.max(1, points.length) + ((plotW / Math.max(1, points.length)) - barW) / 2;
+            const columnW = plotW / Math.max(1, points.length);
+            const columnX = pad.left + columnW * index;
+            const x = columnX + (columnW - barW) / 2;
             let yCursor = pad.top + plotH;
 
             if (!stacked) {
@@ -228,24 +230,9 @@ const StackedBarChart: React.FC<ChartSeriesProps> = ({
                         height={Math.max(0, barH)}
                         fill={colorByModel[segment.model]}
                         opacity={hoverIndex === null || hoverIndex === index ? 1 : 0.35}
-                        onMouseEnter={(event) => updateHoverPosition(index, event)}
-                        onMouseMove={(event) => updateHoverPosition(index, event)}
-                        onMouseLeave={clearHover}
                       />
                     );
                   })}
-                  {segments.length === 0 ? (
-                    <rect
-                      x={x}
-                      y={pad.top + plotH - 1}
-                      width={Math.max(1, barW)}
-                      height={1}
-                      fill="transparent"
-                      onMouseEnter={(event) => updateHoverPosition(index, event)}
-                      onMouseMove={(event) => updateHoverPosition(index, event)}
-                      onMouseLeave={clearHover}
-                    />
-                  ) : null}
                   <text
                     x={x + barW / 2}
                     y={height - 12}
@@ -254,6 +241,17 @@ const StackedBarChart: React.FC<ChartSeriesProps> = ({
                   >
                     {labelIndexes.has(index) ? point.label : ''}
                   </text>
+                  <rect
+                    x={columnX}
+                    y={pad.top}
+                    width={columnW}
+                    height={plotH}
+                    fill="transparent"
+                    pointerEvents="all"
+                    onMouseEnter={(event) => updateHoverPosition(index, event)}
+                    onMouseMove={(event) => updateHoverPosition(index, event)}
+                    onMouseLeave={clearHover}
+                  />
                 </g>
               );
             }
@@ -276,25 +274,10 @@ const StackedBarChart: React.FC<ChartSeriesProps> = ({
                       height={Math.max(0, barH)}
                       fill={colorByModel[segment.model]}
                       opacity={hoverIndex === null || hoverIndex === index ? 1 : 0.35}
-                      onMouseEnter={(event) => updateHoverPosition(index, event)}
-                      onMouseMove={(event) => updateHoverPosition(index, event)}
-                      onMouseLeave={clearHover}
                     />
                   );
                   return rect;
                 })}
-                {segments.length === 0 ? (
-                  <rect
-                    x={x}
-                    y={pad.top + plotH - 1}
-                    width={Math.max(1, barW)}
-                    height={1}
-                    fill="transparent"
-                    onMouseEnter={(event) => updateHoverPosition(index, event)}
-                    onMouseMove={(event) => updateHoverPosition(index, event)}
-                    onMouseLeave={clearHover}
-                  />
-                ) : null}
                 <text
                   x={x + barW / 2}
                   y={height - 12}
@@ -303,6 +286,17 @@ const StackedBarChart: React.FC<ChartSeriesProps> = ({
                 >
                   {labelIndexes.has(index) ? point.label : ''}
                 </text>
+                <rect
+                  x={columnX}
+                  y={pad.top}
+                  width={columnW}
+                  height={plotH}
+                  fill="transparent"
+                  pointerEvents="all"
+                  onMouseEnter={(event) => updateHoverPosition(index, event)}
+                  onMouseMove={(event) => updateHoverPosition(index, event)}
+                  onMouseLeave={clearHover}
+                />
               </g>
             );
           })}
@@ -413,6 +407,10 @@ const UsageDashboard: React.FC = () => {
     : tokenMode === 'output'
       ? 'Usage by model · Output tokens'
       : 'Usage by model · Total tokens';
+  const tpsModels = data.models.filter((model) => (
+    data.tps.some((point) => (point.byModel[model] ?? 0) > 0)
+  ));
+  const hasCodexUsage = data.models.some((model) => model.startsWith('codex:'));
 
   return (
     <div className="flex h-full min-h-0 flex-1 overflow-y-auto">
@@ -485,13 +483,18 @@ const UsageDashboard: React.FC = () => {
             <StackedBarChart
               title="Generation TPS by model"
               points={data.tps}
-              models={data.models}
+              models={tpsModels}
               colorByModel={colorByModel}
               unitLabel="tokens / sec"
               stacked={false}
               summaryLabel="Weighted avg"
               formatValue={formatRate}
             />
+            {hasCodexUsage ? (
+              <p className="-mt-3 text-[0.7rem] text-text-muted">
+                Codex is excluded from TPS because it reports token counts but not model-generation duration.
+              </p>
+            ) : null}
           </div>
         )}
       </div>

@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const {
   buildChatGptLoginParams,
+  buildCodexDynamicToolContentItems,
   buildIsolatedCodexEnvironment,
   CodexAppServerClient,
   isMissingThreadError,
@@ -96,6 +97,22 @@ test('passes user images to app-server without exposing system messages', () => 
     type: 'image',
     url: 'data:image/jpeg;base64,abc123',
   });
+});
+
+test('serializes only valid image URLs in Codex dynamic tool results', () => {
+  assert.deepEqual(buildCodexDynamicToolContentItems({
+    success: true,
+    content: 'Screenshot captured.',
+    imageUrls: [
+      '/Users/example/browser-screenshot.png',
+      'data:image/png;base64,aGVsbG8=',
+      'https://example.com/screenshot.png',
+    ],
+  }), [
+    { type: 'inputText', text: 'Screenshot captured.' },
+    { type: 'inputImage', imageUrl: 'data:image/png;base64,aGVsbG8=' },
+    { type: 'inputImage', imageUrl: 'https://example.com/screenshot.png' },
+  ]);
 });
 
 test('resolves the Codex executable from Jarvis dependencies', () => {
@@ -234,6 +251,11 @@ test('prepares replay history only for new or invalidated Codex threads', async 
       options,
     );
     assert.equal(first.assistantMessage.content, 'Tool completed.');
+    assert.deepEqual(first.usage, {
+      inputTokens: 120,
+      outputTokens: 40,
+      estimated: false,
+    });
     assert.equal(replayPreparations, 1);
 
     const secondMessages = [
@@ -241,13 +263,18 @@ test('prepares replay history only for new or invalidated Codex threads', async 
       { role: 'assistant', content: 'Tool completed.' },
       { role: 'user', content: 'Follow-up' },
     ];
-    await provider.streamChat(
+    const second = await provider.streamChat(
       'codex:gpt-test',
       secondMessages,
       abortController,
       () => undefined,
       options,
     );
+    assert.deepEqual(second.usage, {
+      inputTokens: 120,
+      outputTokens: 40,
+      estimated: false,
+    });
     assert.equal(replayPreparations, 1);
 
     const editedMessages = [
@@ -290,18 +317,31 @@ test('round-trips a Codex dynamic tool call through the Jarvis handler', async (
       dynamicTools,
     });
     const calls = [];
+    const usageUpdates = [];
     const content = await client.runTurn({
       threadId,
       model: 'gpt-test',
       input: [{ type: 'text', text: 'Open the page.', text_elements: [] }],
       onDelta: () => undefined,
+      onTokenUsage: usage => usageUpdates.push(usage),
       onToolCall: async (tool, argumentsValue) => {
         calls.push({ tool, argumentsValue });
-        return { success: true, content: 'opened' };
+        return {
+          success: true,
+          content: 'opened-with-image',
+          imageUrls: ['data:image/png;base64,aGVsbG8='],
+        };
       },
     });
 
     assert.equal(content, 'Tool completed.');
+    assert.deepEqual(usageUpdates, [{
+      totalTokens: 160,
+      inputTokens: 120,
+      cachedInputTokens: 80,
+      outputTokens: 40,
+      reasoningOutputTokens: 30,
+    }]);
     assert.deepEqual(calls, [{
       tool: 'browser_open',
       argumentsValue: { url: 'https://example.com' },

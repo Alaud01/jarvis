@@ -245,7 +245,11 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
               title: browserResult.state?.title,
               error: browserResult.error?.slice(0, 300),
             });
-            return { success: browserResult.success, content: browserContent };
+            return {
+              success: browserResult.success,
+              content: browserContent,
+              imageUrls: browserResult.imageDataUrl ? [browserResult.imageDataUrl] : undefined,
+            };
           } catch (error) {
             if (isAbortLikeError(error)) throw error;
             const errorMessage = error instanceof Error ? error.message : 'Invalid Browser Control tool arguments.';

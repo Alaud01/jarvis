@@ -40,6 +40,7 @@ export interface BrowserControlResult {
   success: boolean;
   error?: string;
   state?: BrowserControlState;
+  imageDataUrl?: string;
 }
 
 interface BrowserControlOptions {
@@ -527,6 +528,7 @@ export async function browserScreenshot(
     throwIfAborted(options.signal);
     const win = getBrowserWindow(options.sessionId);
     const image = await withAbort(win.webContents.capturePage(), options.signal);
+    const png = image.toPNG();
     let artifact: BrowserControlState['screenshotArtifact'];
 
     if (persist) {
@@ -534,7 +536,7 @@ export async function browserScreenshot(
       const dir = path.join(app.getPath('userData'), SCREENSHOT_DIR);
       await fs.mkdir(dir, { recursive: true });
       const filePath = path.join(dir, `${id}.png`);
-      await fs.writeFile(filePath, image.toPNG());
+      await fs.writeFile(filePath, png);
       artifact = {
         id,
         path: filePath,
@@ -546,6 +548,7 @@ export async function browserScreenshot(
 
     return {
       success: true,
+      imageDataUrl: `data:image/png;base64,${png.toString('base64')}`,
       state: await buildState(
         { name: 'browser_screenshot', success: true, message: persist ? 'persisted' : 'transient' },
         artifact,

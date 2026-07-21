@@ -6,6 +6,7 @@ import {
   type CodexAppServerOptions,
   type CodexConversationThreadRecord,
   type CodexDynamicTool,
+  type CodexTokenUsageBreakdown,
   type CodexUserInput,
 } from '../codexAppServer';
 import type {
@@ -318,6 +319,19 @@ export class CodexProvider implements Provider {
           executeTool(tool, argumentsValue)
         )
       : undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let hasReportedUsage = false;
+    const onTokenUsage = (usage: CodexTokenUsageBreakdown) => {
+      inputTokens += usage.inputTokens;
+      outputTokens += usage.outputTokens;
+      hasReportedUsage = true;
+    };
+    const resultUsage = () => (hasReportedUsage ? {
+      inputTokens,
+      outputTokens,
+      estimated: false,
+    } : undefined);
 
     if (!conversationId) {
       const builtInput = buildCodexTurnInput(messages, 0);
@@ -333,12 +347,13 @@ export class CodexProvider implements Provider {
         input: builtInput.input,
         signal: abortController.signal,
         onToolCall,
+        onTokenUsage,
         onDelta: (delta, phase) => onChunk({
           type: phase === 'commentary' ? 'thinking' : 'content',
           content: delta,
         }),
       });
-      return { assistantMessage: { role: 'assistant', content } };
+      return { assistantMessage: { role: 'assistant', content }, usage: resultUsage() };
     }
 
     const sourceConversationMessages = getConversationMessages(messages);
@@ -365,6 +380,7 @@ export class CodexProvider implements Provider {
         input: builtInput.input,
         signal: abortController.signal,
         onToolCall,
+        onTokenUsage,
         onDelta: (delta, phase) => onChunk({
           type: phase === 'commentary' ? 'thinking' : 'content',
           content: delta,
@@ -386,7 +402,7 @@ export class CodexProvider implements Provider {
         ),
         toolSchemaFingerprint,
       });
-      return { assistantMessage: { role: 'assistant', content } };
+      return { assistantMessage: { role: 'assistant', content }, usage: resultUsage() };
     } catch (error) {
       // An interrupted or failed app-server turn may contain partial state.
       // Remove the mapping so the next Jarvis request starts cleanly.

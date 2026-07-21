@@ -4,6 +4,7 @@ const readline = require('node:readline');
 
 const lines = readline.createInterface({ input: process.stdin });
 let activeTurn = null;
+let turnCount = 0;
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -56,7 +57,8 @@ lines.on('line', line => {
   }
 
   if (message.method === 'turn/start') {
-    activeTurn = { threadId: message.params.threadId, turnId: 'turn-test', requestId: 9001 };
+    turnCount += 1;
+    activeTurn = { threadId: message.params.threadId, turnId: `turn-test-${turnCount}`, requestId: 9000 + turnCount };
     send({ id: message.id, result: { turn: { id: activeTurn.turnId } } });
     setImmediate(() => {
       send({
@@ -77,7 +79,16 @@ lines.on('line', line => {
 
   if (activeTurn && message.id === activeTurn.requestId && !message.method) {
     const result = message.result;
-    if (result?.success !== true || result?.contentItems?.[0]?.text !== 'opened') {
+    const text = result?.contentItems?.[0]?.text;
+    const expectedImage = text === 'opened-with-image'
+      ? 'data:image/png;base64,aGVsbG8='
+      : null;
+    const imageMatches = expectedImage === null
+      ? result?.contentItems?.length === 1
+      : result?.contentItems?.length === 2
+        && result.contentItems[1]?.type === 'inputImage'
+        && result.contentItems[1]?.imageUrl === expectedImage;
+    if (result?.success !== true || !['opened', 'opened-with-image'].includes(text) || !imageMatches) {
       process.stderr.write('Unexpected dynamic tool result\n');
       process.exitCode = 1;
       return;
@@ -97,6 +108,30 @@ lines.on('line', line => {
         turnId: activeTurn.turnId,
         itemId: 'message-test',
         delta: 'Tool completed.',
+      },
+    });
+    send({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        threadId: activeTurn.threadId,
+        turnId: activeTurn.turnId,
+        tokenUsage: {
+          total: {
+            totalTokens: 160 * turnCount,
+            inputTokens: 120 * turnCount,
+            cachedInputTokens: 80 * turnCount,
+            outputTokens: 40 * turnCount,
+            reasoningOutputTokens: 30 * turnCount,
+          },
+          last: {
+            totalTokens: 160,
+            inputTokens: 120,
+            cachedInputTokens: 80,
+            outputTokens: 40,
+            reasoningOutputTokens: 30,
+          },
+          modelContextWindow: 200000,
+        },
       },
     });
     send({

@@ -54,6 +54,7 @@ export interface StreamTurnResult {
 export interface ToolExecutionResult {
   content: string;
   success: boolean;
+  imageUrls?: string[];
 }
 
 export interface StreamChatTurnOptions {

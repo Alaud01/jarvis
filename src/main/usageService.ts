@@ -114,13 +114,15 @@ export function resolveTurnUsage(params: {
   const inputTokens = hasInput ? Math.max(0, params.usage!.inputTokens!) : estimatedInput;
   const outputTokens = hasOutput ? Math.max(0, params.usage!.outputTokens!) : estimatedOutput;
   const reportedGenerationMs = hasGeneration ? Math.max(1, params.usage!.generationMs!) : 0;
-  const generationMs = reportedGenerationMs > 0
-    ? params.provider === 'ollama' || elapsedMs <= 0
-      ? reportedGenerationMs
-      : Math.max(reportedGenerationMs, elapsedMs)
-    : elapsedMs > 0
-      ? Math.max(1, elapsedMs)
-      : 0;
+  const generationMs = params.provider === 'codex'
+    ? 0
+    : reportedGenerationMs > 0
+      ? params.provider === 'ollama' || elapsedMs <= 0
+        ? reportedGenerationMs
+        : Math.max(reportedGenerationMs, elapsedMs)
+      : elapsedMs > 0
+        ? Math.max(1, elapsedMs)
+        : 0;
   const estimated = Boolean(params.usage?.estimated) || !hasInput || !hasOutput;
 
   return { inputTokens, outputTokens, generationMs, estimated };
@@ -224,6 +226,9 @@ function tokenValue(event: UsageEvent, mode: UsageTokenMode): number {
 }
 
 function tpsGenerationMs(event: UsageEvent): number {
+  // Codex reports authoritative token counts, but app-server does not expose
+  // model-generation duration. End-to-end agent turn latency is not TPS.
+  if (event.provider === 'codex') return 0;
   if (event.outputTokens <= 0 || event.generationMs <= 0) return 0;
   return Math.max(event.generationMs, MIN_TPS_SAMPLE_MS);
 }
@@ -261,6 +266,7 @@ export function getUsageDashboard(query: UsageDashboardQuery): UsageDashboardDat
   let totalInput = 0;
   let totalOutput = 0;
   let totalGenerationMs = 0;
+  let totalTpsTokens = 0;
 
   for (const event of events) {
     const ts = Date.parse(event.timestamp);
@@ -271,7 +277,6 @@ export function getUsageDashboard(query: UsageDashboardQuery): UsageDashboardDat
     models.add(event.model);
     totalInput += event.inputTokens;
     totalOutput += event.outputTokens;
-    totalGenerationMs += tpsGenerationMs(event);
 
     usage[index].byModel[event.model] = (usage[index].byModel[event.model] ?? 0) + tokenValue(event, tokenMode);
     usage[index].total += tokenValue(event, tokenMode);
@@ -285,6 +290,8 @@ export function getUsageDashboard(query: UsageDashboardQuery): UsageDashboardDat
     const tpsValue = tokenValue(event, tpsTokenMode);
     const generationMs = tpsGenerationMs(event);
     if (tpsValue > 0 && generationMs > 0) {
+      totalGenerationMs += generationMs;
+      totalTpsTokens += tpsValue;
       if (!tpsSeconds.has(usage[index].bucketStart)) {
         tpsSeconds.set(usage[index].bucketStart, new Map());
         tpsTokens.set(usage[index].bucketStart, new Map());
@@ -315,7 +322,7 @@ export function getUsageDashboard(query: UsageDashboardQuery): UsageDashboardDat
   }
 
   const modelList = [...models].sort((a, b) => a.localeCompare(b));
-  const avgTps = totalGenerationMs > 0 ? totalOutput / (totalGenerationMs / 1000) : 0;
+  const avgTps = totalGenerationMs > 0 ? totalTpsTokens / (totalGenerationMs / 1000) : 0;
 
   return {
     range,

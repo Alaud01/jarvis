@@ -36,6 +36,7 @@ interface TurnWaiter {
   threadId: string;
   text: string;
   onDelta: (delta: string, phase?: CodexMessagePhase) => void;
+  onTokenUsage?: (usage: CodexTokenUsageBreakdown) => void;
   resolve: (text: string) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
@@ -61,7 +62,12 @@ export type CodexDynamicTool = CodexDynamicToolFunction | CodexDynamicToolNamesp
 export interface CodexDynamicToolResult {
   content: string;
   success: boolean;
+  imageUrls?: string[];
 }
+
+export type CodexDynamicToolContentItem =
+  | { type: 'inputText'; text: string }
+  | { type: 'inputImage'; imageUrl: string };
 
 export type CodexDynamicToolHandler = (
   tool: string,
@@ -70,6 +76,7 @@ export type CodexDynamicToolHandler = (
 
 interface EarlyTurnEvents {
   deltas: Array<{ delta: string; phase?: CodexMessagePhase }>;
+  tokenUsage?: CodexTokenUsageBreakdown[];
   completion?: TurnCompletion;
   error?: string;
 }
@@ -124,12 +131,21 @@ export type CodexUserInput =
 
 export type CodexMessagePhase = 'commentary' | 'final_answer';
 
+export interface CodexTokenUsageBreakdown {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+}
+
 export interface RunCodexTurnOptions {
   threadId: string;
   model: string;
   input: CodexUserInput[];
   signal?: AbortSignal;
   onDelta: (delta: string, phase?: CodexMessagePhase) => void;
+  onTokenUsage?: (usage: CodexTokenUsageBreakdown) => void;
   onToolCall?: CodexDynamicToolHandler;
 }
 
@@ -170,6 +186,67 @@ export class CodexAppServerError extends Error {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isValidCodexImageUrl(value: string): boolean {
+  if (/^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    return true;
+  }
+
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+export function buildCodexDynamicToolContentItems(
+  result: CodexDynamicToolResult,
+): CodexDynamicToolContentItem[] {
+  const contentItems: CodexDynamicToolContentItem[] = [
+    { type: 'inputText', text: result.content },
+  ];
+  for (const imageUrl of result.imageUrls ?? []) {
+    if (isValidCodexImageUrl(imageUrl)) {
+      contentItems.push({ type: 'inputImage', imageUrl });
+    }
+  }
+  return contentItems;
+}
+
+function parseTokenUsageBreakdown(value: unknown): CodexTokenUsageBreakdown | null {
+  if (!isRecord(value)) return null;
+  const fields = [
+    'totalTokens',
+    'inputTokens',
+    'cachedInputTokens',
+    'outputTokens',
+    'reasoningOutputTokens',
+  ] as const;
+  if (fields.some((field) => typeof value[field] !== 'number' || !Number.isFinite(value[field]))) {
+    return null;
+  }
+  return {
+    totalTokens: Math.max(0, value.totalTokens as number),
+    inputTokens: Math.max(0, value.inputTokens as number),
+    cachedInputTokens: Math.max(0, value.cachedInputTokens as number),
+    outputTokens: Math.max(0, value.outputTokens as number),
+    reasoningOutputTokens: Math.max(0, value.reasoningOutputTokens as number),
+  };
+}
+
+function subtractTokenUsage(
+  current: CodexTokenUsageBreakdown,
+  previous: CodexTokenUsageBreakdown,
+): CodexTokenUsageBreakdown {
+  return {
+    totalTokens: Math.max(0, current.totalTokens - previous.totalTokens),
+    inputTokens: Math.max(0, current.inputTokens - previous.inputTokens),
+    cachedInputTokens: Math.max(0, current.cachedInputTokens - previous.cachedInputTokens),
+    outputTokens: Math.max(0, current.outputTokens - previous.outputTokens),
+    reasoningOutputTokens: Math.max(0, current.reasoningOutputTokens - previous.reasoningOutputTokens),
+  };
 }
 
 function targetTripleForCurrentPlatform(): string {
@@ -369,6 +446,7 @@ export class CodexAppServerClient {
   private readonly pendingRequests = new Map<number, PendingRequest>();
   private readonly turnWaiters = new Map<string, TurnWaiter>();
   private readonly earlyTurnEvents = new Map<string, EarlyTurnEvents>();
+  private readonly threadTokenUsageTotals = new Map<string, CodexTokenUsageBreakdown>();
   private readonly agentMessagePhases = new Map<string, CodexMessagePhase>();
   private readonly activeToolHandlers = new Map<string, CodexDynamicToolHandler>();
   private readonly loginWaiters = new Map<string, LoginWaiter>();
@@ -513,6 +591,30 @@ export class CodexAppServerClient {
     this.earlyTurnEvents.set(turnId, early);
   }
 
+  private handleTokenUsage(params: Record<string, unknown>): void {
+    const threadId = typeof params.threadId === 'string' ? params.threadId : null;
+    const turnId = typeof params.turnId === 'string' ? params.turnId : null;
+    const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : null;
+    const total = parseTokenUsageBreakdown(tokenUsage?.total);
+    const last = parseTokenUsageBreakdown(tokenUsage?.last);
+    if (!threadId || !turnId || !total || !last) return;
+
+    const previousTotal = this.threadTokenUsageTotals.get(threadId);
+    const turnUsage = previousTotal ? subtractTokenUsage(total, previousTotal) : last;
+    this.threadTokenUsageTotals.set(threadId, total);
+    if (turnUsage.inputTokens <= 0 && turnUsage.outputTokens <= 0) return;
+
+    const waiter = this.turnWaiters.get(turnId);
+    if (waiter) {
+      waiter.onTokenUsage?.(turnUsage);
+      return;
+    }
+
+    const early = this.earlyTurnEvents.get(turnId) ?? { deltas: [] };
+    (early.tokenUsage ??= []).push(turnUsage);
+    this.earlyTurnEvents.set(turnId, early);
+  }
+
   private handleItemLifecycle(params: Record<string, unknown>): void {
     const item = isRecord(params.item) ? params.item : null;
     if (!item || item.type !== 'agentMessage' || typeof item.id !== 'string') return;
@@ -593,6 +695,9 @@ export class CodexAppServerClient {
       case 'turn/completed':
         this.handleTurnCompletion(params);
         break;
+      case 'thread/tokenUsage/updated':
+        this.handleTokenUsage(params);
+        break;
       case 'error':
         this.handleTurnError(params);
         break;
@@ -641,7 +746,7 @@ export class CodexAppServerClient {
         id,
         result: {
           success: result.success,
-          contentItems: [{ type: 'inputText', text: result.content }],
+          contentItems: buildCodexDynamicToolContentItems(result),
         },
       });
     } catch (error) {
@@ -916,6 +1021,7 @@ export class CodexAppServerClient {
     turnId: string,
     threadId: string,
     onDelta: (delta: string, phase?: CodexMessagePhase) => void,
+    onTokenUsage?: (usage: CodexTokenUsageBreakdown) => void,
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -923,7 +1029,7 @@ export class CodexAppServerClient {
         void this.request('turn/interrupt', { threadId, turnId }).catch(() => undefined);
         reject(new Error('Codex turn timed out.'));
       }, CODEX_TURN_TIMEOUT_MS);
-      const waiter: TurnWaiter = { threadId, text: '', onDelta, resolve, reject, timeout };
+      const waiter: TurnWaiter = { threadId, text: '', onDelta, onTokenUsage, resolve, reject, timeout };
       this.turnWaiters.set(turnId, waiter);
 
       const early = this.earlyTurnEvents.get(turnId);
@@ -933,6 +1039,7 @@ export class CodexAppServerClient {
         if (phase !== 'commentary') waiter.text += delta;
         waiter.onDelta(delta, phase);
       }
+      for (const usage of early.tokenUsage ?? []) waiter.onTokenUsage?.(usage);
       if (early.completion) {
         const completion = early.error && !early.completion.error
           ? { ...early.completion, error: early.error }
@@ -964,7 +1071,12 @@ export class CodexAppServerClient {
       }
 
       const turnId = response.turn.id;
-      const completion = this.waitForTurn(turnId, options.threadId, options.onDelta);
+      const completion = this.waitForTurn(
+        turnId,
+        options.threadId,
+        options.onDelta,
+        options.onTokenUsage,
+      );
       const abortListener = () => {
         void this.request('turn/interrupt', { threadId: options.threadId, turnId }).catch(() => undefined);
       };
