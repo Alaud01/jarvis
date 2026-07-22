@@ -9,6 +9,10 @@ export function isWorkspaceTabId(id: string): id is WorkspaceTabId {
   return WORKSPACE_TAB_IDS.includes(id as WorkspaceTabId);
 }
 
+export function isValidOpenTabId(id: string, validConversationIds: ReadonlySet<string>): boolean {
+  return validConversationIds.has(id) || isWorkspaceTabId(id);
+}
+
 export function workspaceViewForTab(id: WorkspaceTabId): Exclude<WorkspaceView, 'chat'> {
   return id === DICTIONARY_TAB_ID ? 'dictionary' : 'usage';
 }

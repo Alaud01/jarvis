@@ -33,7 +33,6 @@ export interface MessageListHandle {
   scrollToMessageHeader: (messageId: string, headerIndex: number) => void;
   scrollToBottom: () => void;
   isAutoScrollEnabled: () => boolean;
-  enableAutoScroll: () => void;
 }
 
 export interface MessageSegment {
@@ -844,8 +843,9 @@ const MessageRow = React.memo(({
   );
 });
 
-const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 50;
 const SMOOTH_AUTO_SCROLL_TRACKING_MS = 500;
+const USER_SCROLL_INTENT_GRACE_MS = 160;
 const VIRTUALIZATION_THRESHOLD = 80;
 const VIRTUALIZATION_OVERSCAN = 8;
 const DEFAULT_MESSAGE_HEIGHT = 180;
@@ -859,7 +859,7 @@ const isNearBottom = (
   container: HTMLElement,
   threshold = AUTO_SCROLL_BOTTOM_THRESHOLD
 ) => (
-  container.scrollHeight - container.scrollTop - container.clientHeight < threshold
+  container.scrollHeight - container.scrollTop - container.clientHeight <= threshold
 );
 
 const estimateMessageHeight = (message: Message): number => {
@@ -931,7 +931,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const autoScrollEnabledRef = useRef(true);
   const smoothAutoScrollDeadlineRef = useRef(0);
   const smoothAutoScrollTimeoutRef = useRef<number | null>(null);
+  const userScrollIntentDeadlineRef = useRef(0);
   const prevLastMessageIdRef = useRef<string | null>(null);
+  const lastScrollTopRef = useRef(0);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const lastConversationSearchTriggerRef = useRef(conversationSearchTrigger);
@@ -955,7 +957,11 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
   const setAutoScrollEnabled = useCallback((enabled: boolean) => {
     autoScrollEnabledRef.current = enabled;
-  }, []);
+    const container = scrollContainerRef.current;
+    if (container) {
+      container.style.overflowAnchor = enabled ? 'none' : 'auto';
+    }
+  }, [scrollContainerRef]);
 
   const cancelAutoScroll = useCallback(() => {
     setAutoScrollEnabled(false);
@@ -1063,7 +1069,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     });
   }, [scrollContainerRef, setVirtualViewport]);
 
-  useLayoutEffect(() => {
+  // App owns this ancestor ref, so listeners must attach after ancestor refs commit.
+  useEffect(() => {
     updateVirtualViewport();
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -1123,6 +1130,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     } else {
       clearSmoothAutoScrollTracking();
       container.scrollTop = container.scrollHeight;
+      lastScrollTopRef.current = container.scrollTop;
     }
     setAutoScrollEnabled(true);
   }, [clearSmoothAutoScrollTracking, scrollContainerRef, setAutoScrollEnabled, trackSmoothAutoScroll]);
@@ -1261,11 +1269,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       scrollToBottomNow('smooth');
     },
     isAutoScrollEnabled: () => autoScrollEnabledRef.current,
-    enableAutoScroll: () => {
-      reactivateAutoScroll();
-    }
   }), [
-    reactivateAutoScroll,
     scrollElementIntoView,
     scrollToMessageId,
     scrollToBottomNow,
@@ -1313,6 +1317,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
   useLayoutEffect(() => {
     if (!streamingActive || !autoScrollEnabledRef.current) return;
+    if (userScrollIntentDeadlineRef.current > performance.now()) return;
 
     // Streaming updates arrive faster than a smooth scroll can finish. Restarting
     // the animation for every update makes its target race the virtualized layout
@@ -1321,13 +1326,30 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     scrollToBottomNow('auto');
   }, [messages, streamingActive, scrollToBottomNow]);
 
-  useLayoutEffect(() => {
+  // A layout effect runs before the ancestor scroll container ref is attached.
+  useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
+    lastScrollTopRef.current = container.scrollTop;
     setAutoScrollEnabled(isNearBottom(container));
 
     const handleScroll = () => {
+      const currentScrollTop = container.scrollTop;
+      const movedUp = currentScrollTop < lastScrollTopRef.current - 0.5;
+      lastScrollTopRef.current = currentScrollTop;
+
+      if (movedUp) {
+        clearSmoothAutoScrollTracking();
+        cancelAutoScroll();
+        return;
+      }
+
+      if (isNearBottom(container)) {
+        reactivateAutoScroll();
+        return;
+      }
+
       if (
         autoScrollEnabledRef.current &&
         smoothAutoScrollDeadlineRef.current > performance.now()
@@ -1335,23 +1357,43 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         return;
       }
 
-      setAutoScrollEnabled(isNearBottom(container));
+      cancelAutoScroll();
     };
 
-    const handleUserScrollIntent = () => {
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY >= 0 || container.scrollHeight - container.clientHeight <= 1) {
+        return;
+      }
+
       clearSmoothAutoScrollTracking();
+      userScrollIntentDeadlineRef.current = performance.now() + USER_SCROLL_INTENT_GRACE_MS;
+    };
+
+    const handleTouchMove = () => {
+      if (container.scrollHeight - container.clientHeight <= 1) {
+        return;
+      }
+
+      clearSmoothAutoScrollTracking();
+      userScrollIntentDeadlineRef.current = performance.now() + USER_SCROLL_INTENT_GRACE_MS;
     };
 
     container.addEventListener('scroll', handleScroll, { passive: true });
-    container.addEventListener('wheel', handleUserScrollIntent, { passive: true });
-    container.addEventListener('touchmove', handleUserScrollIntent, { passive: true });
+    container.addEventListener('wheel', handleWheel, { passive: true });
+    container.addEventListener('touchmove', handleTouchMove, { passive: true });
     return () => {
       container.removeEventListener('scroll', handleScroll);
-      container.removeEventListener('wheel', handleUserScrollIntent);
-      container.removeEventListener('touchmove', handleUserScrollIntent);
+      container.removeEventListener('wheel', handleWheel);
+      container.removeEventListener('touchmove', handleTouchMove);
       clearSmoothAutoScrollTracking();
     };
-  }, [clearSmoothAutoScrollTracking, scrollContainerRef, setAutoScrollEnabled]);
+  }, [
+    cancelAutoScroll,
+    clearSmoothAutoScrollTracking,
+    reactivateAutoScroll,
+    scrollContainerRef,
+    setAutoScrollEnabled,
+  ]);
 
   const hasStreamingMessage = messages.some(m => m.isStreaming);
   const [copiedId, setCopiedId] = useState<string | null>(null);

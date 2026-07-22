@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
+import { isValidOpenTabId } from '../shared/workspaceTabs';
 import type {
   CorrectionObservation,
   LegacyDictionaryEntry,
@@ -168,7 +169,7 @@ function pruneLegacyConversations(validIds: Set<string>): void {
 
 function pruneConversationReferences(validIds: Set<string>): void {
   const openTabIds = loadOpenTabIds();
-  const nextOpenTabIds = openTabIds.filter(id => validIds.has(id));
+  const nextOpenTabIds = openTabIds.filter(id => isValidOpenTabId(id, validIds));
   if (nextOpenTabIds.length !== openTabIds.length) {
     store.set('openTabIds', nextOpenTabIds);
   }

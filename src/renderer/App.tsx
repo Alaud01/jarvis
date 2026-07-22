@@ -29,8 +29,8 @@ import {
   isWorkspaceTabId,
   workspaceTabForView,
   workspaceViewForTab,
-} from './utils/workspaceTabs';
-import type { WorkspaceView } from './utils/workspaceTabs';
+} from '../shared/workspaceTabs';
+import type { WorkspaceView } from '../shared/workspaceTabs';
 import { useModels } from './hooks/useModels';
 import { useConversations } from './hooks/useConversations';
 import { useStreaming } from './hooks/useStreaming';
@@ -169,6 +169,17 @@ const App: React.FC = () => {
     handleConversationSelect(id);
   }, [handleConversationSelect, handleWorkspaceOpen]);
 
+  const handleTabsReorder = useCallback((reorderedTabIds: string[]) => {
+    setOpenTabIds(prev => {
+      const reorderedIdSet = new Set(reorderedTabIds);
+      let reorderedIndex = 0;
+
+      return prev.map(id => (
+        reorderedIdSet.has(id) ? reorderedTabIds[reorderedIndex++] : id
+      ));
+    });
+  }, [setOpenTabIds]);
+
   const generateTitleFallback = (text: string): string => {
     const words = text.split(' ').slice(0, 5);
     return words.join(' ') + (words.length < text.split(' ').length ? '...' : '');
@@ -228,7 +239,6 @@ const App: React.FC = () => {
   }, []);
 
   const handleScrollToBottom = useCallback(() => {
-    messageListRef.current?.enableAutoScroll();
     messageListRef.current?.scrollToBottom();
     setShowScrollButton(false);
   }, []);
@@ -616,10 +626,6 @@ const App: React.FC = () => {
       }
 
       const atBottom = isScrollContainerAtBottom(container);
-      if (atBottom) {
-        messageListRef.current?.enableAutoScroll();
-      }
-
       const autoScrollEnabled = messageListRef.current?.isAutoScrollEnabled() ?? true;
       setShowScrollButton(!atBottom && !autoScrollEnabled);
     };
@@ -717,6 +723,8 @@ const App: React.FC = () => {
           activeTabId={activeTabId}
           onTabSelect={handleTabSelect}
           onTabClose={handleTabClose}
+          onTabsReorder={handleTabsReorder}
+          onNewChat={handleNewChat}
           onMenuClick={handleSidebarToggle}
         />
 
@@ -752,6 +760,10 @@ const App: React.FC = () => {
             ) : workspaceView === 'usage' ? (
               <UsageDashboard />
             ) : <>
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 top-0 z-20 h-4 bg-linear-to-b from-black/80 via-black/40 to-transparent"
+            />
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageTrail
                 messages={messages}

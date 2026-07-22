@@ -566,7 +566,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({ trailEntries, primaryActi
                     type="button"
                     data-trail-primary-active={primaryActive ? 'true' : undefined}
                     {...hoverTargetProps(`${entry.messageId}:label`)}
-                    className="w-full min-w-0 overflow-hidden px-1.5 py-0.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:text-text-secondary focus:text-text-secondary focus:outline-none"
+                    className="flex h-[1.35rem] w-full min-w-0 items-center overflow-hidden px-1.5 text-left font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:text-text-secondary focus:text-text-secondary focus:outline-none"
                     onClick={() => onScrollToMessage(entry.messageId)}
                   >
                     <span className="block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">

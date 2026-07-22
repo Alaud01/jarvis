@@ -18,7 +18,7 @@ import {
   serializeConversationMetadata,
   serializeFolder,
 } from '../utils/conversation';
-import { isWorkspaceTabId } from '../utils/workspaceTabs';
+import { isWorkspaceTabId } from '../../shared/workspaceTabs';
 
 export interface UseConversationsResult {
   conversations: Conversation[];
