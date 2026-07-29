@@ -11,6 +11,7 @@ import type {
   UpdateVocabularyCandidateInput,
 } from '../shared/dictionary';
 import type { UsageDashboardData, UsageDashboardQuery } from '../shared/usage';
+import type { WorkspaceView } from '../shared/workspaceTabs';
 
 export interface Message {
   id: string;
@@ -169,6 +170,10 @@ declare global {
       storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
       storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
+      storeLoadWorkspaceView: () => Promise<WorkspaceView>;
+      storeSaveWorkspaceView: (view: WorkspaceView) => Promise<{ success: boolean }>;
+      storeLoadScrollPositions: () => Promise<Record<string, number>>;
+      storeSaveScrollPositions: (positions: Record<string, number>) => Promise<{ success: boolean }>;
       storeLoadConversationDrafts: () => Promise<SerializedConversationDrafts>;
       storeSaveConversationDrafts: (drafts: SerializedConversationDrafts) => Promise<{ success: boolean }>;
       dictionaryList: () => Promise<PersonalDictionaryState>;

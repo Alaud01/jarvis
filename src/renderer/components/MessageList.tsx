@@ -5,17 +5,20 @@ import TypingIndicator from './TypingIndicator';
 import NewChatEmptyState from './NewChatEmptyState';
 import type { SearchSource, SearchSourceGroup } from '../../shared/search';
 import type { FileAttachment } from '../../shared/attachments';
-import type { Message } from '../types';
+import type { Message, PendingVoiceTranscript } from '../types';
 
 interface MessageListProps {
   messages: Message[];
+  conversationId?: string | null;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   isLoading?: boolean;
   emptyStateRefreshKey?: number;
   conversationSearchTrigger?: number;
   editingMessageId?: string | null;
+  voiceTranscript?: PendingVoiceTranscript | null;
   onEditMessage?: (messageId: string) => void;
   onCancelEdit?: () => void;
+  onVoiceTextUsed?: () => void;
   onResubmitMessage?: (messageId: string, newText: string) => void;
   onRegenerateResponse?: (messageId: string) => void;
 }
@@ -626,11 +629,13 @@ interface MessageRowProps {
   copiedId: string | null;
   isLoading: boolean;
   searchQuery: string;
+  voiceTranscript: PendingVoiceTranscript | null;
   setMessageRef: (messageId: string, element: HTMLDivElement | null) => void;
   setEditText: (text: string) => void;
   onCopy: (messageId: string, text: string) => void;
   onStartEdit: (messageId: string, text: string) => void;
   onCancelEdit: () => void;
+  onVoiceTextUsed?: () => void;
   onResubmit: (messageId: string) => void;
   onRegenerate: (messageId: string) => void;
   onAutoScrollCancel: () => void;
@@ -644,11 +649,13 @@ const MessageRow = React.memo(({
   copiedId,
   isLoading,
   searchQuery,
+  voiceTranscript,
   setMessageRef,
   setEditText,
   onCopy,
   onStartEdit,
   onCancelEdit,
+  onVoiceTextUsed,
   onResubmit,
   onRegenerate,
   onAutoScrollCancel,
@@ -656,6 +663,7 @@ const MessageRow = React.memo(({
 }: MessageRowProps) => {
   const renderItems = useMemo(() => getCachedMessageRenderItems(message), [message]);
   const editTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastHandledVoiceIdRef = useRef<string | null>(null);
 
   const resizeEditTextarea = useCallback(() => {
     const textarea = editTextareaRef.current;
@@ -679,6 +687,34 @@ const MessageRow = React.memo(({
     window.addEventListener('resize', resizeEditTextarea);
     return () => window.removeEventListener('resize', resizeEditTextarea);
   }, [isEditing, resizeEditTextarea]);
+
+  useEffect(() => {
+    if (!isEditing || !voiceTranscript) return;
+    if (lastHandledVoiceIdRef.current === voiceTranscript.id) return;
+
+    lastHandledVoiceIdRef.current = voiceTranscript.id;
+    const dictatedText = voiceTranscript.text;
+    if (!dictatedText.trim()) {
+      onVoiceTextUsed?.();
+      return;
+    }
+
+    const textarea = editTextareaRef.current;
+    const selectionStart = textarea?.selectionStart ?? editText.length;
+    const selectionEnd = textarea?.selectionEnd ?? selectionStart;
+    const nextEditText = `${editText.slice(0, selectionStart)}${dictatedText}${editText.slice(selectionEnd)}`;
+    const nextCursorPosition = selectionStart + dictatedText.length;
+
+    setEditText(nextEditText);
+    onVoiceTextUsed?.();
+
+    window.requestAnimationFrame(() => {
+      const currentTextarea = editTextareaRef.current;
+      if (!currentTextarea) return;
+      currentTextarea.focus({ preventScroll: true });
+      currentTextarea.setSelectionRange(nextCursorPosition, nextCursorPosition);
+    });
+  }, [editText, isEditing, onVoiceTextUsed, setEditText, voiceTranscript]);
 
   const actionsDisabled = Boolean(message.isStreaming || isLoading);
 
@@ -738,7 +774,7 @@ const MessageRow = React.memo(({
         <div className="flex flex-col gap-3">
           <textarea
             ref={editTextareaRef}
-            className="w-full min-h-[60px] bg-transparent p-3 text-[0.875rem] text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
+            className="w-full min-h-[60px] bg-transparent text-[0.875rem] text-text-primary leading-relaxed resize-none outline-none focus:border-text-primary"
             value={editText}
             onChange={(e) => setEditText(e.target.value)}
             onKeyDown={(e) => {
@@ -916,14 +952,17 @@ const countSearchableMessageMatches = (message: Message, query: string): number 
 );
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(({ 
-  messages, 
+  messages,
+  conversationId = null,
   scrollContainerRef,
   isLoading = false,
   emptyStateRefreshKey,
   conversationSearchTrigger = 0,
   editingMessageId,
+  voiceTranscript = null,
   onEditMessage,
   onCancelEdit,
+  onVoiceTextUsed,
   onResubmitMessage,
   onRegenerateResponse,
 }, ref) => {
@@ -933,6 +972,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const smoothAutoScrollTimeoutRef = useRef<number | null>(null);
   const userScrollIntentDeadlineRef = useRef(0);
   const prevLastMessageIdRef = useRef<string | null>(null);
+  const prevConversationIdRef = useRef<string | null | undefined>(undefined);
   const lastScrollTopRef = useRef(0);
   const messagesColumnRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -1139,6 +1179,14 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     const lastMessage = messages[messages.length - 1];
     if (!lastMessage) {
       prevLastMessageIdRef.current = null;
+      prevConversationIdRef.current = conversationId;
+      return;
+    }
+
+    const conversationChanged = prevConversationIdRef.current !== conversationId;
+    if (conversationChanged) {
+      prevConversationIdRef.current = conversationId;
+      prevLastMessageIdRef.current = lastMessage.id;
       return;
     }
 
@@ -1151,7 +1199,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     ) {
       scrollToBottomNow('auto');
     }
-  }, [messages, scrollToBottomNow]);
+  }, [conversationId, messages, scrollToBottomNow]);
 
   const scrollElementIntoView = useCallback((element: Element, offset: number = 16) => {
     const container = scrollContainerRef.current;
@@ -1504,11 +1552,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
               copiedId={copiedId}
               isLoading={isLoading}
               searchQuery={isSearchOpen ? searchQuery : ''}
+              voiceTranscript={editingMessageId === message.id ? voiceTranscript : null}
               setMessageRef={setMessageRef}
               setEditText={setEditText}
               onCopy={handleCopy}
               onStartEdit={handleStartEdit}
               onCancelEdit={handleCancelEdit}
+              onVoiceTextUsed={onVoiceTextUsed}
               onResubmit={handleResubmit}
               onRegenerate={handleRegenerate}
               onAutoScrollCancel={cancelAutoScroll}

@@ -21,25 +21,10 @@ export type FocusedFieldSnapshot = {
   identifier?: unknown;
 };
 
-const CHAT_APP_IDS = ['slack', 'discord', 'messages', 'whatsapp', 'telegram', 'teams', 'signal'];
-const EMAIL_APP_IDS = ['mail', 'outlook', 'spark', 'airmail'];
-const DOCUMENT_APP_IDS = ['notion', 'word', 'pages', 'obsidian', 'bear', 'notes', 'docs'];
-const CODE_APP_IDS = ['xcode', 'visual-studio-code', 'vscode', 'cursor', 'zed', 'sublime', 'jetbrains'];
-const TERMINAL_APP_IDS = ['terminal', 'iterm', 'warp', 'alacritty', 'kitty'];
-
-function includesAny(value: string, candidates: string[]): boolean {
-  return candidates.some(candidate => value.includes(candidate));
-}
-
-export function classifyVoiceDestination(app: FrontmostApp | null, projectFocused = false): VoiceDestinationKind {
-  if (projectFocused) return 'jarvis';
-  const identity = `${app?.name ?? ''} ${app?.bundleId ?? ''}`.toLowerCase();
-  if (includesAny(identity, TERMINAL_APP_IDS)) return 'terminal';
-  if (includesAny(identity, CODE_APP_IDS)) return 'code';
-  if (includesAny(identity, CHAT_APP_IDS)) return 'chat';
-  if (includesAny(identity, EMAIL_APP_IDS)) return 'email';
-  if (includesAny(identity, DOCUMENT_APP_IDS)) return 'document';
-  return 'generic';
+export function classifyVoiceDestination(_app: FrontmostApp | null, projectFocused = false): VoiceDestinationKind {
+  // Refinement is app-aware via app name/bundleId + focused field. Do not invent
+  // chat/email/code/terminal destination genres from heuristics.
+  return projectFocused ? 'jarvis' : 'generic';
 }
 
 function appContext(app: FrontmostApp | null): VoiceContext['app'] {

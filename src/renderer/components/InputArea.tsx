@@ -317,6 +317,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastComposeFocusKeyRef = useRef<number | null>(null);
   const lastHandledVoiceIdRef = useRef<string | null>(null);
+  const focusAfterVoiceRef = useRef(false);
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
 
   useEffect(() => {
@@ -357,11 +358,32 @@ const InputArea: React.FC<InputAreaProps> = ({
       setAttachments([]);
       setAttachmentError('');
     } else {
+      focusAfterVoiceRef.current = true;
       onChange(nextInput);
     }
 
     onVoiceTextUsed();
   }, [voiceTranscript, onVoiceTextUsed, value, attachments, isLoading, disabled, onSendMessage, onChange]);
+
+  useEffect(() => {
+    if (
+      !focusAfterVoiceRef.current
+      || isLoading
+      || disabled
+      || voiceState === 'processing'
+    ) {
+      return;
+    }
+
+    focusAfterVoiceRef.current = false;
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      const cursorPosition = textarea.value.length;
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(cursorPosition, cursorPosition);
+    });
+  }, [disabled, isLoading, value, voiceState]);
 
   useEffect(() => {
     const textarea = textareaRef.current;

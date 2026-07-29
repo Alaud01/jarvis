@@ -13,14 +13,15 @@ for cold starts, local model failures, and transcript refinement. Optional OpenR
 
 ```bash
 export OPENROUTER_TRANSCRIPTION_MODEL="nvidia/parakeet-tdt-0.6b-v3"
-export OPENROUTER_REFINEMENT_MODEL="inception/mercury-2:nitro"
-export OPENROUTER_REFINEMENT_REASONING_EFFORT="medium"
+export OPENROUTER_REFINEMENT_MODEL="openai/gpt-oss-120b"
+export OPENROUTER_REFINEMENT_REASONING_EFFORT="low"
 export OPENROUTER_REFERER="https://your-site.example"
 export OPENROUTER_TITLE="Jarvis"
 export OPENROUTER_MAX_ATTEMPTS="3"
 export OPENROUTER_RETRY_BASE_DELAY_SECONDS="0.5"
 export OPENROUTER_REFINEMENT_TIMEOUT_SECONDS="12"
-export OPENROUTER_REFINEMENT_MIN_THROUGHPUT="50"
+export OPENROUTER_REFINEMENT_MIN_THROUGHPUT="200"
+export OPENROUTER_REFINEMENT_DISAMBIGUATION_HINT_CHARS="80"
 export VOICE_MAX_TRANSCRIPTION_CHUNK_SECONDS="45"
 ```
 
@@ -94,10 +95,10 @@ Send a WAV file to `/process-flow`:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/process-flow \
-  -F 'context={"destination":"chat","accessibilityStatus":"not_requested"}' \
+  -F 'context={"app":{"name":"Mail","bundleId":"com.apple.mail","pid":123},"accessibilityStatus":"not_requested"}' \
   -F "file=@audio.wav"
 ```
 
-The `context` multipart field is optional. When present, it is a JSON object describing the destination app,
+The `context` multipart field is optional. When present, it is a JSON object describing the focused app,
 bounded nearby focused-field text, active replacement rules, and vocabulary guidance used for app-aware
 refinement. Requests containing only `file` remain supported and use generic refinement.

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Sidebar from './components/Sidebar';
+import HomePage from './components/HomePage';
 import MessageList, { MessageListHandle } from './components/MessageList';
 import InputArea from './components/InputArea';
 import TopNavbar from './components/TopNavbar';
@@ -25,8 +25,14 @@ import {
 } from './utils/conversation';
 import {
   DICTIONARY_TAB_ID,
+  SCROLL_KEY_DICTIONARY,
+  SCROLL_KEY_HOME,
+  SCROLL_KEY_USAGE,
   USAGE_TAB_ID,
   isWorkspaceTabId,
+  resolveLastActiveTabId,
+  scrollKeyForConversation,
+  visibleConversationIdForWorkspace,
   workspaceTabForView,
   workspaceViewForTab,
 } from '../shared/workspaceTabs';
@@ -36,24 +42,23 @@ import { useConversations } from './hooks/useConversations';
 import { useStreaming } from './hooks/useStreaming';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useVoice } from './hooks/useVoice';
+import { usePersistedScrollPosition } from './hooks/usePersistedScrollPosition';
 
 const EMPTY_MESSAGES: Message[] = [];
-const SIDEBAR_AUTO_COLLAPSE_WIDTH = 900;
-
-const isSidebarAutoCollapseWidth = (): boolean => (
-  typeof window !== 'undefined' && window.innerWidth < SIDEBAR_AUTO_COLLAPSE_WIDTH
-);
 
 const App: React.FC = () => {
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [isSidebarAutoCollapsed, setIsSidebarAutoCollapsed] = useState(isSidebarAutoCollapseWidth);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat');
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView | null>(null);
   const [conversationSearchTrigger, setConversationSearchTrigger] = useState(0);
 
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  const [showTopFade, setShowTopFade] = useState(false);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
+  const homeScrollContainerRef = useRef<HTMLDivElement>(null);
+  const dictionaryScrollContainerRef = useRef<HTMLDivElement>(null);
+  const usageScrollContainerRef = useRef<HTMLDivElement>(null);
+  const lastActiveTabIdRef = useRef<string | null>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
   const conversationsHook = useConversations();
@@ -64,12 +69,15 @@ const App: React.FC = () => {
     openTabIds,
     conversationDrafts,
     unreadCompleteConversationIds,
+    restoredWorkspaceView,
+    scrollPositions,
     hasHydratedStore,
     setCurrentConversationId,
     setOpenTabIds,
     setConversations,
     setConversationDrafts,
     setUnreadCompleteConversationIds,
+    setScrollPosition,
     ensureConversationLoaded,
     handleComposeChange,
     handleCreateFolder,
@@ -103,13 +111,30 @@ const App: React.FC = () => {
     return () => window.removeEventListener('focus', refreshModelsOnFocus);
   }, [refreshModels]);
 
-  const streaming = useStreaming(conversations, currentConversationId, setConversations, setUnreadCompleteConversationIds);
+  const visibleConversationId = visibleConversationIdForWorkspace(workspaceView, currentConversationId);
+  const streaming = useStreaming(conversations, visibleConversationId, setConversations, setUnreadCompleteConversationIds);
   const {
     registerStreamSession,
     unregisterStreamSession,
     markConversationCompleteUnread,
     handleStopStreaming,
   } = streaming;
+
+  useEffect(() => {
+    if (!visibleConversationId) {
+      return;
+    }
+
+    setUnreadCompleteConversationIds(prev => {
+      if (!prev.has(visibleConversationId)) {
+        return prev;
+      }
+
+      const next = new Set(prev);
+      next.delete(visibleConversationId);
+      return next;
+    });
+  }, [setUnreadCompleteConversationIds, visibleConversationId]);
 
   const handleVoiceTranscriptRef = useRef<(text: string, autoSubmit: boolean, newChat: boolean) => void>(() => {});
 
@@ -134,6 +159,8 @@ const App: React.FC = () => {
 
   const currentConversation = conversations.find(c => c.id === currentConversationId);
   const messages = currentConversation?.messages ?? EMPTY_MESSAGES;
+  const isCurrentConversationLoading = Boolean(currentConversation && !currentConversation.isLoaded);
+  const validConversationIds = useMemo(() => new Set(conversations.map(c => c.id)), [conversations]);
 
   const handleNewChat = useCallback(() => {
     setWorkspaceView('chat');
@@ -141,6 +168,94 @@ const App: React.FC = () => {
     setNewChatTrigger(prev => prev + 1);
   }, [setCurrentConversationId]);
 
+  const handleGoHome = useCallback(() => {
+    const activeTabId = workspaceView === 'dictionary'
+      ? DICTIONARY_TAB_ID
+      : workspaceView === 'usage'
+        ? USAGE_TAB_ID
+        : workspaceView === 'chat'
+          ? currentConversationId
+          : null;
+
+    if (activeTabId) {
+      lastActiveTabIdRef.current = activeTabId;
+    }
+    setWorkspaceView('home');
+  }, [currentConversationId, workspaceView]);
+
+  useEffect(() => {
+    if (!hasHydratedStore || workspaceView !== null) {
+      return;
+    }
+    setWorkspaceView(restoredWorkspaceView);
+  }, [hasHydratedStore, restoredWorkspaceView, workspaceView]);
+
+  useEffect(() => {
+    if (
+      !hasHydratedStore
+      || workspaceView !== 'home'
+      || lastActiveTabIdRef.current !== null
+    ) {
+      return;
+    }
+
+    lastActiveTabIdRef.current = resolveLastActiveTabId({
+      openTabIds,
+      currentConversationId,
+      validConversationIds,
+    });
+  }, [
+    currentConversationId,
+    hasHydratedStore,
+    openTabIds,
+    validConversationIds,
+    workspaceView,
+  ]);
+
+  useEffect(() => {
+    if (!hasHydratedStore || workspaceView === null) {
+      return;
+    }
+    window.assistant.storeSaveWorkspaceView(workspaceView).catch(err => {
+      console.error('Failed to save workspace view:', err);
+    });
+  }, [hasHydratedStore, workspaceView]);
+
+  const getSavedScrollPosition = useCallback((key: string) => scrollPositions[key], [scrollPositions]);
+
+  const chatScrollKey = workspaceView === 'chat'
+    ? scrollKeyForConversation(currentConversationId)
+    : null;
+  const homeScrollKey = workspaceView === 'home' ? SCROLL_KEY_HOME : null;
+  const dictionaryScrollKey = workspaceView === 'dictionary' ? SCROLL_KEY_DICTIONARY : null;
+  const usageScrollKey = workspaceView === 'usage' ? SCROLL_KEY_USAGE : null;
+  const chatSettleRevision = `${currentConversationId ?? 'new'}:${messages.length}:${isCurrentConversationLoading ? 'loading' : 'ready'}`;
+
+  usePersistedScrollPosition(
+    chatScrollContainerRef,
+    chatScrollKey,
+    getSavedScrollPosition,
+    setScrollPosition,
+    chatSettleRevision,
+  );
+  usePersistedScrollPosition(
+    homeScrollContainerRef,
+    homeScrollKey,
+    getSavedScrollPosition,
+    setScrollPosition,
+  );
+  usePersistedScrollPosition(
+    dictionaryScrollContainerRef,
+    dictionaryScrollKey,
+    getSavedScrollPosition,
+    setScrollPosition,
+  );
+  usePersistedScrollPosition(
+    usageScrollContainerRef,
+    usageScrollKey,
+    getSavedScrollPosition,
+    setScrollPosition,
+  );
   const handleConversationSelect = useCallback((id: string) => {
     setWorkspaceView('chat');
     setCurrentConversationId(id);
@@ -153,7 +268,7 @@ const App: React.FC = () => {
     void ensureConversationLoaded(id);
   }, [ensureConversationLoaded, setCurrentConversationId, setOpenTabIds]);
 
-  const handleWorkspaceOpen = useCallback((view: Exclude<WorkspaceView, 'chat'>) => {
+  const handleWorkspaceOpen = useCallback((view: Exclude<WorkspaceView, 'chat' | 'home'>) => {
     const tabId = workspaceTabForView(view);
     setOpenTabIds(prev => (
       prev.includes(tabId) ? prev : [...prev, tabId]
@@ -168,6 +283,18 @@ const App: React.FC = () => {
     }
     handleConversationSelect(id);
   }, [handleConversationSelect, handleWorkspaceOpen]);
+
+  const handleToggleHome = useCallback(() => {
+    if (workspaceView !== 'home') {
+      handleGoHome();
+      return;
+    }
+
+    const lastActiveTabId = lastActiveTabIdRef.current;
+    if (lastActiveTabId && openTabIds.includes(lastActiveTabId)) {
+      handleTabSelect(lastActiveTabId);
+    }
+  }, [handleGoHome, handleTabSelect, openTabIds, workspaceView]);
 
   const handleTabsReorder = useCallback((reorderedTabIds: string[]) => {
     setOpenTabIds(prev => {
@@ -196,9 +323,12 @@ const App: React.FC = () => {
           const fallbackTabId = newTabs[newTabs.length - 1];
           if (fallbackTabId && isWorkspaceTabId(fallbackTabId)) {
             setWorkspaceView(workspaceViewForTab(fallbackTabId));
-          } else {
-            setCurrentConversationId(fallbackTabId ?? null);
+          } else if (fallbackTabId) {
+            setCurrentConversationId(fallbackTabId);
             setWorkspaceView('chat');
+          } else {
+            setCurrentConversationId(null);
+            setWorkspaceView('home');
           }
         }
         return newTabs;
@@ -218,7 +348,7 @@ const App: React.FC = () => {
           setWorkspaceView('chat');
         } else {
           setCurrentConversationId(null);
-          setWorkspaceView('chat');
+          setWorkspaceView('home');
         }
       }
       return newTabs;
@@ -579,46 +709,32 @@ const App: React.FC = () => {
     }
   }, [currentConversationId, newChatTrigger, handleSendMessage, voiceHook.pendingJarvisMessageRef]);
 
-  useEffect(() => {
-    const updateSidebarLayout = () => {
-      const shouldCollapse = isSidebarAutoCollapseWidth();
-      setIsSidebarAutoCollapsed(shouldCollapse);
-      if (shouldCollapse) {
-        setSidebarOpen(false);
-      }
-    };
-
-    updateSidebarLayout();
-    window.addEventListener('resize', updateSidebarLayout);
-    return () => window.removeEventListener('resize', updateSidebarLayout);
-  }, []);
-
-  const handleSidebarToggle = useCallback(() => {
-    if (isSidebarAutoCollapsed) {
-      setSidebarOpen(false);
-      return;
-    }
-
-    setSidebarOpen(prev => !prev);
-  }, [isSidebarAutoCollapsed]);
+  const openTabShortcutIds = useMemo(
+    () => openTabIds.filter(id => validConversationIds.has(id) || isWorkspaceTabId(id)),
+    [openTabIds, validConversationIds],
+  );
 
   useKeyboardShortcuts({
     onSearch: () => setConversationSearchTrigger(trigger => trigger + 1),
     onNewChat: handleNewChat,
-    onToggleSidebar: handleSidebarToggle,
+    onToggleSidebar: handleToggleHome,
     onDeleteCurrentConversation: () => {
       if (currentConversationId) {
         handleDeleteConversation(currentConversationId);
       }
     },
-    workspaceView,
+    tabIds: openTabShortcutIds,
+    onTabSelect: handleTabSelect,
+    workspaceView: workspaceView ?? 'home',
     hasCurrentConversation: Boolean(currentConversationId),
   });
 
   useEffect(() => {
     const container = chatScrollContainerRef.current;
 
-    const updateScrollButton = () => {
+    const updateChatScrollState = () => {
+      setShowTopFade(Boolean(container && container.scrollTop > 1));
+
       const isStreaming = messages.some(m => m.isStreaming);
       if (!isStreaming || !container) {
         setShowScrollButton(false);
@@ -630,23 +746,25 @@ const App: React.FC = () => {
       setShowScrollButton(!atBottom && !autoScrollEnabled);
     };
 
-    updateScrollButton();
-    const animationFrameId = requestAnimationFrame(updateScrollButton);
+    updateChatScrollState();
+    const animationFrameId = requestAnimationFrame(updateChatScrollState);
 
-    container?.addEventListener('scroll', updateScrollButton, { passive: true });
-    window.addEventListener('resize', updateScrollButton);
+    container?.addEventListener('scroll', updateChatScrollState, { passive: true });
+    window.addEventListener('resize', updateChatScrollState);
 
     return () => {
       cancelAnimationFrame(animationFrameId);
-      container?.removeEventListener('scroll', updateScrollButton);
-      window.removeEventListener('resize', updateScrollButton);
+      container?.removeEventListener('scroll', updateChatScrollState);
+      window.removeEventListener('resize', updateChatScrollState);
     };
-  }, [messages]);
-
-  const validConversationIds = useMemo(() => new Set(conversations.map(c => c.id)), [conversations]);
+  }, [currentConversationId, messages, workspaceView]);
 
   useEffect(() => {
-    if (!hasHydratedStore) return;
+    if (!hasHydratedStore || workspaceView === null) return;
+
+    if (workspaceView === 'home') {
+      return;
+    }
 
     const currentActiveTabId = workspaceView === 'dictionary'
       ? DICTIONARY_TAB_ID
@@ -667,9 +785,7 @@ const App: React.FC = () => {
       .find(id => validConversationIds.has(id) || isWorkspaceTabId(id));
 
     if (!fallbackTabId) {
-      if (workspaceView !== 'chat') {
-        setWorkspaceView('chat');
-      }
+      setWorkspaceView('home');
       return;
     }
 
@@ -697,22 +813,21 @@ const App: React.FC = () => {
         id,
         title: convo ? convo.title : 'New Chat',
         closable: true,
+        isStreaming: Boolean(convo?.messages.some(message => message.isStreaming)),
+        hasUnreadComplete: unreadCompleteConversationIds.has(id),
       };
     });
   const activeTabId = workspaceView === 'dictionary'
     ? DICTIONARY_TAB_ID
     : workspaceView === 'usage'
       ? USAGE_TAB_ID
-      : currentConversationId;
+      : workspaceView === 'home'
+        ? null
+        : currentConversationId;
 
-  const activeConversation = currentConversationId && validConversationIds.has(currentConversationId)
-    ? conversations.find(c => c.id === currentConversationId) ?? null
-    : null;
-  const isCurrentConversationLoading = Boolean(activeConversation && !activeConversation.isLoaded);
   const isCurrentConversationStreaming = messages.some(message => message.isStreaming);
   const composeDraftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
   const composeValue = conversationDrafts[composeDraftKey] ?? '';
-  const isSidebarVisible = sidebarOpen && !isSidebarAutoCollapsed;
 
   return (
     <ThemeProvider>
@@ -725,44 +840,46 @@ const App: React.FC = () => {
           onTabClose={handleTabClose}
           onTabsReorder={handleTabsReorder}
           onNewChat={handleNewChat}
-          onMenuClick={handleSidebarToggle}
+          onMenuClick={handleGoHome}
+          isHomeActive={workspaceView === 'home'}
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 bg-bg-primary">
-          <Sidebar
-            isOpen={isSidebarVisible}
-            onClose={() => setSidebarOpen(false)}
-            conversations={conversations.map(c => ({
-              id: c.id,
-              title: c.title,
-              timestamp: c.timestamp,
-              folderId: c.folderId,
-              isStreaming: c.messages.some(message => message.isStreaming),
-              hasUnreadComplete: unreadCompleteConversationIds.has(c.id),
-            }))}
-            folders={folders}
-            currentConversationId={currentConversationId}
-            onConversationSelect={handleConversationSelect}
-            onConversationDelete={handleDeleteConversation}
-            onNewChat={handleNewChat}
-            onCreateFolder={handleCreateFolder}
-            onRenameFolder={handleRenameFolder}
-            onDeleteFolder={handleDeleteFolder}
-            onMoveConversation={handleMoveConversation}
-            activeWorkspace={workspaceView}
-            onDictionaryOpen={() => handleWorkspaceOpen('dictionary')}
-            onUsageOpen={() => handleWorkspaceOpen('usage')}
-          />
-
           <main className="relative flex min-w-[360px] flex-1 flex-col bg-bg-primary">
-            {workspaceView === 'dictionary' ? (
-              <PersonalDictionary />
+            {workspaceView === null ? null : workspaceView === 'home' ? (
+              <HomePage
+                conversations={conversations.map(c => ({
+                  id: c.id,
+                  title: c.title,
+                  timestamp: c.timestamp,
+                  folderId: c.folderId,
+                  isStreaming: c.messages.some(message => message.isStreaming),
+                  hasUnreadComplete: unreadCompleteConversationIds.has(c.id),
+                }))}
+                folders={folders}
+                currentConversationId={currentConversationId}
+                onConversationSelect={handleConversationSelect}
+                onConversationDelete={handleDeleteConversation}
+                onNewChat={handleNewChat}
+                onCreateFolder={handleCreateFolder}
+                onRenameFolder={handleRenameFolder}
+                onDeleteFolder={handleDeleteFolder}
+                onMoveConversation={handleMoveConversation}
+                activeWorkspace={workspaceView}
+                onDictionaryOpen={() => handleWorkspaceOpen('dictionary')}
+                onUsageOpen={() => handleWorkspaceOpen('usage')}
+                scrollContainerRef={homeScrollContainerRef}
+              />
+            ) : workspaceView === 'dictionary' ? (
+              <PersonalDictionary scrollContainerRef={dictionaryScrollContainerRef} />
             ) : workspaceView === 'usage' ? (
-              <UsageDashboard />
+              <UsageDashboard scrollContainerRef={usageScrollContainerRef} />
             ) : <>
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute inset-x-0 top-0 z-20 h-4 bg-linear-to-b from-black/80 via-black/40 to-transparent"
+              className={`pointer-events-none absolute inset-x-0 top-0 z-20 h-8 bg-linear-to-b from-bg-primary via-bg-primary/50 to-transparent transition-opacity duration-150 ease-out ${
+                showTopFade ? 'opacity-100' : 'opacity-0'
+              }`}
             />
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageTrail
@@ -772,14 +889,17 @@ const App: React.FC = () => {
               />
               <MessageList
                 ref={messageListRef}
+                conversationId={currentConversationId}
                 scrollContainerRef={chatScrollContainerRef}
                 messages={messages}
                 isLoading={isCurrentConversationStreaming}
                 emptyStateRefreshKey={newChatTrigger}
                 conversationSearchTrigger={conversationSearchTrigger}
                 editingMessageId={editingMessageId}
+                voiceTranscript={editingMessageId ? voiceHook.voiceTranscript : null}
                 onEditMessage={handleEditMessage}
                 onCancelEdit={handleCancelEdit}
+                onVoiceTextUsed={voiceHook.handleVoiceTextUsed}
                 onResubmitMessage={handleResubmitMessage}
                 onRegenerateResponse={handleRegenerateResponse}
               />
@@ -794,7 +914,7 @@ const App: React.FC = () => {
               onChange={handleComposeChange}
               isLoading={isCurrentConversationStreaming}
               disabled={!selectedModel || isCurrentConversationLoading}
-              voiceTranscript={voiceHook.voiceTranscript as PendingVoiceTranscript | null}
+              voiceTranscript={editingMessageId ? null : voiceHook.voiceTranscript as PendingVoiceTranscript | null}
               onVoiceTextUsed={voiceHook.handleVoiceTextUsed}
               voiceShortcut={voiceHook.voiceShortcut}
               models={models}

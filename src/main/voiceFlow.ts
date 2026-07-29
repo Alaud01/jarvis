@@ -182,10 +182,17 @@ async function stopAndProcess(): Promise<void> {
   voiceFlowState = 'processing';
   sendStateToRenderer('processing');
   showOverlay('processing');
+  const flowStartedAt = performance.now();
+  const timings: Record<string, number> = {};
 
   try {
+    let stepStartedAt = performance.now();
     await preRecordingCapturePromise;
+    timings.contextCaptureMs = Math.round(performance.now() - stepStartedAt);
+
+    stepStartedAt = performance.now();
     const audioBuffer = await stopRecording();
+    timings.stopRecordingMs = Math.round(performance.now() - stepStartedAt);
     if (audioBuffer.durationMs < 250 || audioBuffer.peak < 0.001) {
       const errorMessage = `Microphone captured silence (${Math.round(audioBuffer.durationMs)}ms, peak ${audioBuffer.peak.toFixed(4)})`;
       console.warn('[VoiceFlow] Microphone capture rejected as silence:', {
@@ -193,13 +200,16 @@ async function stopAndProcess(): Promise<void> {
         byteLength: audioBuffer.byteLength,
         peak: Number(audioBuffer.peak.toFixed(4)),
         rms: Number(audioBuffer.rms.toFixed(4)),
+        timings,
       });
       showOverlay('error', undefined, errorMessage);
       sendErrorToRenderer(errorMessage);
       return;
     }
 
+    stepStartedAt = performance.now();
     const result = await processVoiceFlow(audioBuffer, preRecordingContext);
+    timings.processVoiceFlowMs = Math.round(performance.now() - stepStartedAt);
     const dictationId = randomUUID();
 
     if (result.success && result.text) {
@@ -211,8 +221,13 @@ async function stopAndProcess(): Promise<void> {
       });
 
       showOverlay('complete', result.text);
+      stepStartedAt = performance.now();
       await new Promise(resolve => setTimeout(resolve, 300));
+      timings.completeOverlayDelayMs = Math.round(performance.now() - stepStartedAt);
+
+      stepStartedAt = performance.now();
       const targetApp = preRecordingProjectFocused ? null : await resolveTargetApp();
+      timings.resolveTargetAppMs = Math.round(performance.now() - stepStartedAt);
       const targetIsProjectApp = preRecordingProjectFocused || isProjectApp(targetApp);
       const routeToProjectAppOnly = shouldRouteToProjectAppOnly(result.text);
       const sendToProjectApp = targetIsProjectApp || routeToProjectAppOnly;
@@ -245,14 +260,18 @@ async function stopAndProcess(): Promise<void> {
         const targetBundleId = targetApp?.bundleId?.trim();
         if (targetBundleId) {
           try {
+            stepStartedAt = performance.now();
             await activateApp(targetBundleId);
             await new Promise(resolve => setTimeout(resolve, 100));
+            timings.activateAppMs = Math.round(performance.now() - stepStartedAt);
           } catch (err) {
             console.warn('[VoiceFlow] Could not activate pre-recording app before paste:', err);
           }
         }
 
+        stepStartedAt = performance.now();
         await typeTextInActiveApp(result.text);
+        timings.typeTextMs = Math.round(performance.now() - stepStartedAt);
         if (targetApp) {
           void observePostInsertionCorrection(targetApp, result.text, {
             dictationId,
@@ -294,6 +313,8 @@ async function stopAndProcess(): Promise<void> {
     showOverlay('error', undefined, errorMessage);
     sendErrorToRenderer(errorMessage);
   } finally {
+    timings.totalBeforeHideMs = Math.round(performance.now() - flowStartedAt);
+    console.warn('[VoiceFlow] stopAndProcess timing breakdown:', timings);
     await new Promise(resolve => setTimeout(resolve, 800));
     hideOverlay();
     preRecordingApp = null;

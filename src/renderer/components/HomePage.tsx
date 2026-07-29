@@ -26,9 +26,7 @@ interface Folder {
   timestamp: Date;
 }
 
-interface SidebarProps {
-  isOpen: boolean;
-  onClose: () => void;
+interface HomePageProps {
   conversations: Conversation[];
   folders: Folder[];
   currentConversationId: string | null;
@@ -39,9 +37,10 @@ interface SidebarProps {
   onRenameFolder: (id: string, name: string) => void;
   onDeleteFolder: (id: string) => void;
   onMoveConversation: (conversationId: string, folderId: string | null) => void;
-  activeWorkspace: 'chat' | 'dictionary' | 'usage';
+  activeWorkspace: 'home' | 'chat' | 'dictionary' | 'usage';
   onDictionaryOpen: () => void;
   onUsageOpen: () => void;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 interface ContextMenuState {
@@ -109,12 +108,6 @@ function estimateContextMenuHeight(
 
 function estimateMoveMenuHeight(folderCount: number): number {
   return Math.min(320, Math.max(96, (folderCount + 1) * MENU_ITEM_HEIGHT + 16));
-}
-
-function getShortcutIndex(key: string): number | null {
-  if (key >= '1' && key <= '9') return parseInt(key, 10);
-  if (key === '0') return 10;
-  return null;
 }
 
 function shouldIgnoreSidebarShortcut(e: KeyboardEvent): boolean {
@@ -454,8 +447,7 @@ function RootDropZone({
   );
 }
 
-const Sidebar: React.FC<SidebarProps> = ({
-  isOpen,
+const HomePage: React.FC<HomePageProps> = ({
   conversations,
   folders,
   currentConversationId,
@@ -469,6 +461,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   activeWorkspace,
   onDictionaryOpen,
   onUsageOpen,
+  scrollContainerRef,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [focusedFolderId, setFocusedFolderId] = useState<string | null>(null);
@@ -624,22 +617,6 @@ const Sidebar: React.FC<SidebarProps> = ({
       window.removeEventListener('resize', updateSidebarHighlight);
     };
   }, [updateSidebarHighlight]);
-
-  const rootShortcutTargets = useMemo(() => {
-    const targets: Array<{ type: 'folder' | 'conversation'; id: string }> = [];
-    for (const folder of sortedFolders) {
-      targets.push({ type: 'folder', id: folder.id });
-    }
-    for (const conv of rootConversations) {
-      targets.push({ type: 'conversation', id: conv.id });
-    }
-    return targets.slice(0, 10);
-  }, [sortedFolders, rootConversations]);
-
-  const folderShortcutConversations = useMemo(() => {
-    if (!focusedFolderId) return [];
-    return conversations.filter(c => c.folderId === focusedFolderId).slice(0, 10);
-  }, [focusedFolderId, conversations]);
 
   const handleConversationSelectWithFocus = useCallback((id: string) => {
     const conv = conversations.find(c => c.id === id);
@@ -839,32 +816,6 @@ const Sidebar: React.FC<SidebarProps> = ({
         return;
       }
 
-      const index = getShortcutIndex(e.key);
-      if (!index) {
-        return;
-      }
-
-      e.preventDefault();
-
-      if (focusedFolderId) {
-        const conversation = folderShortcutConversations[index - 1];
-        if (conversation) {
-          handleConversationSelectWithFocus(conversation.id);
-        }
-        return;
-      }
-
-      const target = rootShortcutTargets[index - 1];
-      if (!target) {
-        return;
-      }
-
-      if (target.type === 'folder') {
-        setFocusedFolderId(target.id);
-        setExpandedFolders(prev => new Set(prev).add(target.id));
-      } else {
-        handleConversationSelectWithFocus(target.id);
-      }
     };
 
     window.addEventListener('keydown', handleSidebarShortcut);
@@ -872,9 +823,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [
     editingFolderId,
     focusedFolderId,
-    folderShortcutConversations,
-    handleConversationSelectWithFocus,
-    rootShortcutTargets,
   ]);
 
   const handleMoveToFolder = useCallback((conversationId: string, folderId: string | null) => {
@@ -906,117 +854,119 @@ const Sidebar: React.FC<SidebarProps> = ({
       onDragEnd={handleDragEnd}
       onDragOver={handleDragOver}
     >
-      <aside className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-primary transition-[width,min-width] duration-200 ${isOpen ? 'min-w-64 w-64' : 'w-0 min-w-0 border-r-0'}`}>
-        <div className="flex-1 overflow-y-auto px-2 py-2">
-          <div className="p-2">
-            <button
-              type="button"
-              className="flex items-center justify-center bg-text-primary text-bg-primary px-3 py-2 text-[0.72rem] font-mono uppercase tracking-wide transition-all w-full duration-150 hover:opacity-80"
-              onClick={() => {
-                closeMenus();
-                onNewChat();
-              }}
-              title="New chat (Cmd N)"
-            >
-              New Chat
-            </button>
-          </div>
-          <div ref={chatListRef} className="relative mt-2 flex flex-col">
-            {sidebarHighlight && (
-              <div
-                aria-hidden="true"
-                data-sidebar-highlight
-                className="pointer-events-none absolute z-0 bg-bg-active transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
-                style={{
-                  width: sidebarHighlight.width,
-                  height: sidebarHighlight.height,
-                  transform: `translate3d(${sidebarHighlight.left}px, ${sidebarHighlight.top}px, 0)`,
+      <div className="flex h-full w-full flex-col bg-bg-primary">
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
+          <div className="mx-auto w-full max-w-2xl px-6 py-6">
+            <div className="p-2">
+              <button
+                type="button"
+                className="flex items-center justify-center bg-text-primary text-bg-primary px-3 py-2.5 text-[0.78rem] font-mono uppercase tracking-wide transition-all w-full duration-150 hover:opacity-80"
+                onClick={() => {
+                  closeMenus();
+                  onNewChat();
                 }}
-              />
-            )}
-            <div>
-              <div className="group/label mb-2 flex items-center justify-between px-2">
-                <span className="font-mono text-[0.6rem] uppercase tracking-[2px] text-text-muted">
-                  Folders
-                </span>
-                <button
-                  type="button"
-                  className="rounded p-0.5 transition-colors hover:bg-bg-hover"
-                  onClick={handleCreateFolderRequest}
-                  title="Create a new folder"
-                >
-                  <svg className="h-3 w-3 text-text-tertiary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                  </svg>
-                </button>
-              </div>
-              <div className="flex flex-col">
-                {sortedFolders.length > 0 ? (
-                  sortedFolders.map((folder) => {
-                    const folderConversations = conversations.filter(c => c.folderId === folder.id);
-                    const isExpanded = expandedFolders.has(folder.id);
-                    const containsActiveConversation = folderConversations.some(
-                      conversation => conversation.id === currentConversationId
-                    );
-
-                    return (
-                      <DroppableFolderItem
-                        key={folder.id}
-                        folder={folder}
-                        conversationCount={folderConversations.length}
-                        isExpanded={isExpanded}
-                        containsActiveConversation={containsActiveConversation}
-                        isEditing={editingFolderId === folder.id}
-                        onToggle={() => handleToggleFolder(folder.id)}
-                        onRename={onRenameFolder}
-                        onStartEditing={startEditingFolder}
-                        onStopEditing={stopEditingFolder}
-                        onDelete={onDeleteFolder}
-                        onContextMenu={handleFolderContextMenu}
-                        onHoverChange={setHoveredSidebarItem}
-                        isDragOver={dragOverFolderId === folder.id}
-                      >
-                        {folderConversations.length === 0 ? (
-                          <div className="py-2 pl-1 text-[0.75rem] text-text-tertiary">
-                            Drop chats here or create one from a chat menu.
-                          </div>
-                        ) : (
-                          folderConversations.map((conversation) => (
-                            <DraggableConversationItem
-                              key={conversation.id}
-                              conversation={conversation}
-                              isActive={currentConversationId === conversation.id}
-                              onSelect={handleConversationSelectWithFocus}
-                              onDelete={onConversationDelete}
-                              onContextMenu={handleConversationContextMenu}
-                              onHoverChange={setHoveredSidebarItem}
-                            />
-                          ))
-                        )}
-                      </DroppableFolderItem>
-                    );
-                  })
-                ) : (
-                  <div className="rounded-lg border border-dashed border-border-secondary/50 px-4 py-3 text-[0.75rem] text-text-tertiary text-center">
-                    No folders yet. Click + to create one.
-                  </div>
-                )}
-              </div>
+                title="New chat (Cmd N)"
+              >
+                New Chat
+              </button>
             </div>
-
-            <RootDropZone isDragOver={dragOverRoot} hasConversations={rootConversations.length > 0}>
-              {rootConversations.map((conversation) => (
-                <DraggableConversationItem
-                  key={conversation.id}
-                  conversation={conversation}
-                  isActive={currentConversationId === conversation.id}
-                  onSelect={handleConversationSelectWithFocus}
-                  onDelete={onConversationDelete}
-                  onContextMenu={handleConversationContextMenu}
-                  onHoverChange={setHoveredSidebarItem}
+            <div ref={chatListRef} className="relative mt-2 flex flex-col">
+              {sidebarHighlight && (
+                <div
+                  aria-hidden="true"
+                  data-sidebar-highlight
+                  className="pointer-events-none absolute z-0 bg-bg-active transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
+                  style={{
+                    width: sidebarHighlight.width,
+                    height: sidebarHighlight.height,
+                    transform: `translate3d(${sidebarHighlight.left}px, ${sidebarHighlight.top}px, 0)`,
+                  }}
                 />
-              ))}
-            </RootDropZone>
+              )}
+              <div>
+                <div className="group/label mb-2 flex items-center justify-between px-2">
+                  <span className="font-mono text-[0.6rem] uppercase tracking-[2px] text-text-muted">
+                    Folders
+                  </span>
+                  <button
+                    type="button"
+                    className="rounded p-0.5 transition-colors hover:bg-bg-hover"
+                    onClick={handleCreateFolderRequest}
+                    title="Create a new folder"
+                  >
+                    <svg className="h-3 w-3 text-text-tertiary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="flex flex-col">
+                  {sortedFolders.length > 0 ? (
+                    sortedFolders.map((folder) => {
+                      const folderConversations = conversations.filter(c => c.folderId === folder.id);
+                      const isExpanded = expandedFolders.has(folder.id);
+                      const containsActiveConversation = folderConversations.some(
+                        conversation => conversation.id === currentConversationId
+                      );
+
+                      return (
+                        <DroppableFolderItem
+                          key={folder.id}
+                          folder={folder}
+                          conversationCount={folderConversations.length}
+                          isExpanded={isExpanded}
+                          containsActiveConversation={containsActiveConversation}
+                          isEditing={editingFolderId === folder.id}
+                          onToggle={() => handleToggleFolder(folder.id)}
+                          onRename={onRenameFolder}
+                          onStartEditing={startEditingFolder}
+                          onStopEditing={stopEditingFolder}
+                          onDelete={onDeleteFolder}
+                          onContextMenu={handleFolderContextMenu}
+                          onHoverChange={setHoveredSidebarItem}
+                          isDragOver={dragOverFolderId === folder.id}
+                        >
+                          {folderConversations.length === 0 ? (
+                            <div className="py-2 pl-1 text-[0.75rem] text-text-tertiary">
+                              Drop chats here or create one from a chat menu.
+                            </div>
+                          ) : (
+                            folderConversations.map((conversation) => (
+                              <DraggableConversationItem
+                                key={conversation.id}
+                                conversation={conversation}
+                                isActive={currentConversationId === conversation.id}
+                                onSelect={handleConversationSelectWithFocus}
+                                onDelete={onConversationDelete}
+                                onContextMenu={handleConversationContextMenu}
+                                onHoverChange={setHoveredSidebarItem}
+                              />
+                            ))
+                          )}
+                        </DroppableFolderItem>
+                      );
+                    })
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border-secondary/50 px-4 py-3 text-[0.75rem] text-text-tertiary text-center">
+                      No folders yet. Click + to create one.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <RootDropZone isDragOver={dragOverRoot} hasConversations={rootConversations.length > 0}>
+                {rootConversations.map((conversation) => (
+                  <DraggableConversationItem
+                    key={conversation.id}
+                    conversation={conversation}
+                    isActive={currentConversationId === conversation.id}
+                    onSelect={handleConversationSelectWithFocus}
+                    onDelete={onConversationDelete}
+                    onContextMenu={handleConversationContextMenu}
+                    onHoverChange={setHoveredSidebarItem}
+                  />
+                ))}
+              </RootDropZone>
+            </div>
           </div>
         </div>
 
@@ -1059,7 +1009,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             </button>
           </div>
         </div>
-      </aside>
+      </div>
 
       <DragOverlay>
         {activeConversation ? (
@@ -1201,4 +1151,4 @@ const Sidebar: React.FC<SidebarProps> = ({
   );
 };
 
-export default Sidebar;
+export default HomePage;

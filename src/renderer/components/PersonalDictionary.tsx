@@ -35,7 +35,9 @@ function statusPill(value: string): React.ReactElement {
   );
 }
 
-const PersonalDictionary: React.FC = () => {
+const PersonalDictionary: React.FC<{
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+}> = ({ scrollContainerRef }) => {
   const [state, setState] = useState<PersonalDictionaryState>(EMPTY_STATE);
   const [tab, setTab] = useState<Tab>('vocabulary');
   const [search, setSearch] = useState('');
@@ -176,7 +178,7 @@ const PersonalDictionary: React.FC = () => {
   ];
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-8 py-10">
         <header className="flex items-start justify-between gap-6">
           <div>

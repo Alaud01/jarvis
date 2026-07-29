@@ -18,7 +18,8 @@ import {
   serializeConversationMetadata,
   serializeFolder,
 } from '../utils/conversation';
-import { isWorkspaceTabId } from '../../shared/workspaceTabs';
+import { isWorkspaceTabId, resolveWorkspaceView, workspaceTabForView } from '../../shared/workspaceTabs';
+import type { WorkspaceView } from '../../shared/workspaceTabs';
 
 export interface UseConversationsResult {
   conversations: Conversation[];
@@ -27,6 +28,8 @@ export interface UseConversationsResult {
   openTabIds: string[];
   conversationDrafts: SerializedConversationDrafts;
   unreadCompleteConversationIds: Set<string>;
+  restoredWorkspaceView: WorkspaceView;
+  scrollPositions: Record<string, number>;
   hasHydratedStore: boolean;
   setCurrentConversationId: (id: string | null) => void;
   setOpenTabIds: React.Dispatch<React.SetStateAction<string[]>>;
@@ -34,6 +37,7 @@ export interface UseConversationsResult {
   setFolders: React.Dispatch<React.SetStateAction<Folder[]>>;
   setConversationDrafts: React.Dispatch<React.SetStateAction<SerializedConversationDrafts>>;
   setUnreadCompleteConversationIds: React.Dispatch<React.SetStateAction<Set<string>>>;
+  setScrollPosition: (key: string, top: number) => void;
   ensureConversationLoaded: (id: string) => Promise<void>;
   handleComposeChange: (value: string) => void;
   handleCreateFolder: () => string;
@@ -53,6 +57,8 @@ export function useConversations(): UseConversationsResult {
   const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [conversationDrafts, setConversationDrafts] = useState<SerializedConversationDrafts>({});
   const [unreadCompleteConversationIds, setUnreadCompleteConversationIds] = useState<Set<string>>(() => new Set());
+  const [restoredWorkspaceView, setRestoredWorkspaceView] = useState<WorkspaceView>('home');
+  const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [hasHydratedStore, setHasHydratedStore] = useState(false);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
@@ -62,6 +68,8 @@ export function useConversations(): UseConversationsResult {
   const metadataSaveTimerRef = useRef<number | null>(null);
   const conversationSaveTimersRef = useRef<Map<string, number>>(new Map());
   const draftSaveTimerRef = useRef<number | null>(null);
+  const scrollSaveTimerRef = useRef<number | null>(null);
+  const scrollPositionsRef = useRef<Record<string, number>>({});
 
   useEffect(() => () => {
     if (metadataSaveTimerRef.current !== null) {
@@ -70,6 +78,9 @@ export function useConversations(): UseConversationsResult {
     if (draftSaveTimerRef.current !== null) {
       window.clearTimeout(draftSaveTimerRef.current);
     }
+    if (scrollSaveTimerRef.current !== null) {
+      window.clearTimeout(scrollSaveTimerRef.current);
+    }
     conversationSaveTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
   }, []);
 
@@ -77,17 +88,31 @@ export function useConversations(): UseConversationsResult {
     let isMounted = true;
 
     const loadStoredData = async () => {
-      const [conversationsResult, foldersResult, tabIdsResult, currentConvResult, draftsResult] = await Promise.allSettled([
+      const [
+        conversationsResult,
+        foldersResult,
+        tabIdsResult,
+        currentConvResult,
+        draftsResult,
+        workspaceViewResult,
+        scrollPositionsResult,
+      ] = await Promise.allSettled([
         window.assistant.storeLoadConversationList(),
         window.assistant.storeLoadFolders(),
         window.assistant.storeLoadOpenTabIds(),
         window.assistant.storeLoadCurrentConversationId(),
         window.assistant.storeLoadConversationDrafts(),
+        window.assistant.storeLoadWorkspaceView(),
+        window.assistant.storeLoadScrollPositions(),
       ]);
 
       if (!isMounted) {
         return;
       }
+
+      let nextConversations: Conversation[] = [];
+      let nextOpenTabIds: string[] = [];
+      let nextCurrentConversationId: string | null = null;
 
       if (conversationsResult.status === 'fulfilled') {
         const storedMetadata = conversationsResult.value;
@@ -122,14 +147,21 @@ export function useConversations(): UseConversationsResult {
             savedConversationRevisionsRef.current.set(conversation.id, getConversationRevision(conversation));
           });
 
+          nextConversations = hydratedConversations;
+          nextCurrentConversationId = resolvedCurrentId;
+          nextOpenTabIds = filteredTabs.length > 0 ? filteredTabs : [resolvedCurrentId];
           setConversations(hydratedConversations);
           setCurrentConversationId(resolvedCurrentId);
-          setOpenTabIds(filteredTabs.length > 0 ? filteredTabs : [resolvedCurrentId]);
+          setOpenTabIds(nextOpenTabIds);
         } else {
           savedConversationMetadataRevisionRef.current = getConversationMetadataRevision([]);
+          const storedTabIds = tabIdsResult.status === 'fulfilled' ? tabIdsResult.value : [];
+          nextOpenTabIds = storedTabIds.filter((id: string) => isWorkspaceTabId(id));
+          nextConversations = [];
+          nextCurrentConversationId = null;
           setConversations([]);
           setCurrentConversationId(null);
-          setOpenTabIds([]);
+          setOpenTabIds(nextOpenTabIds);
         }
       } else {
         console.error('Failed to load stored conversations:', conversationsResult.reason);
@@ -145,6 +177,38 @@ export function useConversations(): UseConversationsResult {
         setConversationDrafts(draftsResult.value);
       } else {
         console.error('Failed to load stored conversation drafts:', draftsResult.reason);
+      }
+
+      const validIds = new Set(nextConversations.map(c => c.id));
+      const storedWorkspaceView = workspaceViewResult.status === 'fulfilled'
+        ? workspaceViewResult.value
+        : 'home';
+      if (workspaceViewResult.status === 'rejected') {
+        console.error('Failed to load stored workspace view:', workspaceViewResult.reason);
+      }
+
+      const resolvedWorkspaceView = resolveWorkspaceView({
+        storedView: storedWorkspaceView,
+        openTabIds: nextOpenTabIds,
+        currentConversationId: nextCurrentConversationId,
+        validConversationIds: validIds,
+      });
+
+      if (resolvedWorkspaceView === 'dictionary' || resolvedWorkspaceView === 'usage') {
+        const tabId = workspaceTabForView(resolvedWorkspaceView);
+        if (!nextOpenTabIds.includes(tabId)) {
+          nextOpenTabIds = [...nextOpenTabIds, tabId];
+          setOpenTabIds(nextOpenTabIds);
+        }
+      }
+
+      setRestoredWorkspaceView(resolvedWorkspaceView);
+
+      if (scrollPositionsResult.status === 'fulfilled') {
+        scrollPositionsRef.current = scrollPositionsResult.value;
+        setScrollPositions(scrollPositionsResult.value);
+      } else {
+        console.error('Failed to load stored scroll positions:', scrollPositionsResult.reason);
       }
 
       setHasHydratedStore(true);
@@ -219,7 +283,7 @@ export function useConversations(): UseConversationsResult {
     }
 
     setUnreadCompleteConversationIds(prev => {
-      const next = new Set([...prev].filter(id => validIds.has(id) && id !== currentConversationId));
+      const next = new Set([...prev].filter(id => validIds.has(id)));
       return next.size === prev.size ? prev : next;
     });
   }, [conversations, currentConversationId, hasHydratedStore]);
@@ -478,6 +542,34 @@ export function useConversations(): UseConversationsResult {
     }
   }, []);
 
+  const setScrollPosition = useCallback((key: string, top: number) => {
+    const nextTop = Math.max(0, top);
+    const currentTop = scrollPositionsRef.current[key];
+    if (currentTop === nextTop) {
+      return;
+    }
+
+    const nextPositions = {
+      ...scrollPositionsRef.current,
+      [key]: nextTop,
+    };
+    scrollPositionsRef.current = nextPositions;
+    setScrollPositions(nextPositions);
+
+    if (!hasHydratedStore) {
+      return;
+    }
+
+    if (scrollSaveTimerRef.current !== null) {
+      window.clearTimeout(scrollSaveTimerRef.current);
+    }
+    scrollSaveTimerRef.current = window.setTimeout(() => {
+      window.assistant.storeSaveScrollPositions(scrollPositionsRef.current).catch(err => {
+        console.error('Failed to save scroll positions:', err);
+      });
+    }, SAVE_DEBOUNCE_MS);
+  }, [hasHydratedStore]);
+
   return {
     conversations,
     folders,
@@ -485,6 +577,8 @@ export function useConversations(): UseConversationsResult {
     openTabIds,
     conversationDrafts,
     unreadCompleteConversationIds,
+    restoredWorkspaceView,
+    scrollPositions,
     hasHydratedStore,
     setCurrentConversationId,
     setOpenTabIds,
@@ -492,6 +586,7 @@ export function useConversations(): UseConversationsResult {
     setFolders,
     setConversationDrafts,
     setUnreadCompleteConversationIds,
+    setScrollPosition,
     ensureConversationLoaded,
     handleComposeChange,
     handleCreateFolder,

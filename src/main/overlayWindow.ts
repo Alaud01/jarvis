@@ -71,7 +71,7 @@ function getOverlayThemeColors(): {
 } {
   if (overlayThemeIsDark) {
     return {
-      background: 'rgba(15, 15, 15, 0.86)',
+      background: 'rgb(15, 15, 15)',
       border: 'rgba(255, 255, 255, 0.12)',
       text: 'rgba(255, 255, 255, 0.95)',
       shadow: 'none',
@@ -79,7 +79,7 @@ function getOverlayThemeColors(): {
   }
 
   return {
-    background: 'rgba(255, 255, 255, 0.9)',
+    background: 'rgb(255, 255, 255)',
     border: 'rgba(0, 0, 0, 0.12)',
     text: 'rgba(17, 17, 17, 0.94)',
     shadow: 'none',

@@ -70,7 +70,7 @@ test('classifies sentence rewrites as ineligible for automatic learning', () => 
 test('multipart process-flow upload includes dictionary voice context', async () => {
   const context = {
     app: { name: 'Mail', bundleId: 'com.apple.mail', pid: 42 },
-    destination: 'email',
+    destination: 'generic',
     field: null,
     accessibilityStatus: 'captured',
     dictionary: [{ id: 'rule-1', preferred: 'Jarvis', aliases: ['jar viss'], scope: { kind: 'global' } }],

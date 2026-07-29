@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
-import { isValidOpenTabId } from '../shared/workspaceTabs';
+import { isValidOpenTabId, isWorkspaceView } from '../shared/workspaceTabs';
+import type { WorkspaceView } from '../shared/workspaceTabs';
 import type {
   CorrectionObservation,
   LegacyDictionaryEntry,
@@ -58,6 +59,8 @@ interface StoreSchema {
   selectedProvider: string;
   openTabIds: string[];
   currentConversationId: string | null;
+  workspaceView: WorkspaceView;
+  scrollPositions: Record<string, number>;
   conversationDrafts: Record<string, string>;
   dictionaryEntries: LegacyDictionaryEntry[];
   vocabularyEntries: VocabularyEntry[];
@@ -85,6 +88,8 @@ const store = new Store<StoreSchema>({
     selectedProvider: 'ollama',
     openTabIds: [],
     currentConversationId: null,
+    workspaceView: 'home',
+    scrollPositions: {},
     conversationDrafts: {},
     dictionaryEntries: [],
     vocabularyEntries: [],
@@ -402,6 +407,34 @@ export function loadCurrentConversationId(): string | null {
 
 export function saveCurrentConversationId(id: string | null): void {
   store.set('currentConversationId', id);
+}
+
+export function loadWorkspaceView(): WorkspaceView {
+  const stored = store.get('workspaceView', 'home');
+  return isWorkspaceView(stored) ? stored : 'home';
+}
+
+export function saveWorkspaceView(view: WorkspaceView): void {
+  store.set('workspaceView', view);
+}
+
+export function loadScrollPositions(): Record<string, number> {
+  const stored = store.get('scrollPositions', {});
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+    return {};
+  }
+
+  const positions: Record<string, number> = {};
+  for (const [key, value] of Object.entries(stored)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      positions[key] = value;
+    }
+  }
+  return positions;
+}
+
+export function saveScrollPositions(positions: Record<string, number>): void {
+  store.set('scrollPositions', positions);
 }
 
 export function loadConversationDrafts(): Record<string, string> {

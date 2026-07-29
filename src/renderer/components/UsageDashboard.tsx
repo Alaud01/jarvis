@@ -363,7 +363,9 @@ const EMPTY_DATA: UsageDashboardData = {
   },
 };
 
-const UsageDashboard: React.FC = () => {
+const UsageDashboard: React.FC<{
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+}> = ({ scrollContainerRef }) => {
   const [range, setRange] = useState<UsageRange>('day');
   const [tokenMode, setTokenMode] = useState<UsageTokenMode>('total');
   const [data, setData] = useState<UsageDashboardData>(EMPTY_DATA);
@@ -413,7 +415,7 @@ const UsageDashboard: React.FC = () => {
   const hasCodexUsage = data.models.some((model) => model.startsWith('codex:'));
 
   return (
-    <div className="flex h-full min-h-0 flex-1 overflow-y-auto">
+    <div ref={scrollContainerRef} className="flex h-full min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-8 py-10">
         <header className="flex flex-wrap items-start justify-between gap-6">
           <div>

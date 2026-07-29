@@ -60,15 +60,24 @@ class VoiceContextTests(unittest.TestCase):
         with self.assertRaises(HTTPException):
             main.parse_voice_context(raw_context)
 
-    def test_destination_policies_include_literal_technical_modes(self):
-        self.assertIn("literal technical mode", main.DESTINATION_POLICIES["code"])
-        self.assertIn("literal technical mode", main.DESTINATION_POLICIES["terminal"])
-        self.assertNotEqual(main.DESTINATION_POLICIES["chat"], main.DESTINATION_POLICIES["email"])
+    def test_technical_app_detection_uses_app_identity(self):
+        cursor = main.VoiceContext(
+            app=main.VoiceAppContext(name="Cursor", bundleId="com.todesktop.230313mzl4w4u92", pid=1)
+        )
+        mail = main.VoiceContext(
+            app=main.VoiceAppContext(name="Mail", bundleId="com.apple.mail", pid=2)
+        )
+        self.assertTrue(main.is_technical_app(cursor))
+        self.assertFalse(main.is_technical_app(mail))
+        self.assertEqual(main.refinement_mode_for_context(cursor), "Cursor")
+        self.assertEqual(main.refinement_mode_for_context(mail), "Mail")
 
     def test_technical_prompt_disables_filler_and_style_rewrites(self):
         messages = main.build_refinement_messages(
             "git status no make that git diff",
-            main.VoiceContext(destination="terminal"),
+            main.VoiceContext(
+                app=main.VoiceAppContext(name="Terminal", bundleId="com.apple.Terminal", pid=1)
+            ),
         )
 
         self.assertIn("do not remove fillers or apply stylistic formatting", messages[0]["content"])
@@ -84,7 +93,6 @@ class VoiceContextTests(unittest.TestCase):
 class RefinementTests(unittest.TestCase):
     def test_prompt_requests_explicit_self_corrections_and_context(self):
         context = main.VoiceContext(
-            destination="email",
             app=main.VoiceAppContext(name="Mail", bundleId="com.apple.mail", pid=123),
             field=main.VoiceFieldContext(textBeforeCursor="Hi Sam,"),
             accessibilityStatus="captured",
@@ -93,11 +101,104 @@ class RefinementTests(unittest.TestCase):
         messages = main.build_refinement_messages("Meet at two, actually three.", context)
 
         self.assertIn("'actually'", messages[0]["content"])
+        self.assertIn("'or'", messages[0]["content"])
         self.assertIn("'no, make that'", messages[0]["content"])
         self.assertIn("'scratch that'", messages[0]["content"])
+        self.assertIn("very similar in meaning or wording", messages[0]["content"])
+        self.assertIn("drop the earlier abandoned phrasing", messages[0]["content"])
         payload = json.loads(messages[1]["content"])
-        self.assertEqual(payload["text_before_cursor"], "Hi Sam,")
+        self.assertNotIn("destination", payload)
+        self.assertEqual(payload["app_name"], "Mail")
+        self.assertNotIn("text_before_cursor", payload)
+        self.assertEqual(payload["disambiguation_hints"]["text_before_cursor"], "Hi Sam,")
         self.assertEqual(payload["raw_transcript"], "Meet at two, actually three.")
+        self.assertIn("edit of raw_transcript only", messages[0]["content"])
+        self.assertIn("never copy, quote, continue, summarize, or splice tokens from disambiguation_hints", messages[0]["content"])
+
+    def test_prompt_expects_speech_grammar_and_recognition_errors(self):
+        messages = main.build_refinement_messages(
+            "She go there no she went there",
+            main.VoiceContext(destination="chat"),
+        )
+
+        prompt = messages[0]["content"]
+        self.assertIn("natural speech errors and recognition errors", prompt)
+        self.assertIn("misspellings", prompt)
+        self.assertIn("false starts", prompt)
+        self.assertIn("mid-sentence corrections", prompt)
+        self.assertIn("preserve the transcript rather than guessing", prompt)
+        self.assertIn("do not grammatically rewrite commands or code", prompt)
+        self.assertNotIn("missing words", prompt)
+        self.assertIn("Do not add inferred ideas or missing content", prompt)
+        self.assertIn("Make the smallest local edit", prompt)
+
+    def test_prompt_requires_appropriate_number_normalization(self):
+        messages = main.build_refinement_messages(
+            "version two point one costs twenty five dollars",
+            main.VoiceContext(
+                app=main.VoiceAppContext(name="Terminal", bundleId="com.apple.Terminal", pid=1)
+            ),
+        )
+
+        prompt = messages[0]["content"]
+        self.assertIn("Normalize spoken numbers into digits", prompt)
+        self.assertIn("required speech-to-text correction", prompt)
+        self.assertIn("also applies in technical literal mode", prompt)
+        self.assertIn("'twenty five percent' becomes '25%'", prompt)
+        self.assertIn("'version two point one' becomes 'version 2.1'", prompt)
+        self.assertIn("Record number normalization as a formatting edit", prompt)
+
+    def test_prompt_encourages_line_paragraph_and_list_formatting(self):
+        messages = main.build_refinement_messages(
+            "Tasks new line first update dependencies next item run the tests",
+            main.VoiceContext(
+                app=main.VoiceAppContext(name="Mail", bundleId="com.apple.mail", pid=1)
+            ),
+        )
+
+        prompt = messages[0]["content"]
+        self.assertIn("Infer and apply the speaker's intended document structure proactively", prompt)
+        self.assertIn("The speaker must not need to say formatting commands", prompt)
+        self.assertIn("never says 'bullet point' or 'new line'", prompt)
+        self.assertIn("Preserve and improve clearly intended structure", prompt)
+        self.assertIn("'new line'", prompt)
+        self.assertIn("'new paragraph'", prompt)
+        self.assertIn("'bullet point'", prompt)
+        self.assertIn("optional explicit overrides", prompt)
+        self.assertIn("put one item per line", prompt)
+        self.assertIn("Use a numbered list when order, sequence, or ranking matters", prompt)
+        self.assertIn("otherwise use bullet points", prompt)
+        self.assertIn("Do not turn ordinary continuous prose into a list", prompt)
+        self.assertIn("Record added line breaks, paragraphs, or lists as a formatting edit", prompt)
+
+    def test_technical_prompt_preserves_explicit_layout_cues(self):
+        messages = main.build_refinement_messages(
+            "commands new line git status new line git diff",
+            main.VoiceContext(
+                app=main.VoiceAppContext(name="Terminal", bundleId="com.apple.Terminal", pid=1)
+            ),
+        )
+
+        prompt = messages[0]["content"]
+        self.assertIn("In technical literal mode, preserve explicitly dictated line breaks and infer obvious", prompt)
+        self.assertIn("do not reformat commands or code based only on stylistic preference", prompt)
+
+    def test_prompt_locks_dictionary_and_boosted_vocabulary_terms(self):
+        context = main.VoiceContext(
+            dictionary=[main.VoiceDictionaryEntry(preferred="OpenAI", aliases=["open ai"])],
+            vocabulary=[main.VoiceVocabularyEntry(text="PyTorch", pinned=True)],
+        )
+
+        messages = main.build_refinement_messages("Use OpenAI with PyTorch", context)
+        prompt = messages[0]["content"]
+        payload = json.loads(messages[1]["content"])
+
+        self.assertIn("personal_dictionary preferred values are authoritative locked text", prompt)
+        self.assertIn("Never grammar-correct, normalize, split", prompt)
+        self.assertIn("vocabulary values are boosted recognition terms", prompt)
+        self.assertIn("must never cause an unrelated word to be replaced", prompt)
+        self.assertEqual(payload["personal_dictionary"][0]["preferred"], "OpenAI")
+        self.assertEqual(payload["vocabulary"][0]["text"], "PyTorch")
 
     def test_valid_structured_output_is_parsed(self):
         content = json.dumps(
@@ -135,7 +236,7 @@ class RefinementTests(unittest.TestCase):
         messages = main.build_refinement_messages("Ask Jarvis", context)
         payload = json.loads(messages[1]["content"])
         self.assertEqual(payload["personal_dictionary"][0]["preferred"], "Jarvis")
-        self.assertIn("preserve their spelling and casing", messages[0]["content"])
+        self.assertIn("preserve every occurrence exactly", messages[0]["content"])
 
     def test_dictionary_replacement_preserves_exact_casing_and_boundaries(self):
         entries = [main.VoiceDictionaryEntry(id="rule-openai", preferred="OpenAI", aliases=["open ai"])]
@@ -206,18 +307,27 @@ class RefinementTests(unittest.TestCase):
         self.assertEqual(result.refinement_mode, "rule_fallback")
         self.assertEqual(result.applied_edits, ["self_correction"])
 
-    def test_openrouter_refinement_uses_mercury_nitro_with_medium_reasoning(self):
+    def test_openrouter_refinement_uses_gpt_oss_with_latency_sort_and_throughput_floor(self):
         response = FakeResponse(
             {
                 "choices": [
                     {
                         "message": {
-                            "content": json.dumps(
+                            "content": "",
+                            "tool_calls": [
                                 {
-                                    "text": "Hello, world.",
-                                    "applied_edits": ["punctuation"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": "submit_refinement",
+                                        "arguments": json.dumps(
+                                            {
+                                                "text": "Hello, world.",
+                                                "applied_edits": ["punctuation"],
+                                            }
+                                        ),
+                                    },
                                 }
-                            )
+                            ],
                         }
                     }
                 ]
@@ -232,15 +342,42 @@ class RefinementTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
 
         self.assertEqual(result.text, "Hello, world.")
-        self.assertEqual(payload["model"], "inception/mercury-2:nitro")
-        self.assertEqual(payload["reasoning"], {"effort": "medium"})
+        self.assertEqual(payload["model"], "openai/gpt-oss-120b")
+        self.assertEqual(payload["reasoning"], {"effort": "low"})
         self.assertEqual(payload["provider"]["sort"], "latency")
         self.assertEqual(
             payload["provider"]["preferred_min_throughput"],
             {"p50": main.OPENROUTER_REFINEMENT_MIN_THROUGHPUT},
         )
+        self.assertGreaterEqual(main.OPENROUTER_REFINEMENT_MIN_THROUGHPUT, 200.0)
         self.assertTrue(payload["provider"]["require_parameters"])
-        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["tools"][0]["function"]["name"], "submit_refinement")
+        self.assertEqual(payload["tools"][0]["function"]["parameters"], main.REFINEMENT_OUTPUT_SCHEMA)
+        self.assertNotIn("tool_choice", payload)
+
+    def test_disambiguation_hints_truncate_surrounding_field_text(self):
+        long_before = "A" * 200 + "END"
+        long_after = "START" + "B" * 200
+        context = main.VoiceContext(
+            app=main.VoiceAppContext(name="Cursor", bundleId="com.todesktop.230313mzl4w4u92", pid=1),
+            field=main.VoiceFieldContext(
+                textBeforeCursor=long_before,
+                selectedText="sel" * 40,
+                textAfterCursor=long_after,
+            ),
+        )
+
+        with mock.patch.object(main, "REFINEMENT_DISAMBIGUATION_HINT_CHARS", 80):
+            payload = json.loads(main.build_refinement_messages("hello", context)[1]["content"])
+
+        hints = payload["disambiguation_hints"]
+        self.assertEqual(len(hints["text_before_cursor"]), 80)
+        self.assertTrue(hints["text_before_cursor"].endswith("END"))
+        self.assertEqual(len(hints["text_after_cursor"]), 80)
+        self.assertTrue(hints["text_after_cursor"].startswith("START"))
+        self.assertEqual(len(hints["selected_text"]), 80)
+        self.assertNotIn("text_before_cursor", payload)
 
 
 class PausePreservingChunkTests(unittest.TestCase):

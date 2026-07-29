@@ -18,12 +18,17 @@ import {
   saveOpenTabIds,
   loadCurrentConversationId,
   saveCurrentConversationId,
+  loadWorkspaceView,
+  saveWorkspaceView,
+  loadScrollPositions,
+  saveScrollPositions,
   loadConversationDrafts,
   saveConversationDrafts,
   type SerializedConversation,
   type SerializedConversationMetadata,
   type SerializedFolder,
 } from '../store';
+import type { WorkspaceView } from '../../shared/workspaceTabs';
 import {
   deleteProviderConversationState,
   getAllModels,
@@ -140,6 +145,24 @@ export function registerStoreHandlers(): void {
 
   ipcMain.handle('store:save-current-conversation-id', async (_event, id: string | null) => {
     saveCurrentConversationId(id);
+    return { success: true };
+  });
+
+  ipcMain.handle('store:load-workspace-view', async () => {
+    return loadWorkspaceView();
+  });
+
+  ipcMain.handle('store:save-workspace-view', async (_event, view: WorkspaceView) => {
+    saveWorkspaceView(view);
+    return { success: true };
+  });
+
+  ipcMain.handle('store:load-scroll-positions', async () => {
+    return loadScrollPositions();
+  });
+
+  ipcMain.handle('store:save-scroll-positions', async (_event, positions: Record<string, number>) => {
+    saveScrollPositions(positions);
     return { success: true };
   });
 

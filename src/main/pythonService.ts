@@ -377,10 +377,14 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
   error?: string;
 }> {
   const url = `http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/process-flow`;
+  const startedAt = performance.now();
 
   try {
+    const uploadStartedAt = performance.now();
     const upload = createMultipartUpload(audioBuffer, context);
+    const uploadPrepareMs = Math.round(performance.now() - uploadStartedAt);
 
+    const fetchStartedAt = performance.now();
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -391,7 +395,9 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       duplex: 'half',
       signal: AbortSignal.timeout(60000),
     });
+    const fetchMs = Math.round(performance.now() - fetchStartedAt);
 
+    const parseStartedAt = performance.now();
     const parsed = await parseJsonResponse<{
       text?: string;
       raw_text?: string;
@@ -416,6 +422,17 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       success?: boolean;
       error?: string;
     }>(response, 'process-flow');
+    const parseMs = Math.round(performance.now() - parseStartedAt);
+    const totalMs = Math.round(performance.now() - startedAt);
+
+    console.warn('[PythonService] process-flow timing:', {
+      uploadPrepareMs,
+      fetchMs,
+      parseMs,
+      totalMs,
+      audioBytes: upload.contentLength,
+      success: parsed.ok ? Boolean(parsed.data.success) : false,
+    });
 
     if (!parsed.ok) {
       return { text: '', success: false, error: parsed.error };
@@ -435,7 +452,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       error: data.error,
     };
   } catch (error) {
-    console.error('[PythonService] Error processing voice:', error);
+    console.error('[PythonService] Error processing voice after', Math.round(performance.now() - startedAt), 'ms:', error);
     return {
       text: '',
       success: false,
