@@ -116,6 +116,8 @@ export interface CodexModel {
   displayName: string;
   hidden?: boolean;
   isDefault?: boolean;
+  supportedReasoningEfforts?: Array<{ reasoningEffort: string; description?: string }>;
+  defaultReasoningEffort?: string;
 }
 
 export interface CodexAccountStatus {
@@ -142,6 +144,7 @@ export interface CodexTokenUsageBreakdown {
 export interface RunCodexTurnOptions {
   threadId: string;
   model: string;
+  effort?: string;
   input: CodexUserInput[];
   signal?: AbortSignal;
   onDelta: (delta: string, phase?: CodexMessagePhase) => void;
@@ -188,11 +191,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isValidCodexImageUrl(value: string): boolean {
-  if (/^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) {
-    return true;
-  }
-
+function isSupportedCodexToolImageUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
     return parsed.protocol === 'https:' || parsed.protocol === 'http:';
@@ -208,7 +207,10 @@ export function buildCodexDynamicToolContentItems(
     { type: 'inputText', text: result.content },
   ];
   for (const imageUrl of result.imageUrls ?? []) {
-    if (isValidCodexImageUrl(imageUrl)) {
+    // The ChatGPT-account Codex backend rejects data: URLs in dynamic-tool
+    // outputs even though the public Responses API accepts them as user input.
+    // Keep the text result usable and only forward remotely fetchable images.
+    if (isSupportedCodexToolImageUrl(imageUrl)) {
       contentItems.push({ type: 'inputImage', imageUrl });
     }
   }
@@ -904,6 +906,19 @@ export class CodexAppServerClient {
         displayName: typeof rawModel.displayName === 'string' ? rawModel.displayName : rawModel.model,
         hidden: rawModel.hidden === true,
         isDefault: rawModel.isDefault === true,
+        supportedReasoningEfforts: Array.isArray(rawModel.supportedReasoningEfforts)
+          ? rawModel.supportedReasoningEfforts.flatMap(rawEffort => (
+            isRecord(rawEffort) && typeof rawEffort.reasoningEffort === 'string'
+              ? [{
+                  reasoningEffort: rawEffort.reasoningEffort,
+                  ...(typeof rawEffort.description === 'string' ? { description: rawEffort.description } : {}),
+                }]
+              : []
+          ))
+          : undefined,
+        defaultReasoningEffort: typeof rawModel.defaultReasoningEffort === 'string'
+          ? rawModel.defaultReasoningEffort
+          : undefined,
       }];
     });
   }
@@ -1065,6 +1080,7 @@ export class CodexAppServerClient {
         approvalPolicy: 'never',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
         model: options.model,
+        effort: options.effort,
       });
       if (!isRecord(response) || !isRecord(response.turn) || typeof response.turn.id !== 'string') {
         throw new Error('Codex did not return a turn id.');

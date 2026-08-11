@@ -38,6 +38,7 @@ import {
 } from '../shared/workspaceTabs';
 import type { WorkspaceView } from '../shared/workspaceTabs';
 import { useModels } from './hooks/useModels';
+import { useReasoningEffort } from './hooks/useReasoningEffort';
 import { useConversations } from './hooks/useConversations';
 import { useStreaming } from './hooks/useStreaming';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -45,6 +46,7 @@ import { useVoice } from './hooks/useVoice';
 import { usePersistedScrollPosition } from './hooks/usePersistedScrollPosition';
 
 const EMPTY_MESSAGES: Message[] = [];
+const TOP_FADE_SCROLL_DISTANCE = 32;
 
 const App: React.FC = () => {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -53,7 +55,7 @@ const App: React.FC = () => {
 
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const [showTopFade, setShowTopFade] = useState(false);
+  const [topFadeOpacity, setTopFadeOpacity] = useState(0);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
   const homeScrollContainerRef = useRef<HTMLDivElement>(null);
   const dictionaryScrollContainerRef = useRef<HTMLDivElement>(null);
@@ -70,13 +72,13 @@ const App: React.FC = () => {
     conversationDrafts,
     unreadCompleteConversationIds,
     restoredWorkspaceView,
-    scrollPositions,
     hasHydratedStore,
     setCurrentConversationId,
     setOpenTabIds,
     setConversations,
     setConversationDrafts,
     setUnreadCompleteConversationIds,
+    getScrollPosition,
     setScrollPosition,
     ensureConversationLoaded,
     handleComposeChange,
@@ -96,20 +98,16 @@ const App: React.FC = () => {
     setSelectedModel,
     refreshModels,
   } = modelsHook;
+  const { selectedReasoningEffort, setSelectedReasoningEffort } = useReasoningEffort(
+    models,
+    selectedModel,
+    hasHydratedStore,
+  );
 
   useEffect(() => {
-    return window.assistant.onModelsRefresh(() => {
-      void refreshModels();
-    });
-  }, [refreshModels]);
-
-  useEffect(() => {
-    const refreshModelsOnFocus = () => {
-      void refreshModels();
-    };
-    window.addEventListener('focus', refreshModelsOnFocus);
-    return () => window.removeEventListener('focus', refreshModelsOnFocus);
-  }, [refreshModels]);
+    if (newChatTrigger === 0) return;
+    void refreshModels();
+  }, [newChatTrigger, refreshModels]);
 
   const visibleConversationId = visibleConversationIdForWorkspace(workspaceView, currentConversationId);
   const streaming = useStreaming(conversations, visibleConversationId, setConversations, setUnreadCompleteConversationIds);
@@ -221,8 +219,6 @@ const App: React.FC = () => {
     });
   }, [hasHydratedStore, workspaceView]);
 
-  const getSavedScrollPosition = useCallback((key: string) => scrollPositions[key], [scrollPositions]);
-
   const chatScrollKey = workspaceView === 'chat'
     ? scrollKeyForConversation(currentConversationId)
     : null;
@@ -234,26 +230,26 @@ const App: React.FC = () => {
   usePersistedScrollPosition(
     chatScrollContainerRef,
     chatScrollKey,
-    getSavedScrollPosition,
+    getScrollPosition,
     setScrollPosition,
     chatSettleRevision,
   );
   usePersistedScrollPosition(
     homeScrollContainerRef,
     homeScrollKey,
-    getSavedScrollPosition,
+    getScrollPosition,
     setScrollPosition,
   );
   usePersistedScrollPosition(
     dictionaryScrollContainerRef,
     dictionaryScrollKey,
-    getSavedScrollPosition,
+    getScrollPosition,
     setScrollPosition,
   );
   usePersistedScrollPosition(
     usageScrollContainerRef,
     usageScrollKey,
-    getSavedScrollPosition,
+    getScrollPosition,
     setScrollPosition,
   );
   const handleConversationSelect = useCallback((id: string) => {
@@ -455,6 +451,7 @@ const App: React.FC = () => {
         assistantMessageId,
         model: selectedModel!,
         provider: selectedProvider,
+        reasoningEffort: selectedReasoningEffort ?? undefined,
         messages: conversationMessages,
       });
     } catch (error) {
@@ -480,7 +477,7 @@ const App: React.FC = () => {
       markConversationCompleteUnread(conversation.id);
       unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession, setConversations]);
+  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, selectedReasoningEffort, conversations, registerStreamSession, unregisterStreamSession, setConversations]);
 
   const handleRegenerateResponse = useCallback(async (messageId: string) => {
     if (!selectedModel) {
@@ -537,6 +534,7 @@ const App: React.FC = () => {
         assistantMessageId,
         model: selectedModel!,
         provider: selectedProvider,
+        reasoningEffort: selectedReasoningEffort ?? undefined,
         messages: conversationMessages,
       });
     } catch (error) {
@@ -562,7 +560,7 @@ const App: React.FC = () => {
       markConversationCompleteUnread(conversation.id);
       unregisterStreamSession(assistantMessageId);
     }
-  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, conversations, registerStreamSession, unregisterStreamSession, setConversations]);
+  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, selectedReasoningEffort, conversations, registerStreamSession, unregisterStreamSession, setConversations]);
 
   const clearConversationDraftForSend = useCallback((draftKey: string) => {
     setConversationDrafts(prev => {
@@ -674,6 +672,7 @@ const App: React.FC = () => {
         assistantMessageId,
         model: selectedModel!,
         provider: selectedProvider,
+        reasoningEffort: selectedReasoningEffort ?? undefined,
         messages: conversationMessages,
       });
     } catch (error) {
@@ -699,7 +698,7 @@ const App: React.FC = () => {
       markConversationCompleteUnread(conversationId!);
       unregisterStreamSession(assistantMessageId);
     }
-  }, [clearConversationDraftForSend, currentConversation, currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, messages, registerStreamSession, unregisterStreamSession, setConversations, setCurrentConversationId, setOpenTabIds]);
+  }, [clearConversationDraftForSend, currentConversation, currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, selectedReasoningEffort, messages, registerStreamSession, unregisterStreamSession, setConversations, setCurrentConversationId, setOpenTabIds]);
 
   useEffect(() => {
     if (currentConversationId === null && voiceHook.pendingJarvisMessageRef.current) {
@@ -733,7 +732,11 @@ const App: React.FC = () => {
     const container = chatScrollContainerRef.current;
 
     const updateChatScrollState = () => {
-      setShowTopFade(Boolean(container && container.scrollTop > 1));
+      setTopFadeOpacity(
+        container
+          ? Math.min(Math.max(container.scrollTop / TOP_FADE_SCROLL_DISTANCE, 0), 1)
+          : 0
+      );
 
       const isStreaming = messages.some(m => m.isStreaming);
       if (!isStreaming || !container) {
@@ -877,12 +880,12 @@ const App: React.FC = () => {
             ) : <>
             <div
               aria-hidden="true"
-              className={`pointer-events-none absolute inset-x-0 top-0 z-20 h-8 bg-linear-to-b from-bg-primary via-bg-primary/50 to-transparent transition-opacity duration-150 ease-out ${
-                showTopFade ? 'opacity-100' : 'opacity-0'
-              }`}
+              className="pointer-events-none absolute inset-x-0 top-0 z-20 h-8 bg-linear-to-b from-bg-primary via-bg-primary/50 to-transparent"
+              style={{ opacity: topFadeOpacity }}
             />
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageTrail
+                conversationId={currentConversationId}
                 messages={messages}
                 scrollContainerRef={chatScrollContainerRef}
                 onScrollToMessage={handleScrollToMessage}
@@ -922,6 +925,8 @@ const App: React.FC = () => {
               onModelSelect={handleModelSelect}
               isLoadingModels={isLoadingModels}
               onRefreshModels={refreshModels}
+              selectedReasoningEffort={selectedReasoningEffort}
+              onReasoningEffortSelect={setSelectedReasoningEffort}
               composeFocusKey={newChatTrigger}
             />
             </>}

@@ -253,6 +253,12 @@ function setStatus(state: NotionConnectionState, message?: string): void {
     'notion_create_page',
     'notion_append_blocks',
     'notion_update_page_properties',
+    'notion_update_page_content',
+    'notion_create_database',
+    'notion_update_data_source',
+    'notion_create_view',
+    'notion_update_view',
+    'notion_move_pages',
   ];
   status = {
     state,
@@ -394,8 +400,8 @@ export function getNotionPromptStatusLine(): string {
   if (status.state === 'connected') {
     const unavailable = status.unavailableCoreCapabilities;
     return unavailable.length > 0
-      ? `Notion: connected; unavailable: ${unavailable.join(', ')}. Use only the available notion_* tools and clarify ambiguous targets.`
-      : 'Notion: connected. Use only the available notion_* tools and clarify ambiguous targets.';
+      ? `Notion: connected; unavailable: ${unavailable.join(', ')}. Use only the available notion_* tools and clarify ambiguous targets. Prefer database, data-source, and view tools over emulating databases with page markdown or Browser Control.`
+      : 'Notion: connected. Use only the available notion_* tools and clarify ambiguous targets. Prefer database, data-source, and view tools over emulating databases with page markdown or Browser Control.';
   }
   return 'Notion: disconnected. Ask the user to use Notion > Connect before Notion work.';
 }

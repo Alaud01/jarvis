@@ -12,15 +12,78 @@ import { debugLog } from '../logger';
 
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_TITLE = 'Jarvis';
+const ALL_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const LEGACY_XAI_REASONING_EFFORTS = ['low', 'medium', 'high'];
+
+interface OpenRouterReasoningCapabilities {
+  supported_efforts?: string[] | null;
+  default_effort?: string | null;
+  default_enabled?: boolean;
+  mandatory?: boolean;
+  supports_max_tokens?: boolean;
+}
 
 interface OpenRouterModel {
   id: string;
   name?: string;
   context_length?: number;
+  reasoning?: OpenRouterReasoningCapabilities;
   architecture?: {
     modality?: string;
     input_modalities?: string[];
     output_modalities?: string[];
+  };
+}
+
+export function getOpenRouterReasoningSettings(
+  model: Pick<OpenRouterModel, 'id' | 'reasoning'>,
+): Pick<ModelInfo, 'reasoningEfforts' | 'defaultReasoningEffort'> {
+  const capabilities = model.reasoning;
+  if (!capabilities) {
+    // Older OpenRouter catalog responses did not include structured reasoning
+    // metadata for xAI. Preserve the behavior Jarvis already had for those rows.
+    return model.id.toLowerCase().startsWith('x-ai/')
+      ? {
+          reasoningEfforts: LEGACY_XAI_REASONING_EFFORTS.map(value => ({ value })),
+          defaultReasoningEffort: 'high',
+        }
+      : {};
+  }
+
+  if (capabilities.supported_efforts === undefined) {
+    return {};
+  }
+
+  const catalogEfforts = capabilities.supported_efforts === null
+    ? ALL_REASONING_EFFORTS
+    : capabilities.supported_efforts;
+  const uniqueEfforts = Array.from(new Set(
+    catalogEfforts.filter(effort => typeof effort === 'string' && effort.length > 0),
+  ));
+  if (uniqueEfforts.length === 0) {
+    return {};
+  }
+  const efforts = capabilities.mandatory
+    ? uniqueEfforts.filter(effort => effort !== 'none')
+    : ['none', ...uniqueEfforts.filter(effort => effort !== 'none')];
+
+  if (efforts.length === 0) {
+    return {};
+  }
+
+  const shouldDefaultOff = capabilities.default_enabled === false
+    || capabilities.default_effort === 'none';
+  const catalogDefault = shouldDefaultOff ? 'none' : capabilities.default_effort;
+  const defaultReasoningEffort = catalogDefault && efforts.includes(catalogDefault)
+    ? catalogDefault
+    : efforts.find(effort => effort !== 'none') ?? efforts[0];
+
+  return {
+    reasoningEfforts: efforts.map(value => ({
+      value,
+      ...(value === 'none' ? { description: 'Use the model without optional reasoning.' } : {}),
+    })),
+    defaultReasoningEffort,
   };
 }
 
@@ -316,6 +379,7 @@ export class OpenRouterProvider implements Provider {
           name: model.name || model.id,
           provider: this.id,
           contextLength: model.context_length,
+          ...getOpenRouterReasoningSettings(model),
         }));
     } catch (error) {
       console.error('[OpenRouter] Error fetching models:', error);
@@ -375,8 +439,8 @@ export class OpenRouterProvider implements Provider {
       stream_options: { include_usage: true },
     };
     const isXaiModel = model.toLowerCase().startsWith('x-ai/');
-    if (isXaiModel) {
-      requestBody.reasoning = { effort: 'high', exclude: false };
+    if (options?.reasoningEffort) {
+      requestBody.reasoning = { effort: options.reasoningEffort, exclude: false };
     }
     const tools = options?.tools ?? [];
     const hasTools = tools.length > 0;

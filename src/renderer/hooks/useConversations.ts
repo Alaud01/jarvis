@@ -29,7 +29,6 @@ export interface UseConversationsResult {
   conversationDrafts: SerializedConversationDrafts;
   unreadCompleteConversationIds: Set<string>;
   restoredWorkspaceView: WorkspaceView;
-  scrollPositions: Record<string, number>;
   hasHydratedStore: boolean;
   setCurrentConversationId: (id: string | null) => void;
   setOpenTabIds: React.Dispatch<React.SetStateAction<string[]>>;
@@ -37,6 +36,7 @@ export interface UseConversationsResult {
   setFolders: React.Dispatch<React.SetStateAction<Folder[]>>;
   setConversationDrafts: React.Dispatch<React.SetStateAction<SerializedConversationDrafts>>;
   setUnreadCompleteConversationIds: React.Dispatch<React.SetStateAction<Set<string>>>;
+  getScrollPosition: (key: string) => number | undefined;
   setScrollPosition: (key: string, top: number) => void;
   ensureConversationLoaded: (id: string) => Promise<void>;
   handleComposeChange: (value: string) => void;
@@ -58,7 +58,6 @@ export function useConversations(): UseConversationsResult {
   const [conversationDrafts, setConversationDrafts] = useState<SerializedConversationDrafts>({});
   const [unreadCompleteConversationIds, setUnreadCompleteConversationIds] = useState<Set<string>>(() => new Set());
   const [restoredWorkspaceView, setRestoredWorkspaceView] = useState<WorkspaceView>('home');
-  const [scrollPositions, setScrollPositions] = useState<Record<string, number>>({});
   const [hasHydratedStore, setHasHydratedStore] = useState(false);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
@@ -70,19 +69,43 @@ export function useConversations(): UseConversationsResult {
   const draftSaveTimerRef = useRef<number | null>(null);
   const scrollSaveTimerRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
+  const scrollPositionsDirtyRef = useRef(false);
 
-  useEffect(() => () => {
-    if (metadataSaveTimerRef.current !== null) {
-      window.clearTimeout(metadataSaveTimerRef.current);
-    }
-    if (draftSaveTimerRef.current !== null) {
-      window.clearTimeout(draftSaveTimerRef.current);
-    }
+  const flushScrollPositions = useCallback(() => {
     if (scrollSaveTimerRef.current !== null) {
       window.clearTimeout(scrollSaveTimerRef.current);
+      scrollSaveTimerRef.current = null;
     }
-    conversationSaveTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
+    if (!scrollPositionsDirtyRef.current) {
+      return;
+    }
+
+    const positionsToSave = scrollPositionsRef.current;
+    scrollPositionsDirtyRef.current = false;
+    window.assistant.storeSaveScrollPositions(positionsToSave).catch(err => {
+      if (scrollPositionsRef.current === positionsToSave) {
+        scrollPositionsDirtyRef.current = true;
+      }
+      console.error('Failed to save scroll positions:', err);
+    });
   }, []);
+
+  useEffect(() => {
+    const conversationSaveTimers = conversationSaveTimersRef.current;
+    window.addEventListener('pagehide', flushScrollPositions);
+
+    return () => {
+      window.removeEventListener('pagehide', flushScrollPositions);
+      if (metadataSaveTimerRef.current !== null) {
+        window.clearTimeout(metadataSaveTimerRef.current);
+      }
+      if (draftSaveTimerRef.current !== null) {
+        window.clearTimeout(draftSaveTimerRef.current);
+      }
+      conversationSaveTimers.forEach(timerId => window.clearTimeout(timerId));
+      flushScrollPositions();
+    };
+  }, [flushScrollPositions]);
 
   useEffect(() => {
     let isMounted = true;
@@ -206,7 +229,6 @@ export function useConversations(): UseConversationsResult {
 
       if (scrollPositionsResult.status === 'fulfilled') {
         scrollPositionsRef.current = scrollPositionsResult.value;
-        setScrollPositions(scrollPositionsResult.value);
       } else {
         console.error('Failed to load stored scroll positions:', scrollPositionsResult.reason);
       }
@@ -542,6 +564,10 @@ export function useConversations(): UseConversationsResult {
     }
   }, []);
 
+  const getScrollPosition = useCallback((key: string) => (
+    scrollPositionsRef.current[key]
+  ), []);
+
   const setScrollPosition = useCallback((key: string, top: number) => {
     const nextTop = Math.max(0, top);
     const currentTop = scrollPositionsRef.current[key];
@@ -554,21 +580,17 @@ export function useConversations(): UseConversationsResult {
       [key]: nextTop,
     };
     scrollPositionsRef.current = nextPositions;
-    setScrollPositions(nextPositions);
 
     if (!hasHydratedStore) {
       return;
     }
 
+    scrollPositionsDirtyRef.current = true;
     if (scrollSaveTimerRef.current !== null) {
       window.clearTimeout(scrollSaveTimerRef.current);
     }
-    scrollSaveTimerRef.current = window.setTimeout(() => {
-      window.assistant.storeSaveScrollPositions(scrollPositionsRef.current).catch(err => {
-        console.error('Failed to save scroll positions:', err);
-      });
-    }, SAVE_DEBOUNCE_MS);
-  }, [hasHydratedStore]);
+    scrollSaveTimerRef.current = window.setTimeout(flushScrollPositions, SAVE_DEBOUNCE_MS);
+  }, [flushScrollPositions, hasHydratedStore]);
 
   return {
     conversations,
@@ -578,7 +600,6 @@ export function useConversations(): UseConversationsResult {
     conversationDrafts,
     unreadCompleteConversationIds,
     restoredWorkspaceView,
-    scrollPositions,
     hasHydratedStore,
     setCurrentConversationId,
     setOpenTabIds,
@@ -586,6 +607,7 @@ export function useConversations(): UseConversationsResult {
     setFolders,
     setConversationDrafts,
     setUnreadCompleteConversationIds,
+    getScrollPosition,
     setScrollPosition,
     ensureConversationLoaded,
     handleComposeChange,

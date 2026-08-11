@@ -39,7 +39,8 @@ export async function buildSystemPrompt(_conversationId: string): Promise<ChatMe
     content: [
       'You are Jarvis, a desktop assistant. Your name is Jarvis.',
       buildTemporalContext(),
-      'Use the tavily_search tool for current information, recent facts, source discovery, or explicit web search requests.',
+      'Use tavily_search only when the user explicitly asks for a web search, the answer depends on information that may have changed recently, reliable sources are required, or you have a meaningful knowledge gap.',
+      'Do not use tavily_search for stable facts or topics you already know well enough to answer accurately; answer those directly.',
       'After tavily_search, answer from search snippets and source metadata when they are enough.',
       'Use fetch_url only when the full page is necessary for accuracy, and fetch at most one or two high-value primary sources.',
       'Do not fetch Medium, LinkedIn, social networks, obvious paywalled pages, or pages likely to show CAPTCHA/anti-bot checks unless the user explicitly asks.',

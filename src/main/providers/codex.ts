@@ -26,6 +26,7 @@ const CODEX_PROVIDER_INSTRUCTIONS = [
   'Jarvis owns the visible conversation and all user-facing state.',
   'Answer the user directly. Do not inspect files, run commands, or modify files.',
   'You may use dynamic tools in the jarvis namespace when they are provided. Do not use Codex built-in filesystem or command-execution tools.',
+  'When citing web sources, write ordinary Markdown links with public URLs. Never emit private citation markers such as citeturn0search0.',
   'Do not mention the private Codex runtime or its thread unless the user explicitly asks about implementation details.',
 ].join(' ');
 
@@ -211,6 +212,13 @@ export class CodexProvider implements Provider {
         id: toCodexModelId(model.model),
         name: model.displayName,
         provider: this.id,
+        ...(model.supportedReasoningEfforts?.length ? {
+          reasoningEfforts: model.supportedReasoningEfforts.map(({ reasoningEffort, description }) => ({
+            value: reasoningEffort,
+            description,
+          })),
+          defaultReasoningEffort: model.defaultReasoningEffort,
+        } : {}),
       }));
   }
 
@@ -344,6 +352,7 @@ export class CodexProvider implements Provider {
       const content = await this.client.runTurn({
         threadId,
         model,
+        effort: options?.reasoningEffort,
         input: builtInput.input,
         signal: abortController.signal,
         onToolCall,
@@ -377,6 +386,7 @@ export class CodexProvider implements Provider {
       const content = await this.client.runTurn({
         threadId: selection.record.threadId,
         model,
+        effort: options?.reasoningEffort,
         input: builtInput.input,
         signal: abortController.signal,
         onToolCall,

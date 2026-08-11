@@ -26,6 +26,18 @@ const REASONING_ANTHROPIC_MODELS = new Set([
   'qwen3.5-plus',
 ]);
 
+const REASONING_EFFORTS = [
+  { value: 'low', description: 'Uses a smaller thinking budget.' },
+  { value: 'medium', description: 'Uses a balanced thinking budget.' },
+  { value: 'high', description: 'Uses the largest thinking budget.' },
+];
+
+const THINKING_BUDGET_BY_EFFORT: Record<string, number> = {
+  low: 1024,
+  medium: 2048,
+  high: 4096,
+};
+
 const MODEL_NAMES: Record<string, string> = {
   'glm-5.1': 'GLM-5.1',
   'glm-5': 'GLM-5',
@@ -42,11 +54,20 @@ const MODEL_NAMES: Record<string, string> = {
   'qwen3.5-plus': 'Qwen3.5 Plus',
 };
 
-const FALLBACK_MODELS: ModelInfo[] = Object.entries(MODEL_NAMES).map(([id, name]) => ({
-  id,
-  name,
-  provider: 'opencode-go',
-}));
+function toModelInfo(id: string, name: string): ModelInfo {
+  return {
+    id,
+    name,
+    provider: 'opencode-go',
+    ...(REASONING_ANTHROPIC_MODELS.has(id) ? {
+      reasoningEfforts: REASONING_EFFORTS,
+      defaultReasoningEffort: 'high',
+    } : {}),
+  };
+}
+
+const FALLBACK_MODELS: ModelInfo[] = Object.entries(MODEL_NAMES)
+  .map(([id, name]) => toModelInfo(id, name));
 
 interface OpenAIStreamDelta {
   role?: string;
@@ -465,11 +486,7 @@ export class OpenCodeGoProvider implements Provider {
 
       const models = data.data || data.models || [];
       if (models.length > 0) {
-        return models.map((m) => ({
-          id: m.id,
-          name: MODEL_NAMES[m.id] || m.name || m.id,
-          provider: this.id,
-        }));
+        return models.map((m) => toModelInfo(m.id, MODEL_NAMES[m.id] || m.name || m.id));
       }
 
       return FALLBACK_MODELS;
@@ -841,9 +858,10 @@ export class OpenCodeGoProvider implements Provider {
     };
 
     if (shouldRequestAnthropicThinking(model)) {
+      const effort = options?.reasoningEffort ?? 'high';
       requestBody.thinking = {
         type: 'enabled',
-        budget_tokens: 4096,
+        budget_tokens: THINKING_BUDGET_BY_EFFORT[effort] ?? THINKING_BUDGET_BY_EFFORT.high,
       };
     }
 

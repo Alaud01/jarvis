@@ -99,7 +99,7 @@ test('passes user images to app-server without exposing system messages', () => 
   });
 });
 
-test('serializes only valid image URLs in Codex dynamic tool results', () => {
+test('serializes only HTTP image URLs in Codex dynamic tool results', () => {
   assert.deepEqual(buildCodexDynamicToolContentItems({
     success: true,
     content: 'Screenshot captured.',
@@ -107,11 +107,13 @@ test('serializes only valid image URLs in Codex dynamic tool results', () => {
       '/Users/example/browser-screenshot.png',
       'data:image/png;base64,aGVsbG8=',
       'https://example.com/screenshot.png',
+      'http://example.com/screenshot.jpg',
+      'file:///Users/example/browser-screenshot.png',
     ],
   }), [
     { type: 'inputText', text: 'Screenshot captured.' },
-    { type: 'inputImage', imageUrl: 'data:image/png;base64,aGVsbG8=' },
     { type: 'inputImage', imageUrl: 'https://example.com/screenshot.png' },
+    { type: 'inputImage', imageUrl: 'http://example.com/screenshot.jpg' },
   ]);
 });
 
@@ -329,7 +331,7 @@ test('round-trips a Codex dynamic tool call through the Jarvis handler', async (
         return {
           success: true,
           content: 'opened-with-image',
-          imageUrls: ['data:image/png;base64,aGVsbG8='],
+          imageUrls: ['https://example.com/browser-screenshot.png'],
         };
       },
     });

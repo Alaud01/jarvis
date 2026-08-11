@@ -12,6 +12,8 @@ import {
   saveFolders,
   loadSelectedModel,
   saveSelectedModel,
+  loadSelectedReasoningEffort,
+  saveSelectedReasoningEffort,
   loadSelectedProvider,
   saveSelectedProvider,
   loadOpenTabIds,
@@ -118,6 +120,15 @@ export function registerStoreHandlers(): void {
 
   ipcMain.handle('store:save-model', async (_event, model: string) => {
     saveSelectedModel(model);
+    return { success: true };
+  });
+
+  ipcMain.handle('store:load-reasoning-effort', async () => {
+    return loadSelectedReasoningEffort();
+  });
+
+  ipcMain.handle('store:save-reasoning-effort', async (_event, effort: string) => {
+    saveSelectedReasoningEffort(effort);
     return { success: true };
   });
 

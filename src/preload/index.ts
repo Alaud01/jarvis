@@ -31,6 +31,7 @@ type SendMessageStreamRequest = {
   assistantMessageId: string;
   model: string;
   provider: string;
+  reasoningEffort?: string;
   messages: ChatMessagePayload[];
 };
 
@@ -116,6 +117,8 @@ contextBridge.exposeInMainWorld('assistant', {
   storeDeleteFolder: (id: string) => ipcRenderer.invoke('store:delete-folder', id),
   storeLoadModel: () => ipcRenderer.invoke('store:load-model'),
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
+  storeLoadReasoningEffort: () => ipcRenderer.invoke('store:load-reasoning-effort'),
+  storeSaveReasoningEffort: (effort: string) => ipcRenderer.invoke('store:save-reasoning-effort', effort),
   storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
   storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),

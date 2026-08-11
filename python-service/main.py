@@ -936,6 +936,13 @@ def transcribe_chunk_with_openrouter(wav: np.ndarray) -> str:
     request_body = json.dumps(payload).encode("utf-8")
     response_data = None
     last_error = None
+    logger.warning(
+        "[VoiceService] OpenRouter transcription starting: model=%s timeout=%.1fs attempts=%s audio=%.2fs",
+        OPENROUTER_TRANSCRIPTION_MODEL,
+        OPENROUTER_TIMEOUT_SECONDS,
+        OPENROUTER_MAX_ATTEMPTS,
+        wav.shape[0] / TARGET_SAMPLE_RATE,
+    )
     for attempt in range(1, OPENROUTER_MAX_ATTEMPTS + 1):
         req = urllib_request.Request(
             OPENROUTER_TRANSCRIPTION_URL,
@@ -952,7 +959,7 @@ def transcribe_chunk_with_openrouter(wav: np.ndarray) -> str:
             if attempt >= OPENROUTER_MAX_ATTEMPTS or not is_retriable_openrouter_error(error):
                 raise openrouter_failure(error, attempt) from error
             delay = OPENROUTER_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-            logger.info(
+            logger.warning(
                 "[VoiceService] OpenRouter transcription attempt %s/%s failed (%s); retrying in %.1fs",
                 attempt,
                 OPENROUTER_MAX_ATTEMPTS,
@@ -1065,6 +1072,25 @@ def schedule_local_parakeet_idle_unload() -> None:
     local_parakeet_idle_unload_thread.start()
 
 
+def local_parakeet_state() -> dict[str, Any]:
+    loading_for_ms = None
+    if local_parakeet_loading and local_parakeet_started_at is not None:
+        loading_for_ms = elapsed_ms(local_parakeet_started_at)
+    return {
+        "enabled": LOCAL_PARAKEET_ENABLED,
+        "model": LOCAL_PARAKEET_MODEL,
+        "device_preference": LOCAL_PARAKEET_DEVICE,
+        "device": local_parakeet_device,
+        "loaded": local_parakeet_model is not None,
+        "loading": local_parakeet_loading,
+        "loading_for_ms": loading_for_ms,
+        "load_error": local_parakeet_load_error,
+        "active_requests": local_parakeet_active_requests,
+        "timeout_fallback_enabled": LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED,
+        "cold_start_budget_seconds": LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS,
+    }
+
+
 def load_local_parakeet_model():
     global local_parakeet_model, local_parakeet_load_error, local_parakeet_started_at, local_parakeet_loading
     global local_parakeet_device
@@ -1076,6 +1102,11 @@ def load_local_parakeet_model():
 
     local_parakeet_started_at = time.perf_counter()
     local_parakeet_loading = True
+    logger.warning(
+        "[VoiceService] Local Parakeet load starting: model=%s device_preference=%s",
+        LOCAL_PARAKEET_MODEL,
+        LOCAL_PARAKEET_DEVICE,
+    )
     try:
         configure_local_parakeet_import_environment()
         from nemo.collections.asr.models import ASRModel
@@ -1083,16 +1114,27 @@ def load_local_parakeet_model():
         quiet_nemo_logger_after_import()
 
         device = select_local_parakeet_device(torch)
+        logger.warning("[VoiceService] Local Parakeet downloading/loading weights onto %s...", device)
         model = ASRModel.from_pretrained(model_name=LOCAL_PARAKEET_MODEL)
         model = model.to(device)
         model.eval()
         local_parakeet_model = model
         local_parakeet_device = device
         touch_local_parakeet_model()
-        logger.info("[VoiceService] Local Parakeet model loaded: %s on %s", LOCAL_PARAKEET_MODEL, device)
+        logger.warning(
+            "[VoiceService] Local Parakeet model loaded in %sms: %s on %s",
+            elapsed_ms(local_parakeet_started_at),
+            LOCAL_PARAKEET_MODEL,
+            device,
+        )
         return local_parakeet_model
     except Exception as error:
         local_parakeet_load_error = str(error)
+        logger.warning(
+            "[VoiceService] Local Parakeet load failed after %sms: %s",
+            elapsed_ms(local_parakeet_started_at),
+            error,
+        )
         raise
     finally:
         local_parakeet_loading = False
@@ -1110,12 +1152,16 @@ def start_local_parakeet_background_load(preload: bool = False):
         return
     local_parakeet_started_at = time.perf_counter()
     local_parakeet_loading = True
+    logger.warning(
+        "[VoiceService] Local Parakeet background load scheduled (preload=%s)",
+        preload,
+    )
 
     def load_background():
         try:
             load_local_parakeet_model()
         except Exception as error:
-            logger.info("[VoiceService] Local Parakeet background load failed: %s", error)
+            logger.warning("[VoiceService] Local Parakeet background load failed: %s", error)
 
     threading.Thread(target=load_background, daemon=True).start()
 
@@ -1131,17 +1177,40 @@ def get_ready_local_parakeet_model():
     started_at = time.perf_counter()
     wait_budget_seconds = local_parakeet_ready_wait_budget_seconds()
     was_loading = local_parakeet_model is None and local_parakeet_loading
+    last_progress_log_at = started_at
+    if was_loading:
+        logger.warning(
+            "[VoiceService] Waiting for Local Parakeet readiness (budget=%.1fs, state=%s)",
+            wait_budget_seconds,
+            local_parakeet_state(),
+        )
     while local_parakeet_model is None and local_parakeet_load_error is None:
-        if time.perf_counter() - started_at >= wait_budget_seconds:
+        now = time.perf_counter()
+        if now - started_at >= wait_budget_seconds:
+            logger.warning(
+                "[VoiceService] Local Parakeet ready wait timed out after %sms (budget=%.1fs, state=%s)",
+                elapsed_ms(started_at),
+                wait_budget_seconds,
+                local_parakeet_state(),
+            )
             raise TimeoutError("local_model_not_ready")
+        if was_loading and now - last_progress_log_at >= 5.0:
+            logger.warning(
+                "[VoiceService] Still waiting for Local Parakeet after %sms (budget=%.1fs, state=%s)",
+                elapsed_ms(started_at),
+                wait_budget_seconds,
+                local_parakeet_state(),
+            )
+            last_progress_log_at = now
         time.sleep(0.05)
     wait_ms = elapsed_ms(started_at)
     if was_loading or wait_ms >= 50:
         logger.warning(
-            "[VoiceService] Local Parakeet ready wait: %sms (budget=%.1fs, was_loading=%s)",
+            "[VoiceService] Local Parakeet ready wait: %sms (budget=%.1fs, was_loading=%s, device=%s)",
             wait_ms,
             wait_budget_seconds,
             was_loading,
+            local_parakeet_device,
         )
     if local_parakeet_load_error is not None:
         raise RuntimeError(local_parakeet_load_error)
@@ -1446,9 +1515,20 @@ def transcribe_audio(
     vocabulary = context.vocabulary if context else []
     if LOCAL_PARAKEET_ENABLED:
         try:
+            logger.warning(
+                "[VoiceService] Transcription path=local-parakeet chunks=%s audio=%.2fs state=%s",
+                len(transcription_chunks),
+                duration_seconds,
+                local_parakeet_state(),
+            )
             get_ready_local_parakeet_model()
             local_started_at = time.perf_counter()
             budget_seconds = active_local_latency_budget_seconds(duration_seconds)
+            logger.warning(
+                "[VoiceService] Local Parakeet inference starting (active_budget=%.2fs chunks=%s)",
+                budget_seconds,
+                len(transcription_chunks),
+            )
             local_result = transcribe_chunks_with_local_parakeet(transcription_chunks, vocabulary)
             elapsed = time.perf_counter() - local_started_at
             active_ms = round(elapsed * 1000)
@@ -1492,6 +1572,11 @@ def transcribe_audio(
                 fallback_reason=type(error).__name__,
             )
 
+    logger.warning(
+        "[VoiceService] Transcription path=openrouter chunks=%s audio=%.2fs",
+        len(transcription_chunks),
+        duration_seconds,
+    )
     openrouter_started_at = time.perf_counter()
     transcript = transcribe_chunks_with_openrouter(transcription_chunks)
     logger.warning(
@@ -1514,11 +1599,18 @@ def refine_transcript(raw_text: str, context: VoiceContext) -> RefinementResult:
     fallback = build_fallback_refinement(raw_text, context)
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
-        logger.info("[VoiceService] OPENROUTER_API_KEY is not configured, using rule fallback")
+        logger.warning("[VoiceService] OPENROUTER_API_KEY is not configured, using rule fallback")
         return fallback
 
     try:
         started_at = time.perf_counter()
+        logger.warning(
+            "[VoiceService] Refinement starting: model=%s mode=%s timeout=%.1fs chars=%s",
+            OPENROUTER_REFINEMENT_MODEL,
+            refinement_mode,
+            OPENROUTER_REFINEMENT_TIMEOUT_SECONDS,
+            len(raw_text),
+        )
         payload = {
             "model": OPENROUTER_REFINEMENT_MODEL,
             "messages": build_refinement_messages(fallback.text, context),
@@ -1611,6 +1703,7 @@ async def health_check():
     if vad_model is None:
         raise HTTPException(status_code=503, detail="Models not loaded")
     
+    parakeet = local_parakeet_state()
     return {
         "status": "healthy",
         "models_loaded": True,
@@ -1618,13 +1711,17 @@ async def health_check():
         "transcription_provider": "local-parakeet" if LOCAL_PARAKEET_ENABLED else "openrouter",
         "transcription_model": LOCAL_PARAKEET_MODEL if LOCAL_PARAKEET_ENABLED else OPENROUTER_TRANSCRIPTION_MODEL,
         "local_parakeet_enabled": LOCAL_PARAKEET_ENABLED,
-        "local_parakeet_loaded": local_parakeet_model is not None,
+        "local_parakeet_loaded": parakeet["loaded"],
+        "local_parakeet_loading": parakeet["loading"],
+        "local_parakeet_loading_for_ms": parakeet["loading_for_ms"],
         "local_parakeet_device_preference": LOCAL_PARAKEET_DEVICE,
         "local_parakeet_device": local_parakeet_device,
         "local_parakeet_preload_enabled": LOCAL_PARAKEET_PRELOAD_ENABLED,
         "local_parakeet_idle_unload_seconds": LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS,
         "local_parakeet_active_requests": local_parakeet_active_requests,
         "local_parakeet_error": local_parakeet_load_error,
+        "local_parakeet_timeout_fallback_enabled": LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED,
+        "local_parakeet_cold_start_budget_seconds": LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS,
         "refinement_provider": "openrouter",
         "refinement_model": OPENROUTER_REFINEMENT_MODEL,
         "openrouter_configured": bool(os.environ.get("OPENROUTER_API_KEY", "").strip()),
@@ -1646,16 +1743,27 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
     timings: dict[str, int] = {}
     
     try:
+        logger.warning(
+            "[VoiceService] process-flow request received (parakeet_state=%s)",
+            local_parakeet_state(),
+        )
         parse_started_at = time.perf_counter()
         voice_context = parse_voice_context(context)
         timings["parse_context_ms"] = elapsed_ms(parse_started_at)
         suffix = Path(file.filename or "audio.wav").suffix or ".wav"
+        logger.warning(
+            "[VoiceService] process-flow context: destination=%s app=%s bundle=%s mode=%s",
+            voice_context.destination,
+            voice_context.app.name if voice_context.app else "",
+            voice_context.app.bundleId if voice_context.app else "",
+            refinement_mode_for_context(voice_context),
+        )
 
         upload_started_at = time.perf_counter()
         temp_path, upload_bytes = copy_upload_to_temp(file, suffix)
         timings["upload_copy_ms"] = elapsed_ms(upload_started_at)
         
-        logger.info("[VoiceService] Processing audio file: %s (%s bytes)", temp_path, upload_bytes)
+        logger.warning("[VoiceService] Processing audio file: %s (%s bytes)", temp_path, upload_bytes)
 
         load_started_at = time.perf_counter()
         wav = load_audio(temp_path)
@@ -1664,7 +1772,7 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
         stats_started_at = time.perf_counter()
         audio_stats = describe_audio(wav)
         timings["describe_audio_ms"] = elapsed_ms(stats_started_at)
-        logger.info(
+        logger.warning(
             "[VoiceService] Audio stats: duration=%.0fms peak=%.4f rms=%.4f",
             audio_stats["duration_ms"],
             audio_stats["peak"],
@@ -1674,6 +1782,12 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
         vad_started_at = time.perf_counter()
         speech_segments, speech_duration = detect_speech_segments(wav)
         timings["vad_ms"] = elapsed_ms(vad_started_at)
+        logger.warning(
+            "[VoiceService] VAD complete in %sms: segments=%s speech_duration=%.0fms",
+            timings["vad_ms"],
+            len(speech_segments),
+            speech_duration,
+        )
         diagnostics = {
             "upload_bytes": upload_bytes,
             "audio": audio_stats,
@@ -1711,11 +1825,21 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
                 }
             )
         
-        logger.info("[VoiceService] Speech detected: %.0fms, transcribing...", speech_duration)
+        logger.warning("[VoiceService] Speech detected: %.0fms, transcribing...", speech_duration)
 
         transcribe_started_at = time.perf_counter()
         raw_text, transcription_metadata = transcribe_audio(wav, speech_segments, voice_context)
         timings["transcribe_ms"] = elapsed_ms(transcribe_started_at)
+        logger.warning(
+            "[VoiceService] Transcription stage finished in %sms: provider=%s model=%s "
+            "fallback_used=%s fallback_reason=%s chars=%s",
+            timings["transcribe_ms"],
+            transcription_metadata.provider,
+            transcription_metadata.model,
+            transcription_metadata.fallback_used,
+            transcription_metadata.fallback_reason,
+            len(raw_text or ""),
+        )
         
         if not raw_text or raw_text.strip() == "":
             timings["total_ms"] = elapsed_ms(flow_started_at)
@@ -1753,14 +1877,18 @@ async def process_flow(file: UploadFile = File(...), context: str | None = Form(
                 }
             )
         
-        logger.info("[VoiceService] Raw transcription: %s", raw_text)
+        logger.warning("[VoiceService] Raw transcription: %s", raw_text)
 
         refine_started_at = time.perf_counter()
         refinement = refine_transcript(raw_text, voice_context)
         timings["refine_ms"] = elapsed_ms(refine_started_at)
         timings["total_ms"] = elapsed_ms(flow_started_at)
         
-        logger.info("[VoiceService] Corrected text: %s", refinement.text)
+        logger.warning(
+            "[VoiceService] Corrected text (%sms): %s",
+            timings["refine_ms"],
+            refinement.text,
+        )
         logger.warning("[VoiceService] process-flow timing breakdown: %s", timings)
         
         return JSONResponse(

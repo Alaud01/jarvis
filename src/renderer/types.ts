@@ -91,6 +91,13 @@ export interface ModelInfo {
   name: string;
   provider: string;
   contextLength?: number;
+  reasoningEfforts?: ReasoningEffortOption[];
+  defaultReasoningEffort?: string;
+}
+
+export interface ReasoningEffortOption {
+  value: string;
+  description?: string;
 }
 
 export interface ProviderInfo {
@@ -104,6 +111,7 @@ export interface SendMessageStreamRequest {
   assistantMessageId: string;
   model: string;
   provider: string;
+  reasoningEffort?: string;
   messages: {
     role: 'user' | 'assistant';
     content: string;
@@ -164,6 +172,8 @@ declare global {
       storeDeleteFolder: (id: string) => Promise<{ success: boolean }>;
       storeLoadModel: () => Promise<string>;
       storeSaveModel: (model: string) => Promise<{ success: boolean }>;
+      storeLoadReasoningEffort: () => Promise<string>;
+      storeSaveReasoningEffort: (effort: string) => Promise<{ success: boolean }>;
       storeLoadProvider: () => Promise<string>;
       storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
       storeLoadOpenTabIds: () => Promise<string[]>;

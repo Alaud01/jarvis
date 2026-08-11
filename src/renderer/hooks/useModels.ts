@@ -24,6 +24,12 @@ function modelIsAvailable(models: ModelInfo[], modelId: string | null | undefine
   return Boolean(modelId) && models.some(model => model.id === modelId);
 }
 
+function getDefaultModel(models: ModelInfo[]): string | null {
+  // Never silently switch a user to a remote OpenRouter model. Ollama returns
+  // its models in picker order, so the first Ollama entry is its top choice.
+  return models.find(model => model.provider === 'ollama')?.id ?? null;
+}
+
 async function fetchProvidersAndModels(): Promise<{
   providers: ProviderInfo[];
   models: ModelInfo[];
@@ -120,7 +126,7 @@ export function useModels(hasHydratedStore: boolean): UseModelsResult {
       return;
     }
 
-    const fallback = fetchedModels[0]?.id ?? null;
+    const fallback = getDefaultModel(fetchedModels);
     preferredModelRef.current = fallback;
     selectedModelRef.current = fallback;
     setSelectedModelState(fallback);

@@ -56,6 +56,7 @@ interface StoreSchema {
   conversationMessageFilesMigrated?: boolean;
   folders: SerializedFolder[];
   selectedModel: string;
+  selectedReasoningEffort: string;
   selectedProvider: string;
   openTabIds: string[];
   currentConversationId: string | null;
@@ -85,6 +86,7 @@ const store = new Store<StoreSchema>({
     conversationMessageFilesMigrated: false,
     folders: [],
     selectedModel: '',
+    selectedReasoningEffort: '',
     selectedProvider: 'ollama',
     openTabIds: [],
     currentConversationId: null,
@@ -378,6 +380,14 @@ export function loadSelectedModel(): string {
 
 export function saveSelectedModel(model: string): void {
   store.set('selectedModel', model);
+}
+
+export function loadSelectedReasoningEffort(): string {
+  return store.get('selectedReasoningEffort', '') as string;
+}
+
+export function saveSelectedReasoningEffort(effort: string): void {
+  store.set('selectedReasoningEffort', effort);
 }
 
 export function loadSelectedProvider(): string {

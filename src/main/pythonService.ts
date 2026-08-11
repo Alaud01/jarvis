@@ -10,6 +10,28 @@ import { getManagedVoiceRuntimeEnv, getReadyManagedVoicePythonExecutable } from 
 const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
 const READY_TRANSCRIPTION_PROVIDERS = new Set(['local-parakeet', 'openrouter']);
+// Must exceed local Parakeet cold-start wait (default 90s) plus inference/refinement headroom.
+const PROCESS_FLOW_TIMEOUT_MS = Math.max(
+  60_000,
+  Number(process.env.VOICE_PROCESS_FLOW_TIMEOUT_MS || 150_000),
+);
+
+type VoiceServiceHealth = {
+  status?: string;
+  models_loaded?: boolean;
+  transcription_provider?: string;
+  transcription_model?: string;
+  local_parakeet_enabled?: boolean;
+  local_parakeet_loaded?: boolean;
+  local_parakeet_loading?: boolean;
+  local_parakeet_loading_for_ms?: number | null;
+  local_parakeet_device?: string | null;
+  local_parakeet_error?: string | null;
+  local_parakeet_timeout_fallback_enabled?: boolean;
+  local_parakeet_cold_start_budget_seconds?: number;
+  openrouter_configured?: boolean;
+  refinement_model?: string;
+};
 
 let pythonProcess: ChildProcess | null = null;
 let isServiceReady = false;
@@ -111,11 +133,24 @@ export async function startPythonService(): Promise<boolean> {
   let spawnedExited = false;
 
   pythonProcess.stdout?.on('data', (data) => {
-    debugLog(`[PythonService] ${data.toString().trim()}`);
+    const line = data.toString().trim();
+    if (!line) return;
+    // VoiceService stage logs and other operational output should stay visible at default warn level.
+    if (line.includes('[VoiceService]') || line.includes('ERROR') || line.includes('WARNING')) {
+      console.warn(`[PythonService] ${line}`);
+      return;
+    }
+    debugLog(`[PythonService] ${line}`);
   });
 
   pythonProcess.stderr?.on('data', (data) => {
-    console.error(`[PythonService] ${data.toString().trim()}`);
+    const line = data.toString().trim();
+    if (!line) return;
+    if (line.includes('[VoiceService]')) {
+      console.warn(`[PythonService] ${line}`);
+      return;
+    }
+    console.error(`[PythonService] ${line}`);
   });
 
   pythonProcess.on('error', (err) => {
@@ -144,7 +179,11 @@ export async function startPythonService(): Promise<boolean> {
   return ready;
 }
 
-async function checkServiceHealth(): Promise<{ reachable: boolean; ready: boolean }> {
+async function checkServiceHealth(): Promise<{
+  reachable: boolean;
+  ready: boolean;
+  health?: VoiceServiceHealth;
+}> {
   try {
     const response = await fetch(`http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/health`, {
       method: 'GET',
@@ -155,20 +194,23 @@ async function checkServiceHealth(): Promise<{ reachable: boolean; ready: boolea
       return { reachable: true, ready: false };
     }
 
-    const data = await response.json() as {
-      status?: string;
-      models_loaded?: boolean;
-      transcription_provider?: string;
-    };
+    const data = await response.json() as VoiceServiceHealth;
     return {
       reachable: true,
       ready: data.status === 'healthy'
         && data.models_loaded === true
         && READY_TRANSCRIPTION_PROVIDERS.has(data.transcription_provider || ''),
+      health: data,
     };
   } catch {
     return { reachable: false, ready: false };
   }
+}
+
+function isAbortTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const name = error.name;
+  return name === 'TimeoutError' || name === 'AbortError' || /aborted due to timeout/i.test(error.message);
 }
 
 async function reclaimPortIfStale(): Promise<void> {
@@ -378,6 +420,42 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
 }> {
   const url = `http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/process-flow`;
   const startedAt = performance.now();
+  const preflight = await checkServiceHealth();
+
+  const audioParts = getAudioUploadParts(audioBuffer);
+  const recordedAudio = Buffer.isBuffer(audioBuffer) ? null : audioBuffer;
+  console.warn('[PythonService] process-flow starting:', {
+    timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
+    audio: {
+      durationMs: recordedAudio ? Math.round(recordedAudio.durationMs) : undefined,
+      byteLength: audioParts.byteLength,
+      peak: recordedAudio ? Number(recordedAudio.peak.toFixed(4)) : undefined,
+      rms: recordedAudio ? Number(recordedAudio.rms.toFixed(4)) : undefined,
+    },
+    context: context
+      ? {
+          destination: context.destination,
+          appName: context.app?.name,
+          bundleId: context.app?.bundleId,
+        }
+      : null,
+    service: {
+      reachable: preflight.reachable,
+      ready: preflight.ready,
+      transcriptionProvider: preflight.health?.transcription_provider,
+      transcriptionModel: preflight.health?.transcription_model,
+      localParakeetEnabled: preflight.health?.local_parakeet_enabled,
+      localParakeetLoaded: preflight.health?.local_parakeet_loaded,
+      localParakeetLoading: preflight.health?.local_parakeet_loading,
+      localParakeetLoadingForMs: preflight.health?.local_parakeet_loading_for_ms,
+      localParakeetDevice: preflight.health?.local_parakeet_device,
+      localParakeetError: preflight.health?.local_parakeet_error,
+      timeoutFallbackEnabled: preflight.health?.local_parakeet_timeout_fallback_enabled,
+      coldStartBudgetSeconds: preflight.health?.local_parakeet_cold_start_budget_seconds,
+      openrouterConfigured: preflight.health?.openrouter_configured,
+      refinementModel: preflight.health?.refinement_model,
+    },
+  });
 
   try {
     const uploadStartedAt = performance.now();
@@ -393,7 +471,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       },
       body: upload.body,
       duplex: 'half',
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(PROCESS_FLOW_TIMEOUT_MS),
     });
     const fetchMs = Math.round(performance.now() - fetchStartedAt);
 
@@ -430,8 +508,12 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       fetchMs,
       parseMs,
       totalMs,
+      timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
       audioBytes: upload.contentLength,
       success: parsed.ok ? Boolean(parsed.data.success) : false,
+      transcriptionMetadata: parsed.ok ? parsed.data.transcription_metadata : undefined,
+      speechDurationMs: parsed.ok ? parsed.data.speech_duration_ms : undefined,
+      error: parsed.ok ? parsed.data.error : parsed.error,
     });
 
     if (!parsed.ok) {
@@ -452,7 +534,41 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       error: data.error,
     };
   } catch (error) {
-    console.error('[PythonService] Error processing voice after', Math.round(performance.now() - startedAt), 'ms:', error);
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    const postFailureHealth = await checkServiceHealth();
+    if (isAbortTimeoutError(error)) {
+      console.error('[PythonService] process-flow aborted by client timeout:', {
+        elapsedMs,
+        timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
+        preflight: {
+          localParakeetLoaded: preflight.health?.local_parakeet_loaded,
+          localParakeetLoading: preflight.health?.local_parakeet_loading,
+          localParakeetLoadingForMs: preflight.health?.local_parakeet_loading_for_ms,
+          coldStartBudgetSeconds: preflight.health?.local_parakeet_cold_start_budget_seconds,
+          timeoutFallbackEnabled: preflight.health?.local_parakeet_timeout_fallback_enabled,
+          localParakeetError: preflight.health?.local_parakeet_error,
+        },
+        afterTimeout: {
+          reachable: postFailureHealth.reachable,
+          ready: postFailureHealth.ready,
+          localParakeetLoaded: postFailureHealth.health?.local_parakeet_loaded,
+          localParakeetLoading: postFailureHealth.health?.local_parakeet_loading,
+          localParakeetLoadingForMs: postFailureHealth.health?.local_parakeet_loading_for_ms,
+          localParakeetError: postFailureHealth.health?.local_parakeet_error,
+        },
+        hint:
+          'Electron aborted before /process-flow returned. Check [VoiceService] stage logs; cold Parakeet load can exceed the old 60s client timeout.',
+        error,
+      });
+      return {
+        text: '',
+        success: false,
+        error:
+          `Voice processing timed out after ${elapsedMs}ms (client limit ${PROCESS_FLOW_TIMEOUT_MS}ms). `
+          + 'Local Parakeet may still be loading — watch [VoiceService] logs and retry once the model is ready.',
+      };
+    }
+    console.error('[PythonService] Error processing voice after', elapsedMs, 'ms:', error);
     return {
       text: '',
       success: false,
@@ -486,7 +602,7 @@ export async function transcribeOnly(audioBuffer: UploadableAudio): Promise<{
       },
       body: upload.body,
       duplex: 'half',
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(PROCESS_FLOW_TIMEOUT_MS),
     });
 
     const parsed = await parseJsonResponse<{
@@ -517,6 +633,17 @@ export async function transcribeOnly(audioBuffer: UploadableAudio): Promise<{
       error: data.error,
     };
   } catch (error) {
+    if (isAbortTimeoutError(error)) {
+      console.error('[PythonService] transcribe-only aborted by client timeout:', {
+        timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
+        error,
+      });
+      return {
+        text: '',
+        success: false,
+        error: `Transcription timed out after ${PROCESS_FLOW_TIMEOUT_MS}ms`,
+      };
+    }
     console.error('[PythonService] Error transcribing:', error);
     return {
       text: '',
