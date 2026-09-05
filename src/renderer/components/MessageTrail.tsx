@@ -93,7 +93,7 @@ const FULL_REDUCTION: ReductionState = {
 
 // Reduction depends on both a conversation's header density and the available
 // viewport height. Cache the last measured result per conversation so switching
-// tabs never renders the temporary "show every header" state first.
+// conversations never renders the temporary "show every header" state first.
 const reductionByConversation = new Map<string, ReductionState>();
 const trailEntryByMessage = new WeakMap<Message, CachedTrailEntry>();
 const trailEntriesByMessageList = new WeakMap<Message[], TrailEntry[]>();
@@ -287,9 +287,9 @@ const HEADER_INDENT: Record<number, string> = {
 // per-row bottom margin (transitioned) rather than flex gap, so a hidden row
 // contributes no vertical space once collapsed.
 const ROW_TRANSITION = 'overflow-hidden transition-[min-height,max-height,opacity,margin-bottom] duration-200 ease-in-out';
-const ROW_SPACING_VISIBLE = 'mb-0.5';
-const ROW_SPACING_HIDDEN = 'mb-0';
+const ROW_SPACING_VISIBLE = 'mb-[1px]';
 
+const ROW_SPACING_HIDDEN = 'mb-0';
 const InlineMarkdownPreview: React.FC<{ content: string; className?: string }> = ({ content, className = '' }) => (
   <span className={`trail-markdown-preview ${className}`}>
     <ReactMarkdown
@@ -321,9 +321,9 @@ interface CollapsedTrailProps {
   onScrollToMessage: (messageId: string, headerIndex?: number) => void;
 }
 
-const MSG_ROW_VISIBLE_CLASS = 'min-h-2.5 max-h-8 opacity-100';
+const MSG_ROW_VISIBLE_CLASS = 'min-h-2 max-h-6 opacity-100';
 const MSG_ROW_HIDDEN_CLASS = 'min-h-0 max-h-0 opacity-0';
-const HDR_ROW_VISIBLE_CLASS = 'min-h-1.5 max-h-6 opacity-100';
+const HDR_ROW_VISIBLE_CLASS = 'min-h-1 max-h-4 opacity-100';
 const HDR_ROW_HIDDEN_CLASS = 'min-h-0 max-h-0 opacity-0';
 
 const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntries, activeTargets, reduction, onScrollToMessage }) => {
@@ -383,7 +383,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
                 }`}
               >
                 <div
-                  className={`w-5 h-[3px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out
+                  className={`w-5 h-[2px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out
                     group-hover/bar:w-6 group-hover/bar:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
                 />
               </div>
@@ -405,7 +405,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
                     }}
                   >
                     <div
-                      className={`${HEADER_WIDTHS[header.level]} h-[2px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out
+                      className={`${HEADER_WIDTHS[header.level]} h-[1px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out
                         ${HEADER_HOVER_WIDTHS[header.level]} group-hover/bar:bg-text-tertiary ${isHeaderActive ? 'message-trail-bar-active' : ''}`}
                     />
                   </div>
@@ -426,7 +426,7 @@ const CollapsedTrail: React.FC<CollapsedTrailProps> = ({ messages, assistantEntr
             onClick={() => inRange && onScrollToMessage(message.id)}
           >
             <div
-              className={`w-3 h-[3px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out relative
+              className={`w-3 h-[2px] bg-border-secondary transition-[width,background-color,box-shadow] duration-200 ease-in-out relative
                 group-hover:w-4 group-hover:bg-text-tertiary ${isMessageActive ? 'message-trail-bar-active' : ''}`}
             />
           </div>
@@ -602,7 +602,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({
             <div
               aria-hidden="true"
               data-expanded-trail-highlight
-              className="pointer-events-none absolute z-0 bg-bg-active transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
+              className="pointer-events-none absolute z-0 rounded bg-bg-active transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
               style={{
                 width: hoverFrame.width,
                 height: hoverFrame.height,
@@ -637,7 +637,7 @@ const ExpandedTrail: React.FC<ExpandedTrailProps> = ({
                   type="button"
                   data-trail-primary-active={isMessagePrimaryActive ? 'true' : undefined}
                   {...hoverTargetProps(targetKey({ messageId: entry.messageId }))}
-                  className="flex w-full min-w-0 flex-col gap-1 overflow-hidden border border-border-secondary px-1.5 py-1 text-left text-text-secondary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
+                  className="flex w-full min-w-0 flex-col gap-1 overflow-hidden rounded border border-border-secondary px-1.5 py-1 text-left text-text-secondary transition-colors hover:text-text-primary focus:text-text-primary focus:outline-none"
                   onClick={() => onScrollToMessage(entry.messageId)}
                 >
                   <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[0.5rem] uppercase tracking-[0.12em] text-text-tertiary">
@@ -746,8 +746,8 @@ const MessageTrail: React.FC<MessageTrailProps> = ({
   }, [trailEntries]);
 
   // Keep the owner alongside the state because this component is reused when
-  // switching tabs. During the switching render, use that conversation's cache
-  // directly rather than briefly displaying the previous tab's reduction.
+  // switching conversations. During the switching render, use that conversation's
+  // cache directly rather than briefly displaying the previous view's reduction.
   const cachedReduction = conversationId
     ? reductionByConversation.get(conversationId)
     : undefined;
@@ -833,8 +833,8 @@ const MessageTrail: React.FC<MessageTrailProps> = ({
 
     // Calibrate from the rendered rows if not already done.
     if (!metricsRef.current.calibrated) {
-      const msgRow = wrapper.querySelector<HTMLElement>('.min-h-2\\.5');
-      const headerRow = wrapper.querySelector<HTMLElement>('.min-h-1\\.5');
+      const msgRow = wrapper.querySelector<HTMLElement>('.min-h-2');
+      const headerRow = wrapper.querySelector<HTMLElement>('.min-h-1');
       const containerStyle = window.getComputedStyle(wrapper);
       const firstRow = wrapper.querySelector<HTMLElement>(':scope > div > div');
       if (msgRow || headerRow || firstRow) {
@@ -1201,10 +1201,11 @@ const MessageTrail: React.FC<MessageTrailProps> = ({
       role="navigation"
       aria-label="Message headers"
       data-message-trail
-      className="relative z-[200] w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
+      className="relative z-30 w-8 shrink-0 self-start sticky top-0 h-full max-h-full bg-bg-primary"
     >
       <div
         ref={collapsedBarsRef}
+        data-message-trail-collapsed
         className={`h-full max-h-full min-w-full overflow-hidden pl-2 py-2 flex items-center transition-opacity duration-150 ease-out ${barsAnimationClass} ${
           !isReductionReady
             ? 'pointer-events-none opacity-0'
@@ -1233,7 +1234,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({
 
       {showPanel ? (
         <div
-          className="pointer-events-none fixed z-[200] flex w-[240px] items-center"
+          className="pointer-events-none fixed z-30 flex w-[240px] items-center"
           style={{
             top: expandedPanelFrame?.top ?? 0,
             left: expandedPanelFrame?.left ?? 0,
@@ -1243,7 +1244,7 @@ const MessageTrail: React.FC<MessageTrailProps> = ({
         >
           <div
             ref={expandedPanelRef}
-            className={`pointer-events-auto max-h-[inherit] overflow-hidden border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
+            className={`pointer-events-auto max-h-[inherit] overflow-hidden rounded border border-border-secondary bg-[var(--color-bg-secondary)] shadow-lg ${
               isCollapsing ? 'message-trail-panel-exit' : 'message-trail-panel-enter'
             }`}
             onMouseEnter={expandTrail}

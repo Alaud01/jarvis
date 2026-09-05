@@ -11,7 +11,7 @@ import type {
   UpdateVocabularyCandidateInput,
 } from '../shared/dictionary';
 import type { UsageDashboardData, UsageDashboardQuery } from '../shared/usage';
-import type { WorkspaceView } from '../shared/workspaceTabs';
+import type { WorkspaceView } from '../shared/workspaceViews';
 
 export interface Message {
   id: string;
@@ -37,6 +37,7 @@ export interface Conversation {
   timestamp: Date;
   messages: Message[];
   folderId: string | null;
+  isPinned: boolean;
   isLoaded: boolean;
 }
 
@@ -69,6 +70,7 @@ export interface SerializedConversation {
   timestamp: string;
   messages: SerializedMessage[];
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedConversationMetadata {
@@ -76,6 +78,7 @@ export interface SerializedConversationMetadata {
   title: string;
   timestamp: string;
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedFolder {
@@ -176,8 +179,6 @@ declare global {
       storeSaveReasoningEffort: (effort: string) => Promise<{ success: boolean }>;
       storeLoadProvider: () => Promise<string>;
       storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
-      storeLoadOpenTabIds: () => Promise<string[]>;
-      storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
       storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
       storeLoadWorkspaceView: () => Promise<WorkspaceView>;

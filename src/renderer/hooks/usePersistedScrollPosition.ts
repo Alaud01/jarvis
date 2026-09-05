@@ -63,7 +63,7 @@ export function usePersistedScrollPosition(
       if (previousKey) {
         // React has already committed the incoming conversation by this point, so
         // container.scrollTop may belong to its new DOM. The scroll listener keeps
-        // the outgoing tab's last real position synchronously for this hand-off.
+        // the outgoing view's last real position synchronously for this hand-off.
         onPositionChangeRef.current(previousKey, lastKnownTopRef.current);
       }
 

@@ -1038,7 +1038,15 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const lastConversationSearchTriggerRef = useRef(conversationSearchTrigger);
   const [, setHeightRevision] = useState(0);
   const [layoutRevision, setLayoutRevision] = useState(0);
-  const [pendingNavigationRevision, setPendingNavigationRevision] = useState(0);
+  const [pendingNavigation, setPendingNavigationState] = useState<PendingVirtualNavigation | null>(null);
+
+  // Keep the ref (read by effects/event handlers) and the state (read during
+  // render to extend the virtual window) in sync. Setting one without the other
+  // either leaves the render blind to a pending target or leaves effects stale.
+  const setPendingNavigation = useCallback((target: PendingVirtualNavigation | null) => {
+    pendingVirtualNavigationRef.current = target;
+    setPendingNavigationState(target);
+  }, []);
   const [virtualViewportSnapshot, setVirtualViewportSnapshot] = useState(() => ({
     conversationId,
     viewport: getConversationViewport(conversationId),
@@ -1061,8 +1069,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
   const closeSearch = useCallback(() => {
     if (pendingVirtualNavigationRef.current?.target === 'highlight') {
-      pendingVirtualNavigationRef.current = null;
-      setPendingNavigationRevision(revision => revision + 1);
+      setPendingNavigation(null);
     }
     setIsSearchOpen(false);
 
@@ -1073,7 +1080,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       container.scrollTo({ top: container.scrollTop, behavior: 'auto' });
       lastScrollTopRef.current = container.scrollTop;
     }
-  }, [scrollContainerRef]);
+  }, [scrollContainerRef, setPendingNavigation]);
 
   const setAutoScrollEnabled = useCallback((enabled: boolean) => {
     autoScrollEnabledRef.current = enabled;
@@ -1144,11 +1151,27 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     const viewportEnd = virtualViewport.scrollTop
       + virtualViewport.height
       + DEFAULT_MESSAGE_HEIGHT * VIRTUALIZATION_OVERSCAN;
-    const start = Math.max(0, heightIndex.findIndexAtOffset(viewportStart));
-    const end = Math.min(
+    let start = Math.max(0, heightIndex.findIndexAtOffset(viewportStart));
+    let end = Math.min(
       messages.length,
       heightIndex.findIndexAtOffset(viewportEnd) + VIRTUALIZATION_OVERSCAN + 1
     );
+
+    // When navigating to a message that the height-index estimate placed outside
+    // the virtual window, extend the window to include the target so phase two
+    // can find and scroll to the real element. Collapses back to the viewport
+    // window once the pending navigation resolves and clears the ref.
+    if (pendingNavigation && pendingNavigation.conversationId === conversationId) {
+      const targetIndex = messages.findIndex(message => message.id === pendingNavigation.messageId);
+      if (targetIndex !== -1) {
+        if (targetIndex < start) {
+          start = Math.max(0, targetIndex - VIRTUALIZATION_OVERSCAN);
+        } else if (targetIndex >= end) {
+          end = Math.min(messages.length, targetIndex + VIRTUALIZATION_OVERSCAN + 1);
+        }
+      }
+    }
+
     const renderedEndOffset = end < messages.length
       ? heightIndex.getOffset(end)
       : heightIndex.getTotalHeight();
@@ -1342,7 +1365,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     }
   }, [conversationId, messages, scrollToBottomNow]);
 
-  const scrollElementIntoView = useCallback((element: Element, offset: number = 16) => {
+  const scrollElementIntoView = useCallback((element: Element, offset: number = 16, behavior: ScrollBehavior = 'smooth') => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -1358,12 +1381,11 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       reactivateAutoScroll();
     }
 
-    container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+    container.scrollTo({ top: targetScrollTop, behavior });
   }, [cancelAutoScroll, reactivateAutoScroll, scrollContainerRef]);
 
   const beginVirtualNavigation = useCallback((target: PendingVirtualNavigation) => {
-    pendingVirtualNavigationRef.current = target;
-    setPendingNavigationRevision(revision => revision + 1);
+    setPendingNavigation(target);
 
     const messageIndex = messages.findIndex(message => message.id === target.messageId);
     const container = scrollContainerRef.current;
@@ -1384,6 +1406,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     heightIndex,
     messages,
     scrollContainerRef,
+    setPendingNavigation,
     shouldVirtualize,
     updateVirtualViewport,
   ]);
@@ -1391,7 +1414,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   const scrollToMessageId = useCallback((messageId: string, offset = 16) => {
     const messageElement = messageRefsRef.current.get(messageId);
     if (messageElement) {
-      pendingVirtualNavigationRef.current = null;
+      setPendingNavigation(null);
       scrollElementIntoView(messageElement, offset);
       return;
     }
@@ -1402,13 +1425,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       target: 'message',
       offset,
     });
-  }, [beginVirtualNavigation, conversationId, scrollElementIntoView]);
+  }, [beginVirtualNavigation, conversationId, scrollElementIntoView, setPendingNavigation]);
 
   const scrollToSearchMatch = useCallback((match: ConversationSearchMatch) => {
     const messageElement = messageRefsRef.current.get(match.messageId);
     const highlightElement = messageElement?.querySelectorAll('.conversation-search-highlight')[match.occurrenceIndex];
     if (highlightElement) {
-      pendingVirtualNavigationRef.current = null;
+      setPendingNavigation(null);
       scrollElementIntoView(highlightElement, 72);
       return;
     }
@@ -1420,7 +1443,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       targetIndex: match.occurrenceIndex,
       offset: 72,
     });
-  }, [beginVirtualNavigation, conversationId, scrollElementIntoView]);
+  }, [beginVirtualNavigation, conversationId, scrollElementIntoView, setPendingNavigation]);
 
   const activateSearchMatch = useCallback((nextIndex: number) => {
     const match = conversationSearchMatches[nextIndex];
@@ -1456,7 +1479,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       return;
     }
     if (target.conversationId !== conversationId) {
-      pendingVirtualNavigationRef.current = null;
+      setPendingNavigation(null);
       return;
     }
 
@@ -1474,12 +1497,16 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         ?? messageElement;
     }
 
-    pendingVirtualNavigationRef.current = null;
-    scrollElementIntoView(targetElement, target.offset);
+    // Phase one already jumped to the estimated offset; phase two corrects the
+    // estimate error against the real rect. Instant (not smooth) so the error
+    // is invisible — a smooth scroll of hundreds of px would look like a drift.
+    setPendingNavigation(null);
+    scrollElementIntoView(targetElement, target.offset, 'auto');
   }, [
     conversationId,
-    pendingNavigationRevision,
+    pendingNavigation,
     scrollElementIntoView,
+    setPendingNavigation,
     virtualRange.end,
     virtualRange.start,
   ]);
@@ -1493,10 +1520,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       const headerElement = messageElement?.querySelectorAll('h1, h2, h3')[headerIndex];
 
       if (headerElement) {
-        pendingVirtualNavigationRef.current = null;
+        setPendingNavigation(null);
         scrollElementIntoView(headerElement, 24);
       } else if (messageElement) {
-        pendingVirtualNavigationRef.current = null;
+        setPendingNavigation(null);
         scrollElementIntoView(messageElement);
       } else {
         beginVirtualNavigation({
@@ -1509,7 +1536,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       }
     },
     scrollToBottom: () => {
-      pendingVirtualNavigationRef.current = null;
+      setPendingNavigation(null);
       autoScrollEnabledRef.current = true;
       scrollToBottomNow('smooth');
     },
@@ -1518,8 +1545,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     beginVirtualNavigation,
     conversationId,
     scrollElementIntoView,
-    scrollToMessageId,
     scrollToBottomNow,
+    scrollToMessageId,
+    setPendingNavigation,
   ]);
 
   useEffect(() => {

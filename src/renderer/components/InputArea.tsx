@@ -666,7 +666,7 @@ const InputArea: React.FC<InputAreaProps> = ({
 
   return (
     <div
-      className="pb-6 bg-bg-primary shrink-0"
+      className="pb-6 bg-transparent shrink-0"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}

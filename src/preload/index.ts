@@ -121,8 +121,6 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveReasoningEffort: (effort: string) => ipcRenderer.invoke('store:save-reasoning-effort', effort),
   storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
-  storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),
-  storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),
   storeSaveCurrentConversationId: (id: string | null) => ipcRenderer.invoke('store:save-current-conversation-id', id),
   storeLoadWorkspaceView: () => ipcRenderer.invoke('store:load-workspace-view'),

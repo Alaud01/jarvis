@@ -16,8 +16,6 @@ import {
   saveSelectedReasoningEffort,
   loadSelectedProvider,
   saveSelectedProvider,
-  loadOpenTabIds,
-  saveOpenTabIds,
   loadCurrentConversationId,
   saveCurrentConversationId,
   loadWorkspaceView,
@@ -30,7 +28,7 @@ import {
   type SerializedConversationMetadata,
   type SerializedFolder,
 } from '../store';
-import type { WorkspaceView } from '../../shared/workspaceTabs';
+import type { WorkspaceView } from '../../shared/workspaceViews';
 import {
   deleteProviderConversationState,
   getAllModels,
@@ -138,15 +136,6 @@ export function registerStoreHandlers(): void {
 
   ipcMain.handle('store:save-provider', async (_event, provider: string) => {
     saveSelectedProvider(provider);
-    return { success: true };
-  });
-
-  ipcMain.handle('store:load-open-tab-ids', async () => {
-    return loadOpenTabIds();
-  });
-
-  ipcMain.handle('store:save-open-tab-ids', async (_event, tabIds: string[]) => {
-    saveOpenTabIds(tabIds);
     return { success: true };
   });
 

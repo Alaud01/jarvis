@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
-import { isValidOpenTabId, isWorkspaceView } from '../shared/workspaceTabs';
-import type { WorkspaceView } from '../shared/workspaceTabs';
+import { isWorkspaceView } from '../shared/workspaceViews';
+import type { WorkspaceView } from '../shared/workspaceViews';
 import type {
   CorrectionObservation,
   LegacyDictionaryEntry,
@@ -34,6 +34,7 @@ export interface SerializedConversation {
   timestamp: string;
   messages: SerializedMessage[];
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedConversationMetadata {
@@ -41,6 +42,7 @@ export interface SerializedConversationMetadata {
   title: string;
   timestamp: string;
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedFolder {
@@ -58,7 +60,6 @@ interface StoreSchema {
   selectedModel: string;
   selectedReasoningEffort: string;
   selectedProvider: string;
-  openTabIds: string[];
   currentConversationId: string | null;
   workspaceView: WorkspaceView;
   scrollPositions: Record<string, number>;
@@ -88,9 +89,8 @@ const store = new Store<StoreSchema>({
     selectedModel: '',
     selectedReasoningEffort: '',
     selectedProvider: 'ollama',
-    openTabIds: [],
     currentConversationId: null,
-    workspaceView: 'home',
+    workspaceView: 'chat',
     scrollPositions: {},
     conversationDrafts: {},
     dictionaryEntries: [],
@@ -175,15 +175,9 @@ function pruneLegacyConversations(validIds: Set<string>): void {
 }
 
 function pruneConversationReferences(validIds: Set<string>): void {
-  const openTabIds = loadOpenTabIds();
-  const nextOpenTabIds = openTabIds.filter(id => isValidOpenTabId(id, validIds));
-  if (nextOpenTabIds.length !== openTabIds.length) {
-    store.set('openTabIds', nextOpenTabIds);
-  }
-
   const currentConversationId = loadCurrentConversationId();
   if (currentConversationId && !validIds.has(currentConversationId)) {
-    store.set('currentConversationId', nextOpenTabIds[0] ?? null);
+    store.set('currentConversationId', null);
   }
 }
 
@@ -212,6 +206,7 @@ function conversationToMetadata(conversation: SerializedConversation): Serialize
     title: conversation.title,
     timestamp: conversation.timestamp,
     folderId: conversation.folderId ?? null,
+    isPinned: Boolean(conversation.isPinned),
   };
 }
 
@@ -403,14 +398,6 @@ export function deleteLegacyStoredProviderApiKeys(): void {
   store.delete('openRouterApiKey');
 }
 
-export function loadOpenTabIds(): string[] {
-  return store.get('openTabIds', []) as string[];
-}
-
-export function saveOpenTabIds(tabIds: string[]): void {
-  store.set('openTabIds', tabIds);
-}
-
 export function loadCurrentConversationId(): string | null {
   return store.get('currentConversationId', null) as string | null;
 }
@@ -420,8 +407,8 @@ export function saveCurrentConversationId(id: string | null): void {
 }
 
 export function loadWorkspaceView(): WorkspaceView {
-  const stored = store.get('workspaceView', 'home');
-  return isWorkspaceView(stored) ? stored : 'home';
+  const stored = store.get('workspaceView', 'chat');
+  return isWorkspaceView(stored) ? stored : 'chat';
 }
 
 export function saveWorkspaceView(view: WorkspaceView): void {

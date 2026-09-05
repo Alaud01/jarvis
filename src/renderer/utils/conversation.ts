@@ -39,6 +39,7 @@ export function serializeConversation(c: Conversation): SerializedConversation {
       })),
     })),
     folderId: c.folderId,
+    isPinned: c.isPinned,
   };
 }
 
@@ -48,6 +49,7 @@ export function serializeConversationMetadata(c: Conversation): SerializedConver
     title: c.title,
     timestamp: c.timestamp.toISOString(),
     folderId: c.folderId,
+    isPinned: c.isPinned,
   };
 }
 
@@ -70,6 +72,7 @@ export function deserializeConversation(c: SerializedConversation): Conversation
       })),
     })),
     folderId: c.folderId ?? null,
+    isPinned: Boolean(c.isPinned),
     isLoaded: true,
   };
 }
@@ -81,6 +84,7 @@ export function deserializeConversationMetadata(c: SerializedConversationMetadat
     timestamp: new Date(c.timestamp),
     messages: [],
     folderId: c.folderId ?? null,
+    isPinned: Boolean(c.isPinned),
     isLoaded: false,
   };
 }
@@ -135,7 +139,7 @@ export function hashUnknown(value: unknown, seed = 2166136261): number {
 export function getConversationMetadataRevision(conversations: Conversation[]): string {
   const hash = conversations.reduce((metadataHash, conversation) => (
     hashString(
-      `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
+      `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}\u0000${conversation.isPinned}`,
       metadataHash
     )
   ), 2166136261);
@@ -154,7 +158,7 @@ export function getConversationRevision(conversation: Conversation): string {
     nextHash = hashUnknown(message.compactions, nextHash);
     return nextHash;
   }, hashString(
-    `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
+    `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}\u0000${conversation.isPinned}`,
     2166136261
   ));
 
