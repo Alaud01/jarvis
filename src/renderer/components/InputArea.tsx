@@ -666,13 +666,13 @@ const InputArea: React.FC<InputAreaProps> = ({
 
   return (
     <div
-      className="pb-6 bg-transparent shrink-0"
+      className="composer-input pb-6 bg-transparent shrink-0"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <div className="max-w-200 mx-auto">
-        <div className={`bg-transparent border px-3 py-2 transition-all duration-150 focus-within:border-text-primary ${isDragOver ? 'border-text-primary bg-bg-secondary' : 'border-border-primary'}`}>
+        <div className={`border px-3 py-2 transition-all duration-150 focus-within:border-text-primary ${isDragOver ? 'border-text-primary bg-bg-secondary' : 'border-border-primary bg-bg-primary'}`}>
           {attachments.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap mb-2">
               {attachments.map((attachment, index) => (
@@ -706,7 +706,7 @@ const InputArea: React.FC<InputAreaProps> = ({
           )}
           <textarea
             ref={textareaRef}
-            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-[0.875rem] leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
+            className="w-full min-h-7 max-h-[5lh] border-none outline-none resize-none bg-transparent text-text-primary font-sans text-[0.875rem] leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onPaste={handlePaste}

@@ -279,7 +279,7 @@ h1, h2, h3, h4, h5, h6 {
   overflow-anchor: none;
   overflow-x: hidden;
   scrollbar-gutter: stable;
-  margin-inline: 2px;
+  margin-inline: 0;
   box-sizing: border-box;
 }
 
@@ -287,6 +287,8 @@ h1, h2, h3, h4, h5, h6 {
   -webkit-app-region: drag;
 }
 
+/* Keep data-sidebar-item on interactive rows: Electron otherwise swallows
+   their clicks as native window dragging, even when React has onClick. */
 .sidebar-window-drag-region button,
 .sidebar-window-drag-region input,
 .sidebar-window-drag-region [data-sidebar-item] {
@@ -888,4 +890,46 @@ select option {
     color: var(--color-text-primary) !important;
     transition: none !important;
   }
+}
+
+/* The rail and scrollbar share the conversation's symmetric composer gutters. */
+.chat-layout {
+  --trail-width: 32px;
+  --conversation-width: 800px;
+  --conversation-right-gutter: calc(var(--trail-width) - 6px);
+}
+
+.conversation-body {
+  /* Grow with the messages so padding follows the content instead of sitting
+     inside a viewport-height flex item whose messages overflow underneath it.
+     The composer overlay height includes its transparent bottom gutter, so a
+     small negative offset still leaves the last message fully above the input. */
+  align-self: flex-start;
+  min-height: 100%;
+  padding-bottom: calc(var(--composer-height, 120px) - 8px);
+}
+
+.conversation-body[data-generating='true'] {
+  padding-bottom: calc(var(--composer-height, 120px) + 48px);
+}
+
+.conversation-column {
+  max-width: calc(var(--conversation-width) + var(--conversation-right-gutter));
+  padding-right: var(--conversation-right-gutter);
+}
+
+.composer-overlay {
+  position: absolute;
+  inset: auto 0 0;
+  z-index: 20;
+  background: transparent;
+  pointer-events: none;
+}
+
+.composer-overlay > * {
+  pointer-events: auto;
+}
+
+.composer-input {
+  padding-inline: var(--trail-width);
 }

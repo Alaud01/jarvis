@@ -115,3 +115,11 @@ _Avoid_: autonomous browser sidecar, browser task
 - "Correction" does not include ordinary rewrites for automatic learning; common-word and sentence-level changes require manual entry.
 - "Observed app" is evidence about where vocabulary appears, not ownership of the Vocabulary Entry.
 - The retired autonomous browser sidecar previously shared terminology with **Browser Control**; the product capability is now **Browser Control**.
+
+# Conversation versions
+
+Editing and resubmitting a user message creates a sibling version. The original message and its entire continuation remain available through the version controls beneath the message. Regenerating an assistant response creates a sibling answer in the same way. An unchanged edit does not create a version.
+
+A conversation stores one active transcript plus archived message nodes, parent links, and remembered child selections. Shared prefixes are stored once. Switching a version restores that branch's most recently selected continuation, including nested edits and subsequent replies. Only the active transcript is rendered, searched, or sent to a model. Existing conversations need no migration; branch data is added on the first edit or regeneration.
+
+Version changes are disabled while the conversation is streaming. Errors and stopped responses remain on their branch, leaving previous versions accessible. Branch context keys invalidate the Codex provider's private history when switching branches, including branches with identical user text but different assistant answers. Conversation serialization and cache eviction preserve branch data on disk and release archived nodes from memory when evicting a conversation.

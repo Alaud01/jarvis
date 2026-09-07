@@ -17,6 +17,8 @@ import {
 } from '../utils/conversationViewCache';
 
 interface MessageListProps {
+  versions?: Record<string, string[]>;
+  onSelectVersion?: (messageId: string, targetId: string) => void;
   messages: Message[];
   conversationId?: string | null;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -672,6 +674,8 @@ const CompactionMarker: React.FC<{
 };
 
 interface MessageRowProps {
+  versionIds?: string[];
+  onSelectVersion?: (messageId: string, targetId: string) => void;
   message: Message;
   conversationId: string | null;
   isEditing: boolean;
@@ -693,6 +697,8 @@ interface MessageRowProps {
 }
 
 const MessageRow = React.memo(({
+  versionIds,
+  onSelectVersion,
   message,
   conversationId,
   isEditing,
@@ -898,6 +904,17 @@ const MessageRow = React.memo(({
           )}
 
           <div className="flex items-center justify-end gap-2">
+            {versionIds && versionIds.length > 1 && (
+              <div className="flex items-center gap-2 text-xs text-text-secondary" role="group" aria-label="Message versions">
+                <button type="button" aria-label="Previous version" disabled={isLoading || versionIds.indexOf(message.id) <= 0}
+                  className="px-2 py-1 transition-[color,background-color,transform] duration-150 ease-out hover:not-disabled:scale-110 hover:not-disabled:bg-bg-hover hover:not-disabled:text-white active:not-disabled:scale-95 disabled:cursor-default disabled:opacity-30"
+                  onClick={() => onSelectVersion?.(message.id, versionIds[versionIds.indexOf(message.id) - 1])}>‹</button>
+                <span aria-live="polite">{versionIds.indexOf(message.id) + 1} / {versionIds.length}</span>
+                <button type="button" aria-label="Next version" disabled={isLoading || versionIds.indexOf(message.id) >= versionIds.length - 1}
+                  className="px-2 py-1 transition-[color,background-color,transform] duration-150 ease-out hover:not-disabled:scale-110 hover:not-disabled:bg-bg-hover hover:not-disabled:text-white active:not-disabled:scale-95 disabled:cursor-default disabled:opacity-30"
+                  onClick={() => onSelectVersion?.(message.id, versionIds[versionIds.indexOf(message.id) + 1])}>›</button>
+              </div>
+            )}
             {message.sender === 'user' ? (
               <>
                 <MessageActionButton
@@ -1010,6 +1027,8 @@ const countSearchableMessageMatches = (
 
 const MessageList = forwardRef<MessageListHandle, MessageListProps>(({ 
   messages,
+  versions,
+  onSelectVersion,
   conversationId = null,
   scrollContainerRef,
   isLoading = false,
@@ -1086,7 +1105,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     autoScrollEnabledRef.current = enabled;
     const container = scrollContainerRef.current;
     if (container) {
-      container.style.overflowAnchor = enabled ? 'none' : 'auto';
+      container.style.overflowAnchor = enabled || pendingVirtualNavigationRef.current ? 'none' : 'auto';
     }
   }, [scrollContainerRef]);
 
@@ -1105,6 +1124,18 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       smoothAutoScrollTimeoutRef.current = null;
     }
   }, []);
+
+  const handleSelectVersion = useCallback((messageId: string, targetId: string) => {
+    if (!onSelectVersion) return;
+    cancelAutoScroll();
+    clearSmoothAutoScrollTracking();
+    const container = scrollContainerRef.current;
+    if (container) {
+      container.scrollTo({ top: container.scrollTop, behavior: 'auto' });
+    }
+    setPendingNavigation({ conversationId, messageId: targetId, target: 'message', offset: 16 });
+    onSelectVersion(messageId, targetId);
+  }, [cancelAutoScroll, clearSmoothAutoScrollTracking, conversationId, onSelectVersion, scrollContainerRef, setPendingNavigation]);
 
   const trackSmoothAutoScroll = useCallback(() => {
     smoothAutoScrollDeadlineRef.current = performance.now() + SMOOTH_AUTO_SCROLL_TRACKING_MS;
@@ -1157,16 +1188,13 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       heightIndex.findIndexAtOffset(viewportEnd) + VIRTUALIZATION_OVERSCAN + 1
     );
 
-    // When navigating to a message that the height-index estimate placed outside
-    // the virtual window, extend the window to include the target so phase two
-    // can find and scroll to the real element. Collapses back to the viewport
-    // window once the pending navigation resolves and clears the ref.
+    // Render a bounded window around a distant navigation target. Including
+    // every row between the old branch's viewport and the target defeats virtualization.
     if (pendingNavigation && pendingNavigation.conversationId === conversationId) {
       const targetIndex = messages.findIndex(message => message.id === pendingNavigation.messageId);
       if (targetIndex !== -1) {
-        if (targetIndex < start) {
+        if (targetIndex < start || targetIndex >= end) {
           start = Math.max(0, targetIndex - VIRTUALIZATION_OVERSCAN);
-        } else if (targetIndex >= end) {
           end = Math.min(messages.length, targetIndex + VIRTUALIZATION_OVERSCAN + 1);
         }
       }
@@ -1358,6 +1386,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     prevLastMessageIdRef.current = lastMessage.id;
 
     if (
+      !pendingVirtualNavigationRef.current &&
       lastMessage.id !== previousLastId &&
       (lastMessage.sender === 'user' || lastMessage.isStreaming)
     ) {
@@ -1413,7 +1442,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
   const scrollToMessageId = useCallback((messageId: string, offset = 16) => {
     const messageElement = messageRefsRef.current.get(messageId);
-    if (messageElement) {
+    if (messageElement && !shouldVirtualize) {
       setPendingNavigation(null);
       scrollElementIntoView(messageElement, offset);
       return;
@@ -1425,7 +1454,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       target: 'message',
       offset,
     });
-  }, [beginVirtualNavigation, conversationId, scrollElementIntoView, setPendingNavigation]);
+  }, [beginVirtualNavigation, conversationId, scrollElementIntoView, setPendingNavigation, shouldVirtualize]);
 
   const scrollToSearchMatch = useCallback((match: ConversationSearchMatch) => {
     const messageElement = messageRefsRef.current.get(match.messageId);
@@ -1478,7 +1507,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     if (!target) {
       return;
     }
-    if (target.conversationId !== conversationId) {
+    if (target.conversationId !== conversationId || !messages.some(message => message.id === target.messageId)) {
       setPendingNavigation(null);
       return;
     }
@@ -1497,16 +1526,37 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         ?? messageElement;
     }
 
-    // Phase one already jumped to the estimated offset; phase two corrects the
-    // estimate error against the real rect. Instant (not smooth) so the error
-    // is invisible — a smooth scroll of hundreds of px would look like a drift.
-    setPendingNavigation(null);
-    scrollElementIntoView(targetElement, target.offset, 'auto');
+    // Newly mounted rows above the target replace estimates with measured
+    // heights. Keep correcting the target through those commits before releasing
+    // navigation; native anchoring must not apply a second correction.
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    container.style.overflowAnchor = 'none';
+    const alignTarget = () => {
+      if (pendingVirtualNavigationRef.current !== target || !targetElement.isConnected) return;
+      scrollElementIntoView(targetElement, target.offset, 'auto');
+      updateVirtualViewport();
+    };
+    alignTarget();
+    let frame = requestAnimationFrame(() => {
+      alignTarget();
+      frame = requestAnimationFrame(() => {
+        alignTarget();
+        if (pendingVirtualNavigationRef.current !== target) return;
+        setPendingNavigation(null);
+        setAutoScrollEnabled(autoScrollEnabledRef.current);
+      });
+    });
+    return () => cancelAnimationFrame(frame);
   }, [
     conversationId,
+    messages,
     pendingNavigation,
     scrollElementIntoView,
+    scrollContainerRef,
+    setAutoScrollEnabled,
     setPendingNavigation,
+    updateVirtualViewport,
     virtualRange.end,
     virtualRange.start,
   ]);
@@ -1519,7 +1569,9 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       const messageElement = messageRefsRef.current.get(messageId);
       const headerElement = messageElement?.querySelectorAll('h1, h2, h3')[headerIndex];
 
-      if (headerElement) {
+      if (shouldVirtualize) {
+        beginVirtualNavigation({ conversationId, messageId, target: 'header', targetIndex: headerIndex, offset: 24 });
+      } else if (headerElement) {
         setPendingNavigation(null);
         scrollElementIntoView(headerElement, 24);
       } else if (messageElement) {
@@ -1548,6 +1600,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     scrollToBottomNow,
     scrollToMessageId,
     setPendingNavigation,
+    shouldVirtualize,
   ]);
 
   useEffect(() => {
@@ -1597,6 +1650,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
 
   useLayoutEffect(() => {
     if (!streamingActive || !autoScrollEnabledRef.current) return;
+    if (pendingVirtualNavigationRef.current) return;
     if (userScrollIntentDeadlineRef.current > performance.now()) return;
 
     // Streaming updates arrive faster than a smooth scroll can finish. Restarting
@@ -1641,6 +1695,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     };
 
     const handleWheel = (event: WheelEvent) => {
+      if (pendingVirtualNavigationRef.current && event.deltaY !== 0) {
+        setPendingNavigation(null);
+        cancelAutoScroll();
+      }
       if (event.deltaY >= 0 || container.scrollHeight - container.clientHeight <= 1) {
         return;
       }
@@ -1650,6 +1708,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     };
 
     const handleTouchMove = () => {
+      if (pendingVirtualNavigationRef.current) {
+        setPendingNavigation(null);
+        cancelAutoScroll();
+      }
       if (container.scrollHeight - container.clientHeight <= 1) {
         return;
       }
@@ -1673,6 +1735,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     reactivateAutoScroll,
     scrollContainerRef,
     setAutoScrollEnabled,
+    setPendingNavigation,
   ]);
 
   const hasStreamingMessage = messages.some(m => m.isStreaming);
@@ -1712,7 +1775,10 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
     : '0/0';
 
   return (
-    <div className="flex-1 min-w-0">
+    <div
+      className="conversation-body flex-1 min-w-0"
+      data-generating={isLoading || streamingActive ? 'true' : undefined}
+    >
       {isSearchOpen && (
         <div className="fixed right-[40px] top-[49px] z-50 w-[min(360px,calc(100vw-2rem))]">
           <div className="flex h-9 w-full max-w-[360px] items-center gap-1 border border-border-secondary bg-bg-primary p-1 shadow-lg">
@@ -1771,7 +1837,7 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
         <NewChatEmptyState refreshKey={emptyStateRefreshKey ?? 0} />
       ) : (
       <div className="py-4">
-        <div ref={messagesColumnRef} className="max-w-[826px] mx-auto pr-[26px]">
+        <div ref={messagesColumnRef} className="conversation-column mx-auto">
           {shouldVirtualize && virtualRange.topPadding > 0 && (
             <div aria-hidden="true" style={{ height: virtualRange.topPadding }} />
           )}
@@ -1780,6 +1846,8 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
               key={message.id}
               message={message}
               conversationId={conversationId}
+              versionIds={versions?.[message.id]}
+              onSelectVersion={onSelectVersion ? handleSelectVersion : undefined}
               isEditing={editingMessageId === message.id}
               editText={editText}
               copiedId={copiedId}

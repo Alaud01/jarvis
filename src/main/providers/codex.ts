@@ -321,7 +321,8 @@ export class CodexProvider implements Provider {
     const dynamicTools = executeTool
       ? toCodexDynamicTools(options.tools ?? [])
       : [];
-    const toolSchemaFingerprint = fingerprintCodexDynamicTools(dynamicTools);
+    const toolSchemaFingerprint = fingerprintCodexDynamicTools(dynamicTools)
+      + (options?.contextKey ? `:branch:${options.contextKey}` : '');
     const onToolCall = executeTool
       ? (tool: string, argumentsValue: Record<string, unknown>) => (
           executeTool(tool, argumentsValue)

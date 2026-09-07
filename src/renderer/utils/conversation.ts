@@ -38,6 +38,7 @@ export function serializeConversation(c: Conversation): SerializedConversation {
         completedAt: compaction.completedAt?.toISOString(),
       })),
     })),
+    branches: c.branches ? { ...c.branches, archived: serializeConversation({ ...c, messages: c.branches.archived, branches: undefined }).messages } : undefined,
     folderId: c.folderId,
     isPinned: c.isPinned,
   };
@@ -71,6 +72,7 @@ export function deserializeConversation(c: SerializedConversation): Conversation
         completedAt: compaction.completedAt ? new Date(compaction.completedAt) : undefined,
       })),
     })),
+    branches: c.branches ? { ...c.branches, archived: deserializeConversation({ ...c, messages: c.branches.archived, branches: undefined }).messages } : undefined,
     folderId: c.folderId ?? null,
     isPinned: Boolean(c.isPinned),
     isLoaded: true,
@@ -162,7 +164,13 @@ export function getConversationRevision(conversation: Conversation): string {
     2166136261
   ));
 
-  return `${conversation.messages.length}:${hash}`;
+  const branches = conversation.branches;
+  const branchRevision = branches
+    ? `${hashUnknown([branches.contextKey, branches.parents, branches.selected])}:${getConversationRevision({
+        ...conversation, messages: branches.archived, branches: undefined,
+      })}`
+    : '';
+  return `${conversation.messages.length}:${hash}:${branchRevision}`;
 }
 
 export function getNextFolderName(existingFolders: Folder[]): string {

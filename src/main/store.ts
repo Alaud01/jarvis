@@ -1,3 +1,4 @@
+import type { ConversationBranches } from '../shared/conversationBranches';
 import Store from 'electron-store';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,6 +34,7 @@ export interface SerializedConversation {
   title: string;
   timestamp: string;
   messages: SerializedMessage[];
+  branches?: ConversationBranches<SerializedMessage>;
   folderId: string | null;
   isPinned?: boolean;
 }
@@ -270,6 +272,7 @@ export function loadConversation(id: string): SerializedConversation | null {
 
   const storedConversation = readConversationFile(id);
   return {
+    ...storedConversation,
     ...metadata,
     messages: storedConversation?.messages ?? [],
   };
@@ -282,10 +285,10 @@ export function loadConversations(ids?: string[]): SerializedConversation[] {
 
   return metadata
     .filter(c => !requestedIds || requestedIds.has(c.id))
-    .map(c => ({
-      ...c,
-      messages: readConversationFile(c.id)?.messages ?? [],
-    }));
+    .map(c => {
+      const stored = readConversationFile(c.id);
+      return { ...stored, ...c, messages: stored?.messages ?? [] };
+    });
 }
 
 export function saveConversationMetadata(metadata: SerializedConversationMetadata[]): void {

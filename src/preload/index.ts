@@ -29,6 +29,7 @@ type ChatMessagePayload = {
 type SendMessageStreamRequest = {
   conversationId: string;
   assistantMessageId: string;
+  contextKey?: string;
   model: string;
   provider: string;
   reasoningEffort?: string;

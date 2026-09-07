@@ -294,6 +294,17 @@ test('prepares replay history only for new or invalidated Codex threads', async 
       options,
     );
     assert.equal(replayPreparations, 2);
+
+    // Same user payloads and positions, but a different assistant branch.
+    await provider.streamChat(
+      'codex:gpt-test',
+      [...editedMessages, { role: 'assistant', content: 'Different answer' }, { role: 'user', content: 'Continue' }],
+      abortController,
+      () => undefined,
+      { ...options, contextKey: 'alternate-answer' },
+    );
+    assert.equal(replayPreparations, 3);
+
   } finally {
     await provider.shutdown();
     await fs.rm(temporaryRoot, { recursive: true, force: true });

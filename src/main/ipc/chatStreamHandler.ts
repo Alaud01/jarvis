@@ -37,6 +37,7 @@ import { recordResolvedTurnUsage } from '../usageService';
 interface SendMessageStreamRequest {
   conversationId: string;
   assistantMessageId: string;
+  contextKey?: string;
   model: string;
   provider: string;
   reasoningEffort?: string;
@@ -376,6 +377,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
             keepAlive: CHAT_MODEL_KEEP_ALIVE,
             reasoningEffort: request.reasoningEffort,
             conversationId: request.conversationId,
+            contextKey: request.contextKey,
             prepareReplayMessages: replayMessages => (
               compactMessagesForContext(replayMessages, 'thread-replay')
             ),

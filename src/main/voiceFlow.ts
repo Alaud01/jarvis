@@ -18,6 +18,8 @@ type VoiceTranscriptPayload = {
 };
 
 let voiceFlowState: VoiceFlowState = 'idle';
+let recordingStarting = false;
+let startErrorTimer: ReturnType<typeof setTimeout> | null = null;
 
 export type VoiceFlowResult = {
   text: string;
@@ -135,6 +137,7 @@ function beginPreRecordingCapture(): void {
 }
 
 async function handleVoiceShortcut(): Promise<void> {
+  if (recordingStarting) return;
   debugLog('[VoiceFlow] handleVoiceShortcut state:', voiceFlowState);
 
   if (voiceFlowState === 'idle') {
@@ -147,30 +150,42 @@ async function handleVoiceShortcut(): Promise<void> {
 }
 
 async function startVoiceRecording(): Promise<void> {
-  if (voiceFlowState !== 'idle') {
+  if (voiceFlowState !== 'idle' || recordingStarting) {
     return;
   }
 
-  voiceFlowState = 'recording';
-  sendStateToRenderer('recording');
-  await capturePreRecordingTarget();
-  showOverlay('recording');
-  beginPreRecordingCapture();
+  if (startErrorTimer) {
+    clearTimeout(startErrorTimer);
+    startErrorTimer = null;
+  }
+  recordingStarting = true;
+  try {
+    await capturePreRecordingTarget();
 
-  const result = await startRecording();
+    const result = await startRecording();
 
-  if (!result.success) {
-    preRecordingApp = null;
-    preRecordingProjectFocused = false;
-    preRecordingContext = EMPTY_VOICE_CONTEXT;
-    voiceFlowState = 'idle';
-    sendStateToRenderer('idle');
-    sendErrorToRenderer(result.error || 'Failed to start recording');
-    showOverlay('error', undefined, result.error || 'Failed to start recording');
-    setTimeout(() => {
-      hideOverlay();
-      setOverlayAnchorBounds(null);
-    }, 2000);
+    if (!result.success) {
+      preRecordingApp = null;
+      preRecordingProjectFocused = false;
+      preRecordingContext = EMPTY_VOICE_CONTEXT;
+      voiceFlowState = 'idle';
+      sendStateToRenderer('idle');
+      sendErrorToRenderer(result.error || 'Failed to start recording');
+      showOverlay('error', undefined, result.error || 'Failed to start recording');
+      startErrorTimer = setTimeout(() => {
+        startErrorTimer = null;
+        hideOverlay();
+        setOverlayAnchorBounds(null);
+      }, 2000);
+      return;
+    }
+
+    voiceFlowState = 'recording';
+    sendStateToRenderer('recording');
+    showOverlay('recording');
+    beginPreRecordingCapture();
+  } finally {
+    recordingStarting = false;
   }
 }
 
@@ -389,6 +404,10 @@ export function registerVoiceFlowIPC(): void {
 }
 
 export async function cleanupVoiceFlow(): Promise<void> {
+  if (startErrorTimer) {
+    clearTimeout(startErrorTimer);
+    startErrorTimer = null;
+  }
   teardownGlobalHotkey();
   destroyOverlay();
   await cleanupAudioCapture();

@@ -1,3 +1,4 @@
+import type { ConversationBranches } from '../shared/conversationBranches';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
@@ -36,6 +37,7 @@ export interface Conversation {
   title: string;
   timestamp: Date;
   messages: Message[];
+  branches?: ConversationBranches<Message>;
   folderId: string | null;
   isPinned: boolean;
   isLoaded: boolean;
@@ -69,6 +71,7 @@ export interface SerializedConversation {
   title: string;
   timestamp: string;
   messages: SerializedMessage[];
+  branches?: ConversationBranches<SerializedMessage>;
   folderId: string | null;
   isPinned?: boolean;
 }
@@ -112,6 +115,7 @@ export interface ProviderInfo {
 export interface SendMessageStreamRequest {
   conversationId: string;
   assistantMessageId: string;
+  contextKey?: string;
   model: string;
   provider: string;
   reasoningEffort?: string;

@@ -62,6 +62,7 @@ export interface StreamChatTurnOptions {
   keepAlive?: string | number;
   reasoningEffort?: string;
   conversationId?: string;
+  contextKey?: string;
   prepareReplayMessages?: (messages: ChatMessage[]) => Promise<ChatMessage[]>;
   executeTool?: (
     name: string,

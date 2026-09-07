@@ -897,7 +897,10 @@ def is_retriable_openrouter_error(error: Exception) -> bool:
 
 def openrouter_failure(error: Exception, attempts: int) -> HTTPException:
     if isinstance(error, urllib_error.HTTPError):
-        error_body = error.read().decode("utf-8", errors="replace")
+        try:
+            error_body = error.read().decode("utf-8", errors="replace")
+        finally:
+            error.close()
         return HTTPException(
             status_code=error.code,
             detail=f"OpenRouter transcription HTTP error {error.code}: {error_body}",
@@ -958,6 +961,8 @@ def transcribe_chunk_with_openrouter(wav: np.ndarray) -> str:
             last_error = error
             if attempt >= OPENROUTER_MAX_ATTEMPTS or not is_retriable_openrouter_error(error):
                 raise openrouter_failure(error, attempt) from error
+            if isinstance(error, urllib_error.HTTPError):
+                error.close()
             delay = OPENROUTER_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
             logger.warning(
                 "[VoiceService] OpenRouter transcription attempt %s/%s failed (%s); retrying in %.1fs",

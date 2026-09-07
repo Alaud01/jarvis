@@ -67,6 +67,7 @@ export function useConversations(): UseConversationsResult {
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
   const conversationAccessRef = useRef<Map<string, number>>(new Map());
+  const savedStreamingSnapshotsRef = useRef<Map<string, string>>(new Map());
   const savedConversationRevisionsRef = useRef<Map<string, string>>(new Map());
   const savedConversationMetadataRevisionRef = useRef<string>('');
   const metadataSaveTimerRef = useRef<number | null>(null);
@@ -227,9 +228,6 @@ export function useConversations(): UseConversationsResult {
       return;
     }
 
-    const hasStreaming = conversations.some(c => c.messages.some(m => m.isStreaming));
-    if (hasStreaming) return;
-
     const metadataRevision = getConversationMetadataRevision(conversations);
     if (metadataRevision !== savedConversationMetadataRevisionRef.current) {
       savedConversationMetadataRevisionRef.current = metadataRevision;
@@ -247,6 +245,16 @@ export function useConversations(): UseConversationsResult {
     conversations.forEach(conversation => {
       if (!conversation.isLoaded) {
         return;
+      }
+
+      const streamingMessage = conversation.messages.find(message => message.isStreaming);
+      if (streamingMessage) {
+        // Save the initial branch before waiting for generation; avoid hashing and
+        // writing the transcript on every streamed token.
+        if (!conversation.branches || savedStreamingSnapshotsRef.current.get(conversation.id) === streamingMessage.id) return;
+        savedStreamingSnapshotsRef.current.set(conversation.id, streamingMessage.id);
+      } else {
+        savedStreamingSnapshotsRef.current.delete(conversation.id);
       }
 
       const revision = getConversationRevision(conversation);
@@ -385,7 +393,7 @@ export function useConversations(): UseConversationsResult {
     setConversations(prev =>
       prev.map(conversation =>
         evictIds.has(conversation.id)
-          ? { ...conversation, messages: [], isLoaded: false }
+          ? { ...conversation, messages: [], branches: undefined, isLoaded: false }
           : conversation
       )
     );

@@ -1,5 +1,7 @@
 import { ipcMain, systemPreferences, BrowserWindow, type MessagePortMain } from 'electron';
 import { debugLog } from './logger';
+import { isMacLidClosed } from './macLidState';
+import { isMicrophoneUnavailableErrorName, NO_MIC_DETECTED_MESSAGE } from '../shared/audioCapture';
 
 const SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
@@ -139,12 +141,24 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
   isRecording = true;
   
   try {
+    const lidClosed = await isMacLidClosed();
     // Request microphone access from the renderer
     const result = await mainWindow.webContents.executeJavaScript(`
       (async function() {
         try {
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             return { success: false, error: 'getUserMedia not available in this context' };
+          }
+
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          if (!devices.some(device => device.kind === 'audioinput')) {
+            return { success: false, error: '${NO_MIC_DETECTED_MESSAGE}', errorCode: 'no-microphone' };
+          }
+
+          const blockedByLid = label => ${lidClosed} && /macbook|built[- ]?in|internal microphone/i.test(label);
+          const defaultInput = devices.find(device => device.kind === 'audioinput' && device.deviceId === 'default');
+          if (defaultInput && blockedByLid(defaultInput.label)) {
+            return { success: false, error: '${NO_MIC_DETECTED_MESSAGE}', errorCode: 'no-microphone' };
           }
           
           const stream = await navigator.mediaDevices.getUserMedia({
@@ -155,6 +169,12 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
               noiseSuppression: true,
             }
           });
+
+          const audioTrack = stream.getAudioTracks()[0];
+          if (!audioTrack || audioTrack.readyState !== 'live' || blockedByLid(audioTrack.label)) {
+            stream.getTracks().forEach(track => track.stop());
+            return { success: false, error: '${NO_MIC_DETECTED_MESSAGE}', errorCode: 'no-microphone' };
+          }
           
           const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: ${SAMPLE_RATE} });
           if (audioContext.state === 'suspended') {
@@ -224,12 +244,17 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
           
           return { success: true };
         } catch (error) {
-          return { success: false, error: error.message };
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+            errorName: error && typeof error === 'object' && 'name' in error ? String(error.name) : '',
+          };
         }
       })()
     `);
     
     if (!result.success) {
+      await cleanupAudioCapture();
       isRecording = false;
       audioChunks = [];
       audioByteLength = 0;
@@ -237,7 +262,12 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
       audioSumSquares = 0;
       audioPeakAbs = 0;
       closeAudioPort();
-      return { success: false, error: result.error || 'Failed to start audio capture' };
+      const noMicrophone = result.errorCode === 'no-microphone'
+        || isMicrophoneUnavailableErrorName(result.errorName);
+      return {
+        success: false,
+        error: noMicrophone ? NO_MIC_DETECTED_MESSAGE : (result.error || 'Failed to start audio capture'),
+      };
     }
     
     return { success: true };

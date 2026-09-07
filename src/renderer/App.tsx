@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { forkConversation, selectConversationVersion, getConversationVersions } from '../shared/conversationBranches';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import MessageList, { MessageListHandle } from './components/MessageList';
 import InputArea from './components/InputArea';
@@ -38,7 +39,7 @@ import { useVoice } from './hooks/useVoice';
 import { usePersistedScrollPosition } from './hooks/usePersistedScrollPosition';
 
 const EMPTY_MESSAGES: Message[] = [];
-const TOP_FADE_SCROLL_DISTANCE = 32;
+const EDGE_FADE_SCROLL_DISTANCE = 32;
 
 const App: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -50,7 +51,23 @@ const App: React.FC = () => {
   const messageListRef = useRef<MessageListHandle>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [topFadeOpacity, setTopFadeOpacity] = useState(0);
+  const [bottomFadeOpacity, setBottomFadeOpacity] = useState(0);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
+  const composerOverlayRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const overlay = composerOverlayRef.current;
+    const main = overlay?.parentElement;
+    if (!overlay || !main) return;
+    const updateHeight = () => {
+      main.style.setProperty('--composer-height', `${overlay.getBoundingClientRect().height}px`);
+    };
+    updateHeight();
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(overlay);
+    return () => observer.disconnect();
+  }, [workspaceView]);
+
   const dictionaryScrollContainerRef = useRef<HTMLDivElement>(null);
   const usageScrollContainerRef = useRef<HTMLDivElement>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
@@ -248,6 +265,14 @@ const App: React.FC = () => {
     setEditingMessageId(null);
   }, []);
 
+  const messageVersions = useMemo(() => currentConversation ? getConversationVersions(currentConversation) : undefined, [currentConversation]);
+
+  const handleSelectVersion = useCallback((messageId: string, targetId: string) => {
+    setEditingMessageId(null);
+    setConversations(prev => prev.map(c => c.id === currentConversationId
+      ? selectConversationVersion(c, messageId, targetId) : c));
+  }, [currentConversationId, setConversations]);
+
   const handleResubmitMessage = useCallback(async (messageId: string, newText: string) => {
     if (!selectedModel) {
       alert('Please select a model first');
@@ -257,26 +282,19 @@ const App: React.FC = () => {
     setEditingMessageId(null);
 
     const conversation = conversations.find(c => c.id === currentConversationId);
-    if (!conversation) return;
+    if (!conversation || conversation.messages.some(m => m.isStreaming)) return;
 
     const messageIndex = conversation.messages.findIndex(m => m.id === messageId);
-    if (messageIndex === -1) return;
+    if (messageIndex === -1 || conversation.messages[messageIndex].sender !== 'user' || !newText.trim()) return;
+    if (conversation.messages[messageIndex].text === newText) return;
 
     const editedMessage: Message = {
-      id: messageId,
+      id: crypto.randomUUID(),
       text: newText,
       sender: 'user',
       timestamp: new Date(),
       attachments: conversation.messages[messageIndex].attachments,
     };
-
-    setConversations(prev =>
-      prev.map(c =>
-        c.id === currentConversationId
-          ? { ...c, messages: [...conversation.messages.slice(0, messageIndex), editedMessage] }
-          : c
-      )
-    );
 
     const assistantMessageId = crypto.randomUUID();
     const assistantMessage: Message = {
@@ -290,7 +308,7 @@ const App: React.FC = () => {
     setConversations(prev =>
       prev.map(c =>
         c.id === currentConversationId
-          ? { ...c, messages: [...conversation.messages.slice(0, messageIndex), editedMessage, assistantMessage] }
+          ? forkConversation(c, messageIndex, [editedMessage, assistantMessage])
           : c
       )
     );
@@ -320,6 +338,7 @@ const App: React.FC = () => {
       await window.assistant.sendMessageStream({
         conversationId: conversation.id,
         assistantMessageId,
+        contextKey: editedMessage.id,
         model: selectedModel!,
         provider: selectedProvider,
         reasoningEffort: selectedReasoningEffort ?? undefined,
@@ -357,7 +376,7 @@ const App: React.FC = () => {
     }
 
     const conversation = conversations.find(c => c.id === currentConversationId);
-    if (!conversation) return;
+    if (!conversation || conversation.messages.some(m => m.isStreaming)) return;
 
     const messageIndex = conversation.messages.findIndex(m => m.id === messageId);
     if (messageIndex === -1) return;
@@ -366,14 +385,6 @@ const App: React.FC = () => {
     if (userMessageIndex < 0 || conversation.messages[userMessageIndex].sender !== 'user') return;
 
     const userMessage = conversation.messages[userMessageIndex];
-
-    setConversations(prev =>
-      prev.map(c =>
-        c.id === currentConversationId
-          ? { ...c, messages: conversation.messages.slice(0, messageIndex) }
-          : c
-      )
-    );
 
     const assistantMessageId = crypto.randomUUID();
     const assistantMessage: Message = {
@@ -387,7 +398,7 @@ const App: React.FC = () => {
     setConversations(prev =>
       prev.map(c =>
         c.id === currentConversationId
-          ? { ...c, messages: [...conversation.messages.slice(0, messageIndex), assistantMessage] }
+          ? forkConversation(c, messageIndex, [assistantMessage])
           : c
       )
     );
@@ -403,6 +414,7 @@ const App: React.FC = () => {
       await window.assistant.sendMessageStream({
         conversationId: conversation.id,
         assistantMessageId,
+        contextKey: assistantMessage.id,
         model: selectedModel!,
         provider: selectedProvider,
         reasoningEffort: selectedReasoningEffort ?? undefined,
@@ -454,6 +466,7 @@ const App: React.FC = () => {
     const draftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
     let conversationId = currentConversationId;
     let conversationMessagesForRequest = messages;
+    let contextKey = currentConversation?.branches?.contextKey;
 
     if (!conversationId) {
       conversationId = Date.now().toString();
@@ -485,6 +498,7 @@ const App: React.FC = () => {
       if (storedConversation) {
         const loadedConversation = deserializeConversation(storedConversation);
         conversationMessagesForRequest = loadedConversation.messages;
+        contextKey = loadedConversation.branches?.contextKey;
         setConversations(prev =>
           prev.map(conversation =>
             conversation.id === conversationId
@@ -541,6 +555,7 @@ const App: React.FC = () => {
       await window.assistant.sendMessageStream({
         conversationId: conversationId!,
         assistantMessageId,
+        contextKey,
         model: selectedModel!,
         provider: selectedProvider,
         reasoningEffort: selectedReasoningEffort ?? undefined,
@@ -598,7 +613,16 @@ const App: React.FC = () => {
     const updateChatScrollState = () => {
       setTopFadeOpacity(
         container
-          ? Math.min(Math.max(container.scrollTop / TOP_FADE_SCROLL_DISTANCE, 0), 1)
+          ? Math.min(Math.max(container.scrollTop / EDGE_FADE_SCROLL_DISTANCE, 0), 1)
+          : 0
+      );
+      setBottomFadeOpacity(
+        container
+          ? Math.min(Math.max(
+              (container.scrollHeight - container.scrollTop - container.clientHeight)
+                / EDGE_FADE_SCROLL_DISTANCE,
+              0,
+            ), 1)
           : 0
       );
 
@@ -681,7 +705,7 @@ const App: React.FC = () => {
           onUsageOpen={() => handleWorkspaceOpen('usage')}
         />
 
-        <main className="relative flex min-w-[360px] flex-1 flex-col bg-bg-primary">
+        <main className="chat-layout relative flex min-w-[360px] flex-1 flex-col bg-bg-primary">
             {workspaceView === null ? null : workspaceView === 'dictionary' ? (
               <PersonalDictionary scrollContainerRef={dictionaryScrollContainerRef} />
             ) : workspaceView === 'usage' ? (
@@ -691,6 +715,11 @@ const App: React.FC = () => {
               aria-hidden="true"
               className="pointer-events-none absolute inset-x-0 top-0 z-20 h-8 bg-linear-to-b from-bg-primary/70 via-bg-primary/35 to-transparent"
               style={{ opacity: topFadeOpacity }}
+            />
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-8 bg-linear-to-t from-bg-primary/70 via-bg-primary/35 to-transparent"
+              style={{ opacity: bottomFadeOpacity }}
             />
             <div ref={chatScrollContainerRef} className="flex flex-1 min-h-0 overflow-y-auto message-scroll-container">
               <MessageTrail
@@ -707,6 +736,8 @@ const App: React.FC = () => {
                 isLoading={isCurrentConversationStreaming}
                 emptyStateRefreshKey={newChatTrigger}
                 conversationSearchTrigger={conversationSearchTrigger}
+                versions={messageVersions}
+                onSelectVersion={handleSelectVersion}
                 editingMessageId={editingMessageId}
                 voiceTranscript={editingMessageId ? voiceHook.voiceTranscript : null}
                 onEditMessage={handleEditMessage}
@@ -717,6 +748,7 @@ const App: React.FC = () => {
               />
               {showScrollButton && <ScrollToBottomButton onClick={handleScrollToBottom} />}
             </div>
+            <div ref={composerOverlayRef} className="composer-overlay">
             <VoiceSetupPanel />
 
             <InputArea
@@ -738,6 +770,7 @@ const App: React.FC = () => {
               onReasoningEffortSelect={setSelectedReasoningEffort}
               composeFocusKey={newChatTrigger}
             />
+            </div>
             </>}
         </main>
       </div>

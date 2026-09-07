@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -72,18 +72,6 @@ interface MenuPosition {
   y: number;
 }
 
-interface SidebarItemRef {
-  type: 'conversation' | 'folder';
-  id: string;
-}
-
-interface SidebarHighlight {
-  top: number;
-  left: number;
-  width: number;
-  height: number;
-}
-
 type DropPlacement = 'before' | 'after';
 
 interface ConversationDropTarget {
@@ -94,7 +82,6 @@ interface ConversationDropTarget {
 const MENU_PADDING = 12;
 const CONTEXT_MENU_WIDTH = 180;
 const MOVE_MENU_WIDTH = 200;
-const SIDEBAR_HOVER_RECHECK_MS = 300;
 const MENU_ITEM_HEIGHT = 34;
 
 function clampMenuPosition(x: number, y: number, width: number, height: number): MenuPosition {
@@ -149,31 +136,27 @@ function getMoveMenuPosition(contextMenuX: number, contextMenuY: number, folderC
   );
 }
 
-function sidebarItemKey(item: SidebarItemRef): string {
-  return `${item.type}:${item.id}`;
-}
-
 function DraggableConversationItem({
   conversation,
   isActive,
   isEditing,
+  isDropDisabled,
   onSelect,
   onDelete,
   onRename,
   onStopEditing,
   onContextMenu,
-  onHoverChange,
   dropPlacement,
 }: {
   conversation: Conversation;
   isActive: boolean;
   isEditing: boolean;
+  isDropDisabled: boolean;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string, title: string) => void;
   onStopEditing: () => void;
   onContextMenu: (e: React.MouseEvent, id: string) => void;
-  onHoverChange: (item: SidebarItemRef | null) => void;
   dropPlacement: DropPlacement | null;
 }) {
   const { attributes, listeners, setNodeRef: setDraggableNodeRef, isDragging } = useDraggable({
@@ -187,6 +170,7 @@ function DraggableConversationItem({
   });
   const { setNodeRef: setDroppableNodeRef } = useDroppable({
     id: `conversation-${conversation.id}`,
+    disabled: isDropDisabled,
     data: {
       type: 'conversation',
       id: conversation.id,
@@ -200,7 +184,6 @@ function DraggableConversationItem({
     ? 'Streaming response'
     : 'Unread completed response';
   const showStatus = conversation.isStreaming || conversation.hasUnreadComplete;
-  const itemRef: SidebarItemRef = { type: 'conversation', id: conversation.id };
   const setNodeRef = useCallback((node: HTMLElement | null) => {
     setDraggableNodeRef(node);
     setDroppableNodeRef(node);
@@ -245,11 +228,11 @@ function DraggableConversationItem({
   return (
     <div
       ref={setNodeRef}
-      data-sidebar-item={sidebarItemKey(itemRef)}
-      className={`group relative z-10 flex items-center gap-1 px-2 py-[0.4rem] text-[0.75rem] transition-colors duration-150 cursor-grab active:cursor-grabbing ${
+      data-sidebar-item={`conversation:${conversation.id}`}
+      className={`group relative z-10 flex items-center gap-1 rounded px-2 py-[0.4rem] text-[0.75rem] transition-colors duration-150 ease-out cursor-grab active:cursor-grabbing ${
         isActive
-          ? 'text-text-primary'
-          : 'text-text-secondary hover:text-text-primary'
+          ? 'bg-bg-active text-text-primary'
+          : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
       } ${isDragging ? 'opacity-40' : ''}`}
       onClick={() => {
         if (!isEditing) {
@@ -257,13 +240,6 @@ function DraggableConversationItem({
         }
       }}
       onContextMenu={(e) => onContextMenu(e, conversation.id)}
-      onMouseEnter={() => onHoverChange(itemRef)}
-      onMouseLeave={(event) => {
-        const related = event.relatedTarget as Element | null;
-        if (!related?.closest('[data-sidebar-item]')) {
-          onHoverChange(null);
-        }
-      }}
       {...attributes}
       {...listeners}
     >
@@ -290,34 +266,50 @@ function DraggableConversationItem({
           {conversation.title}
         </span>
       )}
-      <span className="relative h-5 w-5 shrink-0">
-        {showStatus ? (
-          <span
-            className="absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0"
-            title={statusLabel}
-            aria-label={statusLabel}
-          >
-            {conversation.isStreaming ? (
-              <span className="h-2.5 w-2.5 rounded-full border border-text-muted border-t-text-primary animate-spin" />
-            ) : (
-              <span className="h-2.5 w-2.5 rounded-full bg-text-primary" />
-            )}
-          </span>
-        ) : null}
-        <button
-          type="button"
-          className="absolute inset-0 flex items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 hover:bg-bg-hover"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(conversation.id);
-          }}
-          title="Delete conversation (Cmd Shift Backspace)"
+      {!isEditing && (
+        <span
+          className={`pointer-events-none absolute inset-y-0 right-2 flex w-9 items-center justify-end transition-opacity duration-150 ease-out ${
+            showStatus
+              ? 'opacity-100'
+              : 'opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100'
+          } ${
+            isActive
+              ? 'bg-[linear-gradient(to_right,transparent,var(--color-bg-active)_40%)]'
+              : 'bg-[linear-gradient(to_right,transparent,var(--color-bg-primary)_40%)] group-hover:bg-[linear-gradient(to_right,transparent,var(--color-bg-hover)_40%)] group-has-[:focus-visible]:bg-[linear-gradient(to_right,transparent,var(--color-bg-hover)_40%)]'
+          }`}
         >
-          <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
-      </span>
+          {showStatus ? (
+            <span
+              className="flex h-5 w-5 items-center justify-center transition-opacity duration-150 ease-out group-hover:opacity-0 group-has-[:focus-visible]:opacity-0"
+              title={statusLabel}
+              aria-label={statusLabel}
+            >
+              {conversation.isStreaming ? (
+                <span className="h-2.5 w-2.5 rounded-full border border-text-muted border-t-text-primary animate-spin" />
+              ) : (
+                <span className="h-2.5 w-2.5 rounded-full bg-text-primary" />
+              )}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={`pointer-events-auto absolute right-0 flex h-5 w-5 items-center justify-center rounded hover:bg-bg-hover ${
+              showStatus
+                ? 'opacity-0 transition-opacity duration-150 ease-out group-hover:opacity-100 focus-visible:opacity-100'
+                : 'opacity-100'
+            }`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(conversation.id);
+            }}
+            title="Delete conversation (Cmd Shift Backspace)"
+          >
+            <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        </span>
+      )}
     </div>
   );
 }
@@ -355,7 +347,6 @@ function DroppableFolderItem({
   onStopEditing,
   onDelete,
   onContextMenu,
-  onHoverChange,
   children,
   isDragOver,
 }: {
@@ -370,7 +361,6 @@ function DroppableFolderItem({
   onStopEditing: () => void;
   onDelete: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, id: string) => void;
-  onHoverChange: (item: SidebarItemRef | null) => void;
   children: React.ReactNode;
   isDragOver: boolean;
 }) {
@@ -419,18 +409,18 @@ function DroppableFolderItem({
 
   const highlighted = isOver || isDragOver;
   const showAsSelected = containsActiveConversation && !isExpanded;
-  const itemRef: SidebarItemRef = { type: 'folder', id: folder.id };
 
   return (
-    <div ref={setNodeRef}>
+    <div ref={isExpanded ? setNodeRef : undefined}>
       <div
-        data-sidebar-item={sidebarItemKey(itemRef)}
-        className={`group relative z-10 flex items-center gap-1 px-1 py-[0.4rem] text-[0.75rem] transition-colors duration-150 ${
+        ref={isExpanded ? undefined : setNodeRef}
+        data-sidebar-item={`folder:${folder.id}`}
+        className={`group relative z-10 flex items-center gap-1 rounded px-1 py-[0.4rem] text-[0.75rem] transition-colors duration-150 ${
           highlighted
             ? 'bg-bg-active text-text-primary'
             : showAsSelected
-              ? 'text-text-primary'
-              : 'text-text-secondary hover:text-text-primary'
+              ? 'bg-bg-active text-text-primary'
+              : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
         }`}
         onClick={() => {
           if (!isEditing) {
@@ -438,13 +428,6 @@ function DroppableFolderItem({
           }
         }}
         onContextMenu={(e) => onContextMenu(e, folder.id)}
-        onMouseEnter={() => onHoverChange(itemRef)}
-        onMouseLeave={(event) => {
-          const related = event.relatedTarget as Element | null;
-          if (!related?.closest('[data-sidebar-item]')) {
-            onHoverChange(null);
-          }
-        }}
         aria-expanded={isExpanded}
       >
         <svg className={`h-3 w-3 shrink-0 text-text-tertiary transition-transform duration-200 ${isExpanded ? 'rotate-90' : 'rotate-0'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -619,9 +602,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [dragOverRoot, setDragOverRoot] = useState(false);
   const [dragOverPinned, setDragOverPinned] = useState(false);
   const [conversationDropTarget, setConversationDropTarget] = useState<ConversationDropTarget | null>(null);
-  const [hoveredSidebarItem, setHoveredSidebarItem] = useState<SidebarItemRef | null>(null);
-  const [sidebarHighlight, setSidebarHighlight] = useState<SidebarHighlight | null>(null);
-  const chatListRef = useRef<HTMLDivElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const moveMenuRef = useRef<HTMLDivElement>(null);
   const sensors = useSensors(
@@ -658,110 +638,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     () => [...folders].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
     [folders],
   );
-
-  const activeSidebarItem = useMemo<SidebarItemRef | null>(() => {
-    const activeConversation = conversations.find(
-      conversation => conversation.id === currentConversationId,
-    );
-    if (activeWorkspace !== 'chat' || !activeConversation) {
-      return null;
-    }
-
-    if (
-      !activeConversation.isPinned
-      && activeConversation.folderId
-      && !expandedFolders.has(activeConversation.folderId)
-    ) {
-      return { type: 'folder', id: activeConversation.folderId };
-    }
-
-    return { type: 'conversation', id: activeConversation.id };
-  }, [activeWorkspace, conversations, currentConversationId, expandedFolders]);
-
-  const highlightedSidebarItem = hoveredSidebarItem ?? activeSidebarItem;
-
-  useEffect(() => {
-    if (!hoveredSidebarItem) return;
-
-    let hoverRecheckTimeout: number | null = null;
-    const hoveredItemKey = sidebarItemKey(hoveredSidebarItem);
-
-    const recheckSidebarHover = () => {
-      const list = chatListRef.current;
-      const hoveredElement = list
-        ? list.querySelector<HTMLElement>(
-            `[data-sidebar-item="${CSS.escape(hoveredItemKey)}"]`,
-          )
-        : null;
-
-      if (!document.hasFocus() || !hoveredElement?.matches(':hover')) {
-        setHoveredSidebarItem(current => (
-          current && sidebarItemKey(current) === hoveredItemKey ? null : current
-        ));
-        return;
-      }
-
-      hoverRecheckTimeout = window.setTimeout(
-        recheckSidebarHover,
-        SIDEBAR_HOVER_RECHECK_MS,
-      );
-    };
-
-    hoverRecheckTimeout = window.setTimeout(
-      recheckSidebarHover,
-      SIDEBAR_HOVER_RECHECK_MS,
-    );
-
-    return () => {
-      if (hoverRecheckTimeout !== null) {
-        window.clearTimeout(hoverRecheckTimeout);
-      }
-    };
-  }, [hoveredSidebarItem]);
-
-  const updateSidebarHighlight = useCallback(() => {
-    const list = chatListRef.current;
-    if (!list || !highlightedSidebarItem) {
-      setSidebarHighlight(null);
-      return;
-    }
-
-    const itemKey = sidebarItemKey(highlightedSidebarItem);
-    const item = Array.from(list.querySelectorAll<HTMLElement>('[data-sidebar-item]'))
-      .find(element => element.dataset.sidebarItem === itemKey);
-    if (!item) {
-      setSidebarHighlight(null);
-      return;
-    }
-
-    const listRect = list.getBoundingClientRect();
-    const itemRect = item.getBoundingClientRect();
-    setSidebarHighlight({
-      top: itemRect.top - listRect.top,
-      left: itemRect.left - listRect.left,
-      width: itemRect.width,
-      height: itemRect.height,
-    });
-  }, [highlightedSidebarItem]);
-
-  useLayoutEffect(() => {
-    updateSidebarHighlight();
-  }, [expandedFolders, folders, conversations, updateSidebarHighlight]);
-
-  useEffect(() => {
-    const list = chatListRef.current;
-    if (!list) {
-      return;
-    }
-
-    const observer = new ResizeObserver(updateSidebarHighlight);
-    observer.observe(list);
-    window.addEventListener('resize', updateSidebarHighlight);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', updateSidebarHighlight);
-    };
-  }, [updateSidebarHighlight]);
 
   const handleConversationSelectWithFocus = useCallback((id: string) => {
     const conv = conversations.find(c => c.id === id);
@@ -1039,7 +915,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     resetDragState();
     setEditingFolderId(null);
     setEditingConversationId(null);
-    setHoveredSidebarItem(null);
   }, [isOpen, closeMenus, resetDragState]);
 
   const handleMoveToFolder = useCallback((conversationId: string, folderId: string | null) => {
@@ -1069,13 +944,17 @@ const Sidebar: React.FC<SidebarProps> = ({
       key={conversation.id}
       conversation={conversation}
       isActive={activeWorkspace === 'chat' && currentConversationId === conversation.id}
+      isDropDisabled={Boolean(
+        !conversation.isPinned
+        && conversation.folderId
+        && !expandedFolders.has(conversation.folderId)
+      )}
       onSelect={handleConversationSelectWithFocus}
       onDelete={onConversationDelete}
       isEditing={editingConversationId === conversation.id}
       onRename={onConversationRename}
       onStopEditing={stopEditingConversation}
       onContextMenu={handleConversationContextMenu}
-      onHoverChange={setHoveredSidebarItem}
       dropPlacement={conversationDropTarget?.id === conversation.id
         ? conversationDropTarget.placement
         : null}
@@ -1091,7 +970,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       onDragOver={handleDragOver}
       onDragCancel={resetDragState}
     >
-      <aside data-sidebar inert={!isOpen} onKeyDown={handleSidebarShortcut} className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-primary transition-[width,min-width] duration-200 ${isOpen ? 'min-w-64 w-64' : 'w-0 min-w-0 border-r-0'}`}>
+      <aside data-sidebar inert={!isOpen} onKeyDown={handleSidebarShortcut} className={`flex h-full shrink-0 flex-col overflow-hidden border-r border-border-primary bg-bg-primary transition-[width,min-width] duration-200 ${isOpen ? 'min-w-60 w-60' : 'w-0 min-w-0 border-r-0'}`}>
         <div className="flex-1 overflow-y-auto px-2 pb-2 pt-10">
           <div className="w-full">
             <div className="p-2">
@@ -1107,19 +986,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                 New Chat
               </button>
             </div>
-            <div ref={chatListRef} className="sidebar-window-drag-region relative mt-2 flex flex-col">
-              {sidebarHighlight && (
-                <div
-                  aria-hidden="true"
-                  data-sidebar-highlight
-                  className="pointer-events-none absolute z-0 rounded bg-bg-active transition-[transform,width,height,opacity] duration-200 ease-out motion-reduce:transition-none"
-                  style={{
-                    width: sidebarHighlight.width,
-                    height: sidebarHighlight.height,
-                    transform: `translate3d(${sidebarHighlight.left}px, ${sidebarHighlight.top}px, 0)`,
-                  }}
-                />
-              )}
+            <div className="sidebar-window-drag-region relative mt-2 flex flex-col">
               {pinnedConversations.length > 0 && (
                 <div className="mb-4">
                   <div className="mb-2 flex items-center px-2">
@@ -1175,7 +1042,6 @@ const Sidebar: React.FC<SidebarProps> = ({
                           onStopEditing={stopEditingFolder}
                           onDelete={onDeleteFolder}
                           onContextMenu={handleFolderContextMenu}
-                          onHoverChange={setHoveredSidebarItem}
                           isDragOver={dragOverFolderId === folder.id}
                         >
                           {pinnedCount > 0 && (

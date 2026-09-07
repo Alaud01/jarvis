@@ -456,6 +456,26 @@ class OpenRouterTranscriptionTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 401)
         self.assertEqual(urlopen.call_count, 1)
+        self.assertTrue(error.closed)
+
+    def test_retryable_http_failure_is_closed_before_retry(self):
+        error = urllib_error.HTTPError(
+            main.OPENROUTER_TRANSCRIPTION_URL,
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":"unavailable"}'),
+        )
+        responses = [error, FakeResponse({"text": "recovered transcript"})]
+
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+            with mock.patch.object(main.urllib_request, "urlopen", side_effect=responses) as urlopen:
+                with mock.patch.object(main.time, "sleep"):
+                    transcript = main.transcribe_chunk_with_openrouter(self.wav)
+
+        self.assertEqual(transcript, "recovered transcript")
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertTrue(error.closed)
 
 
 class LocalParakeetTranscriptionTests(unittest.TestCase):
