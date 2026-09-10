@@ -92,7 +92,7 @@ export function createWindow(): BrowserWindow {
     frame: true,
     resizable: true,
     titleBarStyle: 'hiddenInset',
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#0a0a0a' : '#ffffff',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#000000' : '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, '../../preload/index.js'),
       contextIsolation: true,

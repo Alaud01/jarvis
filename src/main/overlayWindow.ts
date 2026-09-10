@@ -9,7 +9,6 @@ type OverlayAnchorBounds = {
 
 let overlayWindow: BrowserWindow | null = null;
 let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
-let overlayWidthAnimationTimer: ReturnType<typeof setInterval> | null = null;
 let overlayReady = false;
 let overlayDesiredVisible = false;
 let overlayPresentationId = 0;
@@ -21,25 +20,23 @@ let pendingOverlayPayload: {
   errorMessage?: string;
   presentationId: number;
 } | null = null;
-let overlayThemeIsDark = true;
 
 const OVERLAY_MAX_WIDTH = 500;
-const OVERLAY_X_PADDING = 18;
+const OVERLAY_X_PADDING = 24;
 const OVERLAY_CONTENT_GAP = 12;
 const PIXEL_SPINNER_SIZE = 20;
 const OVERLAY_Y_PADDING = 10;
 const OVERLAY_HEIGHT = (OVERLAY_Y_PADDING * 2) + PIXEL_SPINNER_SIZE;
+const OVERLAY_MIN_WIDTH = 300;
+const OVERLAY_SHADOW_MARGIN = 16;
 const OVERLAY_EXIT_MS = 180;
-const OVERLAY_WIDTH_MS = 340;
-const OVERLAY_LABEL_MS = 220;
+const OVERLAY_WIDTH_MS = 420;
+const OVERLAY_LABEL_MS = 320;
 const PROCESSING_FILL_MS = 260;
 const COMPLETE_FILL_MS = 300;
+const STATUS_PULSE_MS = 420;
 
 const OVERLAY_EASE = 'cubic-bezier(0.22, 1, 0.36, 1)';
-
-function easeOutCubic(t: number): number {
-  return 1 - (1 - t) ** 3;
-}
 
 type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
 type OverlayVisualStage = OverlayState | 'processing-fill' | 'complete-fill';
@@ -69,25 +66,22 @@ function getOverlayThemeColors(): {
   text: string;
   shadow: string;
 } {
-  if (overlayThemeIsDark) {
-    return {
-      background: 'rgb(15, 15, 15)',
+  // The surface blends into the physical cutout in either application theme.
+  return {
+      background: 'rgb(0, 0, 0)',
       border: 'rgba(255, 255, 255, 0.12)',
       text: 'rgba(255, 255, 255, 0.95)',
       shadow: 'none',
-    };
-  }
-
-  return {
-    background: 'rgb(255, 255, 255)',
-    border: 'rgba(0, 0, 0, 0.12)',
-    text: 'rgba(17, 17, 17, 0.94)',
-    shadow: 'none',
   };
 }
 
 function getOverlayDisplayLabel(state: OverlayState, transcript?: string, errorMessage?: string): string {
   if (state === 'error') {
+    // The voice service includes VAD diagnostics in this error. Keep those in
+    // logs and renderer events without letting them resize the status surface.
+    if (/^No speech detected\b/i.test(errorMessage ?? '')) {
+      return 'No speech detected';
+    }
     return errorMessage || STATE_CONFIG.error.label;
   }
 
@@ -97,7 +91,7 @@ function getOverlayDisplayLabel(state: OverlayState, transcript?: string, errorM
 function getOverlayWidth(label: string): number {
   const estimatedTextWidth = Math.ceil(label.length * 7.2);
   const contentWidth = (OVERLAY_X_PADDING * 2) + PIXEL_SPINNER_SIZE + OVERLAY_CONTENT_GAP + estimatedTextWidth;
-  return Math.min(OVERLAY_MAX_WIDTH, contentWidth);
+  return Math.max(OVERLAY_MIN_WIDTH, Math.min(OVERLAY_MAX_WIDTH, contentWidth));
 }
 
 function getOverlayPayload(state: OverlayState, transcript?: string, errorMessage?: string): {
@@ -292,52 +286,82 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html {
       background: transparent;
-      height: ${OVERLAY_HEIGHT}px;
-      width: ${payload.width}px;
-      transition: width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE};
+      height: 100%;
+      width: 100%;
     }
     body {
       --overlay-bg: ${themeColors.background};
       --overlay-text: ${themeColors.text};
-      background: var(--overlay-bg);
+      --top-reserve: 0px;
+      --surface-width: ${payload.width}px;
+      background: transparent;
       overflow: hidden;
       -webkit-app-region: no-drag;
       font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
-      height: ${OVERLAY_HEIGHT}px;
-      width: ${payload.width}px;
+      height: 100%;
+      width: 100%;
       display: flex;
-      align-items: center;
-      opacity: 1;
-      transform: translateY(0) scale(1);
-      transform-origin: center center;
-      transition:
-        width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE},
-        opacity ${OVERLAY_EXIT_MS}ms ${OVERLAY_EASE},
-        transform ${OVERLAY_EXIT_MS}ms ${OVERLAY_EASE};
+      justify-content: center;
+      align-items: flex-start;
     }
     .overlay {
       display: flex;
       align-items: center;
+      justify-content: center;
       gap: ${OVERLAY_CONTENT_GAP}px;
-      flex: 1;
+      position: relative;
+      width: var(--surface-width);
       min-width: 0;
-      height: 100%;
-      padding: ${OVERLAY_Y_PADDING}px ${OVERLAY_X_PADDING}px;
+      height: calc(var(--top-reserve) + ${OVERLAY_HEIGHT}px);
+      padding: calc(var(--top-reserve) + ${OVERLAY_Y_PADDING}px) ${OVERLAY_X_PADDING}px ${OVERLAY_Y_PADDING}px;
+      background: var(--overlay-bg);
+      border-radius: 0 0 22px 22px;
+      box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
+      transform-origin: top center;
+      transition: width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE},
+        transform ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE},
+        opacity ${OVERLAY_EXIT_MS}ms ease;
     }
-    body.preparing {
+    .overlay::before, .overlay::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      width: 12px;
+      height: 12px;
+    }
+    .overlay::before {
+      left: -12px;
+      background: radial-gradient(circle at 0 100%, transparent 12px, var(--overlay-bg) 12.5px);
+    }
+    .overlay::after {
+      right: -12px;
+      background: radial-gradient(circle at 100% 100%, transparent 12px, var(--overlay-bg) 12.5px);
+    }
+    body.preparing .overlay {
       opacity: 0;
-      transform: translateY(-6px) scale(0.985);
+      transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.92);
       transition: none;
     }
-    body.exiting {
+    body.exiting .overlay {
       opacity: 0;
-      transform: translateY(-4px) scale(0.985);
+      transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.92);
+      transition-duration: ${OVERLAY_EXIT_MS}ms;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .overlay, .label, .pixel-spinner .cell { transition: none !important; }
+      .overlay, .label, .pixel-spinner { animation: none !important; }
+      .pixel-spinner .cell { animation-duration: 2400ms !important; }
+      body.preparing .overlay, body.exiting .overlay { transform: none; }
     }
     .pixel-spinner {
       display: inline-grid;
       grid-template-columns: repeat(4, 5px);
       gap: 0;
       flex-shrink: 0;
+      transform-origin: center;
+    }
+    .pixel-spinner.is-changing {
+      animation: spinner-stage-change ${STATUS_PULSE_MS}ms ${OVERLAY_EASE} both;
     }
     .pixel-spinner .cell {
       width: 5px;
@@ -394,10 +418,62 @@ ${PIXEL_CELL_ANIMATION_RULES}
         transform: scale(1);
       }
     }
+    @keyframes spinner-stage-change {
+      0% {
+        transform: scale(0.76) rotate(-8deg);
+        filter: saturate(0.75);
+      }
+      58% {
+        transform: scale(1.1) rotate(2deg);
+        filter: saturate(1.2);
+      }
+      100% {
+        transform: scale(1) rotate(0);
+        filter: saturate(1);
+      }
+    }
+    @keyframes overlay-status-change {
+      0% { transform: scaleX(0.985); }
+      62% { transform: scaleX(1.012); }
+      100% { transform: scaleX(1); }
+    }
+    @keyframes label-enter {
+      0% {
+        opacity: 0;
+        transform: translateY(8px) scale(0.97);
+        filter: blur(4px);
+      }
+      68% {
+        opacity: 1;
+        transform: translateY(-1px) scale(1.005);
+        filter: blur(0);
+      }
+      100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        filter: blur(0);
+      }
+    }
+    @keyframes label-leave {
+      from {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        filter: blur(0);
+      }
+      to {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.97);
+        filter: blur(4px);
+      }
+    }
+    .overlay.is-changing {
+      animation: overlay-status-change ${STATUS_PULSE_MS}ms ${OVERLAY_EASE} both;
+    }
 ${PIXEL_SPINNER_KEYFRAMES}
     .label {
+      grid-area: 1 / 1;
       color: var(--overlay-text);
-      flex: 1;
+      flex: 0 1 auto;
       min-width: 0;
       font-size: 13px;
       line-height: ${PIXEL_SPINNER_SIZE}px;
@@ -405,55 +481,80 @@ ${PIXEL_SPINNER_KEYFRAMES}
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 460px;
-      transition:
-        opacity ${OVERLAY_LABEL_MS}ms ${OVERLAY_EASE},
-        transform ${OVERLAY_LABEL_MS}ms ${OVERLAY_EASE};
-      will-change: opacity, transform;
+      max-width: ${OVERLAY_MAX_WIDTH - (OVERLAY_X_PADDING * 2) - PIXEL_SPINNER_SIZE - OVERLAY_CONTENT_GAP}px;
+      will-change: opacity, transform, filter;
     }
-    .label.is-changing {
-      opacity: 0;
-      transform: translateY(3px);
+    .label-stack {
+      display: grid;
+      align-items: center;
+      min-width: 0;
+      max-width: ${OVERLAY_MAX_WIDTH - (OVERLAY_X_PADDING * 2) - PIXEL_SPINNER_SIZE - OVERLAY_CONTENT_GAP}px;
+      overflow: hidden;
+    }
+    .label.is-entering {
+      animation: label-enter ${OVERLAY_LABEL_MS}ms ${OVERLAY_EASE} both;
+    }
+    .label.is-leaving {
+      animation: label-leave ${OVERLAY_LABEL_MS}ms ${OVERLAY_EASE} both;
     }
   </style>
 </head>
 <body class="preparing">
-  <div class="overlay">
+  <div class="overlay" role="status" aria-live="polite">
     <div class="pixel-spinner stage-${payload.stage}" id="spinner">
       ${PIXEL_SPINNER_CELLS}
     </div>
-    <div class="label" id="label">${escapeHtml(payload.label)}</div>
+    <div class="label-stack" id="label-stack">
+      <div class="label" id="label">${escapeHtml(payload.label)}</div>
+    </div>
   </div>
   <script>
     (function() {
       var state = ${JSON.stringify(state)};
       var fillTimer = null;
-      var labelTimer = null;
+      var statusTimer = null;
+      var overlay = document.querySelector('.overlay');
       var spinner = document.getElementById('spinner');
+      var labelStack = document.getElementById('label-stack');
       var label = document.getElementById('label');
-      var labelFadeMs = ${OVERLAY_LABEL_MS};
-      var labelSwapMs = Math.round(labelFadeMs * 0.45);
 
       function setLabel(nextLabel) {
         if (!label || label.textContent === nextLabel) return;
-        if (labelTimer) clearTimeout(labelTimer);
-        label.classList.add('is-changing');
-        labelTimer = setTimeout(function() {
-          label.textContent = nextLabel;
-          requestAnimationFrame(function() {
-            requestAnimationFrame(function() {
-              label.classList.remove('is-changing');
-            });
+        var outgoingLabels = Array.prototype.slice.call(labelStack.querySelectorAll('.label'));
+        var incoming = document.createElement('div');
+        incoming.className = 'label is-entering';
+        incoming.textContent = nextLabel;
+        labelStack.appendChild(incoming);
+        label = incoming;
+        outgoingLabels.forEach(function(outgoing) {
+          outgoing.classList.add('is-leaving');
+        });
+        setTimeout(function() {
+          outgoingLabels.forEach(function(outgoing) {
+            if (outgoing.parentNode) outgoing.parentNode.removeChild(outgoing);
           });
-        }, labelSwapMs);
+        }, ${OVERLAY_LABEL_MS});
       }
       function setStage(stage) {
         if (!spinner) return;
         spinner.className = 'pixel-spinner stage-' + stage;
+        void spinner.offsetWidth;
+        spinner.classList.add('is-changing');
+      }
+      function animateStatusChange() {
+        if (!overlay) return;
+        if (statusTimer) clearTimeout(statusTimer);
+        overlay.classList.remove('is-changing');
+        void overlay.offsetWidth;
+        overlay.classList.add('is-changing');
+        statusTimer = setTimeout(function() {
+          overlay.classList.remove('is-changing');
+          if (spinner) spinner.classList.remove('is-changing');
+          statusTimer = null;
+        }, ${STATUS_PULSE_MS});
       }
       function setOverlayWidth(width) {
-        document.documentElement.style.width = width + 'px';
-        document.body.style.width = width + 'px';
+        document.body.style.setProperty('--surface-width', width + 'px');
       }
       function applyPayload(payload) {
         state = payload.state;
@@ -468,25 +569,27 @@ ${PIXEL_SPINNER_KEYFRAMES}
           fillTimer = null;
         }
 
-        if (state === 'recording' && payload.state === 'processing') {
+        var previousState = state;
+        state = payload.state;
+        if (previousState !== payload.state) animateStatusChange();
+
+        if (previousState === 'recording' && payload.state === 'processing') {
           setOverlayWidth(payload.width);
           setLabel(payload.label);
           setStage('processing-fill');
           fillTimer = setTimeout(function() {
             setStage(payload.stage);
-            state = payload.state;
             fillTimer = null;
           }, ${PROCESSING_FILL_MS});
           return;
         }
 
-        if (state === 'processing' && payload.state === 'complete') {
+        if (previousState === 'processing' && payload.state === 'complete') {
           setOverlayWidth(payload.width);
           setLabel(payload.label);
           setStage('complete-fill');
           fillTimer = setTimeout(function() {
             setStage(payload.stage);
-            state = payload.state;
             fillTimer = null;
           }, ${COMPLETE_FILL_MS});
           return;
@@ -538,69 +641,30 @@ function getOverlayDisplay() {
   return screen.getDisplayNearestPoint(cursor);
 }
 
-function getOverlayPosition(width: number): { x: number; y: number } {
+function getOverlayLayout() {
   const display = getOverlayDisplay();
-  const { width: screenWidth } = display.workAreaSize;
-  const wa = display.workArea;
+  const bounds = display.bounds ?? display.workArea;
+  // Reserve camera/menu-bar space only on the built-in Mac display, including
+  // when its menu bar auto-hides. External displays need no cutout clearance.
+  const topReserve = process.platform === 'darwin' && display.internal
+    ? Math.max(40, Math.min(64, display.workArea.y - bounds.y))
+    : 0;
+  const width = Math.min(bounds.width, OVERLAY_MAX_WIDTH + OVERLAY_SHADOW_MARGIN * 2);
   return {
-    x: wa.x + Math.floor((screenWidth - width) / 2),
-    y: wa.y + 8,
+    x: bounds.x + Math.floor((bounds.width - width) / 2),
+    y: bounds.y,
+    width,
+    height: topReserve + OVERLAY_HEIGHT + OVERLAY_SHADOW_MARGIN,
+    topReserve,
   };
 }
 
-function stopOverlayWidthAnimation(): void {
-  if (overlayWidthAnimationTimer) {
-    clearInterval(overlayWidthAnimationTimer);
-    overlayWidthAnimationTimer = null;
-  }
-}
-
-function animateOverlayBounds(win: BrowserWindow, targetWidth: number): void {
-  if (win !== overlayWindow || win.isDestroyed()) {
-    return;
-  }
-
-  stopOverlayWidthAnimation();
-
-  const startBounds = win.getBounds();
-  const startWidth = startBounds.width;
-  const centerX = startBounds.x + startWidth / 2;
-
-  if (startWidth === targetWidth) {
-    win.setBounds({
-      x: Math.round(centerX - targetWidth / 2),
-      y: startBounds.y,
-      width: targetWidth,
-      height: OVERLAY_HEIGHT,
-    });
-    return;
-  }
-
-  const startTime = Date.now();
-
-  overlayWidthAnimationTimer = setInterval(() => {
-    if (win !== overlayWindow || win.isDestroyed()) {
-      stopOverlayWidthAnimation();
-      return;
-    }
-
-    const elapsed = Date.now() - startTime;
-    const progress = Math.min(1, elapsed / OVERLAY_WIDTH_MS);
-    const eased = easeOutCubic(progress);
-    const currentWidth = Math.round(startWidth + (targetWidth - startWidth) * eased);
-    const currentX = Math.round(centerX - currentWidth / 2);
-
-    win.setBounds({
-      x: currentX,
-      y: startBounds.y,
-      width: currentWidth,
-      height: OVERLAY_HEIGHT,
-    });
-
-    if (progress >= 1) {
-      stopOverlayWidthAnimation();
-    }
-  }, 16);
+function positionOverlay(win: BrowserWindow): void {
+  const { topReserve, ...bounds } = getOverlayLayout();
+  win.setBounds(bounds);
+  void win.webContents.executeJavaScript(
+    `document.body.style.setProperty('--top-reserve', '${topReserve}px');`
+  ).catch(() => { /* A replacement renderer receives geometry on reveal. */ });
 }
 
 async function applyOverlayPayload(
@@ -698,8 +762,7 @@ async function revealOverlay(
   }
 
   if (shouldShowWindow) {
-    const pos = getOverlayPosition(payload.width);
-    win.setBounds({ x: pos.x, y: pos.y, width: payload.width, height: OVERLAY_HEIGHT });
+    positionOverlay(win);
     showOverlayWithoutFocus(win);
     void win.webContents.executeJavaScript('window.startOverlayShow?.();').catch(() => {
       recreateOverlayAfterRendererFailure(
@@ -711,8 +774,6 @@ async function revealOverlay(
         presentationId,
       );
     });
-  } else {
-    animateOverlayBounds(win, payload.width);
   }
 }
 
@@ -728,7 +789,6 @@ function recreateHiddenOverlayForCurrentMacSpace(): void {
   }
 
   // Hidden macOS windows can remain tied to the Space where they were created.
-  stopOverlayWidthAnimation();
   const previousOverlayWindow = overlayWindow;
   destroyOverlayWindow(previousOverlayWindow);
 }
@@ -745,16 +805,19 @@ function createOverlayWindow(
 
   overlayReady = false;
   const payload = getOverlayPayload(state, transcript, errorMessage);
-  const pos = getOverlayPosition(payload.width);
+  const layout = getOverlayLayout();
 
   const win = new BrowserWindow({
-    width: payload.width,
-    height: OVERLAY_HEIGHT,
-    x: pos.x,
-    y: pos.y,
+    width: layout.width,
+    height: layout.height,
+    x: layout.x,
+    y: layout.y,
     transparent: true,
     backgroundColor: '#00000000',
     frame: false,
+    // Bypass AppKit's visible-frame constraint, which otherwise clamps y to
+    // the bottom of the menu bar even when we request the display's top edge.
+    enableLargerThanScreen: true,
     alwaysOnTop: true,
     resizable: false,
     closable: false,
@@ -777,7 +840,7 @@ function createOverlayWindow(
     skipTransformProcessType: process.platform === 'darwin',
   });
   win.setIgnoreMouseEvents(true);
-  win.setAlwaysOnTop(true, 'floating', 1);
+  win.setAlwaysOnTop(true, 'screen-saver');
   hideOverlayWindowButtons(win);
 
   win.once('closed', () => {
@@ -837,9 +900,7 @@ export function setOverlayAnchorBounds(bounds: OverlayAnchorBounds | null): void
     return;
   }
 
-  const currentBounds = overlayWindow.getBounds();
-  const pos = getOverlayPosition(currentBounds.width);
-  overlayWindow.setBounds({ x: pos.x, y: pos.y, width: currentBounds.width, height: OVERLAY_HEIGHT });
+  positionOverlay(overlayWindow);
 }
 
 function showOverlayWithoutFocus(win: BrowserWindow): void {
@@ -856,8 +917,7 @@ function hideOverlayWindowButtons(win: BrowserWindow): void {
   }
 }
 
-export function setOverlayThemeBackground(isDark: boolean): void {
-  overlayThemeIsDark = isDark;
+export function setOverlayThemeBackground(_isDark: boolean): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     return;
   }
@@ -905,7 +965,6 @@ export function hideOverlay(): void {
   const presentationId = ++overlayPresentationId;
   overlayDesiredVisible = false;
   pendingOverlayPayload = null;
-  stopOverlayWidthAnimation();
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;
@@ -936,7 +995,6 @@ export function hideOverlay(): void {
 export function destroyOverlay(): void {
   ++overlayPresentationId;
   overlayDesiredVisible = false;
-  stopOverlayWidthAnimation();
   if (hideOverlayTimer) {
     clearTimeout(hideOverlayTimer);
     hideOverlayTimer = null;

@@ -49,7 +49,7 @@ let shutdownPromise: Promise<void> | null = null;
 ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
   setOverlayThemeBackground(isDark);
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setBackgroundColor(isDark ? '#0a0a0a' : '#ffffff');
+    mainWindow.setBackgroundColor(isDark ? '#000000' : '#ffffff');
   }
 });
 

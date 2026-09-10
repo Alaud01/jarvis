@@ -153,7 +153,7 @@
 
 [data-theme="dark"],
 [data-resolved-theme="dark"] {
-  --color-bg-primary: #0a0a0a;
+  --color-bg-primary: #000000;
   --color-bg-secondary: #111111;
   --color-bg-tertiary: #161616;
   --color-bg-sidebar: #0f0f0f;
@@ -537,8 +537,8 @@ select option {
 }
 
 .marktext-content blockquote {
-  border-left: 3px solid var(--color-border-hover);
-  color: var(--color-text-secondary);
+  border-left: 3px solid var(--color-text-primary);
+  color: var(--color-text-primary);
   margin: 1.15rem 0;
   padding: 0.2rem 0 0.2rem 1rem;
 }
