@@ -81,7 +81,7 @@ lines.on('line', line => {
     const result = message.result;
     const text = result?.contentItems?.[0]?.text;
     const expectedImage = text === 'opened-with-image'
-      ? 'data:image/png;base64,aGVsbG8='
+      ? 'https://example.com/browser-screenshot.png'
       : null;
     const imageMatches = expectedImage === null
       ? result?.contentItems?.length === 1
@@ -89,8 +89,17 @@ lines.on('line', line => {
         && result.contentItems[1]?.type === 'inputImage'
         && result.contentItems[1]?.imageUrl === expectedImage;
     if (result?.success !== true || !['opened', 'opened-with-image'].includes(text) || !imageMatches) {
-      process.stderr.write('Unexpected dynamic tool result\n');
-      process.exitCode = 1;
+      send({
+        method: 'turn/completed',
+        params: {
+          threadId: activeTurn.threadId,
+          turn: {
+            id: activeTurn.turnId,
+            status: 'failed',
+            error: { message: 'Unexpected dynamic tool result' },
+          },
+        },
+      });
       return;
     }
     send({

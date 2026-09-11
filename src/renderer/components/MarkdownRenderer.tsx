@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -30,6 +30,7 @@ interface CodeProps {
   inline?: boolean;
   className?: string;
   children?: React.ReactNode;
+  highlightTerm?: string;
 }
 
 interface MarkdownRendererProps {
@@ -57,6 +58,122 @@ const getCodeText = (children: React.ReactNode): string => (
 const getLanguageFromClassName = (className?: string): string => {
   const match = /language-([\w-]+)/.exec(className || '');
   return match ? match[1] : '';
+};
+
+const splitHighlightedText = (
+  text: string,
+  highlightTerm: string,
+  keyPrefix: string
+): React.ReactNode => {
+  const term = highlightTerm.trim();
+  if (!term) {
+    return text;
+  }
+
+  const lowerText = text.toLocaleLowerCase();
+  const lowerTerm = term.toLocaleLowerCase();
+  const pieces: React.ReactNode[] = [];
+  let searchStart = 0;
+  let keyIndex = 0;
+
+  while (searchStart < text.length) {
+    const matchIndex = lowerText.indexOf(lowerTerm, searchStart);
+    if (matchIndex === -1) {
+      pieces.push(text.slice(searchStart));
+      break;
+    }
+
+    if (matchIndex > searchStart) {
+      pieces.push(text.slice(searchStart, matchIndex));
+    }
+
+    pieces.push(
+      <mark key={`${keyPrefix}-${keyIndex}`} className="conversation-search-highlight">
+        {text.slice(matchIndex, matchIndex + term.length)}
+      </mark>
+    );
+    keyIndex += 1;
+    searchStart = matchIndex + term.length;
+  }
+
+  return pieces.length > 0 ? pieces : text;
+};
+
+const wrapTextRange = (root: HTMLElement, start: number, end: number): void => {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let startNode: Text | null = null;
+  let endNode: Text | null = null;
+  let startOffset = 0;
+  let endOffset = 0;
+  let current = walker.nextNode();
+
+  while (current) {
+    const textNode = current as Text;
+    const nextOffset = offset + textNode.data.length;
+
+    if (!startNode && start < nextOffset) {
+      startNode = textNode;
+      startOffset = start - offset;
+    }
+    if (startNode && end <= nextOffset) {
+      endNode = textNode;
+      endOffset = end - offset;
+      break;
+    }
+
+    offset = nextOffset;
+    current = walker.nextNode();
+  }
+
+  if (!startNode || !endNode) {
+    return;
+  }
+
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+
+  const mark = document.createElement('mark');
+  mark.className = 'conversation-search-highlight';
+  mark.appendChild(range.extractContents());
+  range.insertNode(mark);
+};
+
+const getHighlightedCodeHtml = (code: string, language: string, highlightTerm: string): string => {
+  const container = document.createElement('code');
+
+  if (language && hljs.getLanguage(language)) {
+    container.innerHTML = hljs.highlight(code, { language, ignoreIllegals: true }).value;
+  } else {
+    container.textContent = code;
+  }
+
+  const term = highlightTerm.trim();
+  if (!term) {
+    return container.innerHTML;
+  }
+
+  const lowerCode = code.toLocaleLowerCase();
+  const lowerTerm = term.toLocaleLowerCase();
+  const matches: Array<{ start: number; end: number }> = [];
+  let searchStart = 0;
+
+  while (searchStart < code.length) {
+    const matchIndex = lowerCode.indexOf(lowerTerm, searchStart);
+    if (matchIndex === -1) {
+      break;
+    }
+
+    matches.push({ start: matchIndex, end: matchIndex + term.length });
+    searchStart = matchIndex + term.length;
+  }
+
+  for (const match of matches) {
+    wrapTextRange(container, match.start, match.end);
+  }
+
+  return container.innerHTML;
 };
 
 const fencedCodePattern = /(```[\s\S]*?```|~~~[\s\S]*?~~~)/g;
@@ -116,70 +233,28 @@ const PreBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   );
 };
 
-const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, ...props }) => {
-  const codeRef = useRef<HTMLElement>(null);
+const CodeBlock: React.FC<CodeProps> = ({ inline, className, children, highlightTerm = '', ...props }) => {
   const language = getLanguageFromClassName(className);
-  const code = getCodeText(children);
-
-  useEffect(() => {
-    if (!inline && codeRef.current && language) {
-      delete (codeRef.current as HTMLElement & { dataset: DOMStringMap }).dataset.highlighted;
-      hljs.highlightElement(codeRef.current);
-    }
-  }, [code, language, inline]);
+  const renderedCode = children === undefined || children === null ? '' : String(children);
+  const highlightedCode = splitHighlightedText(renderedCode, highlightTerm, 'code-highlight');
 
   if (inline) {
     return (
       <code {...props}>
-        {children}
+        {highlightedCode}
       </code>
     );
   }
 
   return (
-    <code ref={codeRef} className={className} {...props}>
-      {children}
-    </code>
+    <code
+      className={className}
+      {...props}
+      dangerouslySetInnerHTML={{
+        __html: getHighlightedCodeHtml(renderedCode, language, highlightTerm),
+      }}
+    />
   );
-};
-
-const splitHighlightedText = (
-  text: string,
-  highlightTerm: string,
-  keyPrefix: string
-): React.ReactNode => {
-  const term = highlightTerm.trim();
-  if (!term) {
-    return text;
-  }
-
-  const lowerText = text.toLocaleLowerCase();
-  const lowerTerm = term.toLocaleLowerCase();
-  const pieces: React.ReactNode[] = [];
-  let searchStart = 0;
-  let keyIndex = 0;
-
-  while (searchStart < text.length) {
-    const matchIndex = lowerText.indexOf(lowerTerm, searchStart);
-    if (matchIndex === -1) {
-      pieces.push(text.slice(searchStart));
-      break;
-    }
-
-    if (matchIndex > searchStart) {
-      pieces.push(text.slice(searchStart, matchIndex));
-    }
-
-    pieces.push(
-      <mark key={`${keyPrefix}-${keyIndex}`} className="conversation-search-highlight">
-        {text.slice(matchIndex, matchIndex + term.length)}
-      </mark>
-    );
-    keyIndex += 1;
-    searchStart = matchIndex + term.length;
-  }
-
-  return pieces.length > 0 ? pieces : text;
 };
 
 const highlightNode = (
@@ -242,7 +317,13 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content, highlightT
         rehypePlugins={[rehypeKatex]}
         components={{
           pre: PreBlock,
-          code: CodeBlock,
+          code: props => (
+            <CodeBlock
+              {...props}
+              key={highlightTerm.trim() ? 'search-code' : 'syntax-code'}
+              highlightTerm={highlightTerm}
+            />
+          ),
           h1: ({ children }) => <h1>{highlight(children)}</h1>,
           h2: ({ children }) => <h2>{highlight(children)}</h2>,
           h3: ({ children }) => <h3>{highlight(children)}</h3>,

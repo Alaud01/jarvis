@@ -1,3 +1,4 @@
+import type { ConversationBranches } from '../shared/conversationBranches';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
 import type { AttachmentSelectionResult, FileAttachment } from '../shared/attachments';
@@ -11,6 +12,7 @@ import type {
   UpdateVocabularyCandidateInput,
 } from '../shared/dictionary';
 import type { UsageDashboardData, UsageDashboardQuery } from '../shared/usage';
+import type { WorkspaceView } from '../shared/workspaceViews';
 
 export interface Message {
   id: string;
@@ -35,7 +37,9 @@ export interface Conversation {
   title: string;
   timestamp: Date;
   messages: Message[];
+  branches?: ConversationBranches<Message>;
   folderId: string | null;
+  isPinned: boolean;
   isLoaded: boolean;
 }
 
@@ -67,7 +71,9 @@ export interface SerializedConversation {
   title: string;
   timestamp: string;
   messages: SerializedMessage[];
+  branches?: ConversationBranches<SerializedMessage>;
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedConversationMetadata {
@@ -75,6 +81,7 @@ export interface SerializedConversationMetadata {
   title: string;
   timestamp: string;
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedFolder {
@@ -90,6 +97,13 @@ export interface ModelInfo {
   name: string;
   provider: string;
   contextLength?: number;
+  reasoningEfforts?: ReasoningEffortOption[];
+  defaultReasoningEffort?: string;
+}
+
+export interface ReasoningEffortOption {
+  value: string;
+  description?: string;
 }
 
 export interface ProviderInfo {
@@ -101,8 +115,10 @@ export interface ProviderInfo {
 export interface SendMessageStreamRequest {
   conversationId: string;
   assistantMessageId: string;
+  contextKey?: string;
   model: string;
   provider: string;
+  reasoningEffort?: string;
   messages: {
     role: 'user' | 'assistant';
     content: string;
@@ -163,12 +179,16 @@ declare global {
       storeDeleteFolder: (id: string) => Promise<{ success: boolean }>;
       storeLoadModel: () => Promise<string>;
       storeSaveModel: (model: string) => Promise<{ success: boolean }>;
+      storeLoadReasoningEffort: () => Promise<string>;
+      storeSaveReasoningEffort: (effort: string) => Promise<{ success: boolean }>;
       storeLoadProvider: () => Promise<string>;
       storeSaveProvider: (provider: string) => Promise<{ success: boolean }>;
-      storeLoadOpenTabIds: () => Promise<string[]>;
-      storeSaveOpenTabIds: (tabIds: string[]) => Promise<{ success: boolean }>;
       storeLoadCurrentConversationId: () => Promise<string | null>;
       storeSaveCurrentConversationId: (id: string | null) => Promise<{ success: boolean }>;
+      storeLoadWorkspaceView: () => Promise<WorkspaceView>;
+      storeSaveWorkspaceView: (view: WorkspaceView) => Promise<{ success: boolean }>;
+      storeLoadScrollPositions: () => Promise<Record<string, number>>;
+      storeSaveScrollPositions: (positions: Record<string, number>) => Promise<{ success: boolean }>;
       storeLoadConversationDrafts: () => Promise<SerializedConversationDrafts>;
       storeSaveConversationDrafts: (drafts: SerializedConversationDrafts) => Promise<{ success: boolean }>;
       dictionaryList: () => Promise<PersonalDictionaryState>;

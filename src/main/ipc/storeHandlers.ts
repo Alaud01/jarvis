@@ -12,18 +12,23 @@ import {
   saveFolders,
   loadSelectedModel,
   saveSelectedModel,
+  loadSelectedReasoningEffort,
+  saveSelectedReasoningEffort,
   loadSelectedProvider,
   saveSelectedProvider,
-  loadOpenTabIds,
-  saveOpenTabIds,
   loadCurrentConversationId,
   saveCurrentConversationId,
+  loadWorkspaceView,
+  saveWorkspaceView,
+  loadScrollPositions,
+  saveScrollPositions,
   loadConversationDrafts,
   saveConversationDrafts,
   type SerializedConversation,
   type SerializedConversationMetadata,
   type SerializedFolder,
 } from '../store';
+import type { WorkspaceView } from '../../shared/workspaceViews';
 import {
   deleteProviderConversationState,
   getAllModels,
@@ -116,6 +121,15 @@ export function registerStoreHandlers(): void {
     return { success: true };
   });
 
+  ipcMain.handle('store:load-reasoning-effort', async () => {
+    return loadSelectedReasoningEffort();
+  });
+
+  ipcMain.handle('store:save-reasoning-effort', async (_event, effort: string) => {
+    saveSelectedReasoningEffort(effort);
+    return { success: true };
+  });
+
   ipcMain.handle('store:load-provider', async () => {
     return loadSelectedProvider();
   });
@@ -125,21 +139,30 @@ export function registerStoreHandlers(): void {
     return { success: true };
   });
 
-  ipcMain.handle('store:load-open-tab-ids', async () => {
-    return loadOpenTabIds();
-  });
-
-  ipcMain.handle('store:save-open-tab-ids', async (_event, tabIds: string[]) => {
-    saveOpenTabIds(tabIds);
-    return { success: true };
-  });
-
   ipcMain.handle('store:load-current-conversation-id', async () => {
     return loadCurrentConversationId();
   });
 
   ipcMain.handle('store:save-current-conversation-id', async (_event, id: string | null) => {
     saveCurrentConversationId(id);
+    return { success: true };
+  });
+
+  ipcMain.handle('store:load-workspace-view', async () => {
+    return loadWorkspaceView();
+  });
+
+  ipcMain.handle('store:save-workspace-view', async (_event, view: WorkspaceView) => {
+    saveWorkspaceView(view);
+    return { success: true };
+  });
+
+  ipcMain.handle('store:load-scroll-positions', async () => {
+    return loadScrollPositions();
+  });
+
+  ipcMain.handle('store:save-scroll-positions', async (_event, positions: Record<string, number>) => {
+    saveScrollPositions(positions);
     return { success: true };
   });
 

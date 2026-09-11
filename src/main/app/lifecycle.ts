@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, nativeImage, Menu, shell, session } from 'electron';
+import { app, BrowserWindow, Tray, nativeImage, Menu, nativeTheme, shell, session } from 'electron';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { setMainWindow } from '../audioRecorder';
@@ -92,7 +92,7 @@ export function createWindow(): BrowserWindow {
     frame: true,
     resizable: true,
     titleBarStyle: 'hiddenInset',
-    backgroundColor: '#0a0a0a',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#000000' : '#ffffff',
     webPreferences: {
       preload: path.join(__dirname, '../../preload/index.js'),
       contextIsolation: true,

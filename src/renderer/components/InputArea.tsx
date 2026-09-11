@@ -18,6 +18,8 @@ interface ModelInfo {
   name: string;
   provider: string;
   contextLength?: number;
+  reasoningEfforts?: Array<{ value: string; description?: string }>;
+  defaultReasoningEffort?: string;
 }
 
 interface InputAreaProps {
@@ -35,6 +37,8 @@ interface InputAreaProps {
   onModelSelect: (model: string) => void;
   isLoadingModels?: boolean;
   onRefreshModels: () => void;
+  selectedReasoningEffort: string | null;
+  onReasoningEffortSelect: (effort: string) => void;
   composeFocusKey?: number;
 }
 
@@ -293,6 +297,89 @@ const ModelSelector: React.FC<{
   );
 };
 
+const ReasoningSelector: React.FC<{
+  model?: ModelInfo;
+  selectedEffort: string | null;
+  onEffortSelect: (effort: string) => void;
+  disabled: boolean;
+}> = ({ model, selectedEffort, onEffortSelect, disabled }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const efforts = model?.reasoningEfforts ?? [];
+  const hasReasoningControl = efforts.length > 0;
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsOpen(false);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        type="button"
+        aria-label="Reasoning level"
+        onClick={() => setIsOpen(current => !current)}
+        className={`inline-flex items-center gap-1.5 border font-mono text-[0.6rem] uppercase tracking-widest transition-all duration-[150ms] ${
+          hasReasoningControl && !disabled
+            ? 'cursor-pointer border-border-secondary text-text-secondary hover:border-text-primary hover:text-text-primary'
+            : 'cursor-not-allowed border-border-secondary text-text-tertiary opacity-50'
+        } px-2 py-0.5`}
+        disabled={!hasReasoningControl || disabled}
+      >
+        <span>Reasoning</span>
+        <span className="text-text-tertiary text-[0.5rem] normal-case tracking-normal">
+          {selectedEffort ?? 'N/A'}
+        </span>
+      </button>
+
+      {isOpen && (
+        <div className="absolute bottom-full left-0 mb-1 w-44 bg-bg-primary border border-border-primary shadow-lg z-50">
+          {efforts.map(option => (
+            <button
+              key={option.value}
+              data-selected={option.value === selectedEffort ? 'true' : undefined}
+              type="button"
+              onClick={() => {
+                onEffortSelect(option.value);
+                setIsOpen(false);
+              }}
+              title={option.description}
+              className={`w-full text-left px-3 py-1.5 flex items-center justify-between gap-2 transition-colors duration-100 cursor-pointer ${
+                option.value === selectedEffort
+                  ? 'bg-bg-secondary text-text-primary'
+                  : 'text-text-secondary hover:bg-bg-secondary hover:text-text-primary'
+              }`}
+            >
+              <span className="font-mono text-xs">{option.value}</span>
+              {option.description && (
+                <span className="text-text-tertiary text-[0.55rem] normal-case tracking-normal truncate">
+                  {option.description}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const InputArea: React.FC<InputAreaProps> = ({ 
   onSendMessage, 
   onStopStreaming, 
@@ -308,6 +395,8 @@ const InputArea: React.FC<InputAreaProps> = ({
   onModelSelect,
   isLoadingModels = false,
   onRefreshModels,
+  selectedReasoningEffort,
+  onReasoningEffortSelect,
   composeFocusKey = 0,
 }) => {
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
@@ -317,6 +406,7 @@ const InputArea: React.FC<InputAreaProps> = ({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastComposeFocusKeyRef = useRef<number | null>(null);
   const lastHandledVoiceIdRef = useRef<string | null>(null);
+  const focusAfterVoiceRef = useRef(false);
   const [voiceState, setVoiceState] = useState<VoiceState>('idle');
 
   useEffect(() => {
@@ -357,11 +447,32 @@ const InputArea: React.FC<InputAreaProps> = ({
       setAttachments([]);
       setAttachmentError('');
     } else {
+      focusAfterVoiceRef.current = true;
       onChange(nextInput);
     }
 
     onVoiceTextUsed();
   }, [voiceTranscript, onVoiceTextUsed, value, attachments, isLoading, disabled, onSendMessage, onChange]);
+
+  useEffect(() => {
+    if (
+      !focusAfterVoiceRef.current
+      || isLoading
+      || disabled
+      || voiceState === 'processing'
+    ) {
+      return;
+    }
+
+    focusAfterVoiceRef.current = false;
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      const cursorPosition = textarea.value.length;
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(cursorPosition, cursorPosition);
+    });
+  }, [disabled, isLoading, value, voiceState]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -555,13 +666,13 @@ const InputArea: React.FC<InputAreaProps> = ({
 
   return (
     <div
-      className="pb-6 bg-bg-primary shrink-0"
+      className="composer-input pb-6 bg-transparent shrink-0"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
       <div className="max-w-200 mx-auto">
-        <div className={`bg-transparent border px-3 py-2 transition-all duration-150 focus-within:border-text-primary ${isDragOver ? 'border-text-primary bg-bg-secondary' : 'border-border-primary'}`}>
+        <div className={`border px-3 py-2 transition-all duration-150 focus-within:border-text-primary ${isDragOver ? 'border-text-primary bg-bg-secondary' : 'border-border-primary bg-bg-primary'}`}>
           {attachments.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap mb-2">
               {attachments.map((attachment, index) => (
@@ -595,7 +706,7 @@ const InputArea: React.FC<InputAreaProps> = ({
           )}
           <textarea
             ref={textareaRef}
-            className="w-full min-h-7 max-h-20 border-none outline-none resize-none bg-transparent text-text-primary font-sans text-[0.875rem] leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
+            className="w-full min-h-7 max-h-[5lh] border-none outline-none resize-none bg-transparent text-text-primary font-sans text-[0.875rem] leading-relaxed placeholder:text-text-tertiary overflow-y-auto"
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onPaste={handlePaste}
@@ -612,6 +723,12 @@ const InputArea: React.FC<InputAreaProps> = ({
                 onModelSelect={onModelSelect}
                 isLoading={isLoadingModels}
                 onRefreshModels={onRefreshModels}
+              />
+              <ReasoningSelector
+                model={models.find(model => model.id === selectedModel)}
+                selectedEffort={selectedReasoningEffort}
+                onEffortSelect={onReasoningEffortSelect}
+                disabled={isDisabled}
               />
             </div>
             <div className="flex items-center gap-2">

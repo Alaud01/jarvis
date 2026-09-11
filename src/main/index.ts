@@ -48,9 +48,8 @@ let shutdownPromise: Promise<void> | null = null;
 
 ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
   setOverlayThemeBackground(isDark);
-  const win = BrowserWindow.getAllWindows().find(w => !w.isDestroyed());
-  if (win) {
-    win.setBackgroundColor(isDark ? '#0a0a0a' : '#ffffff');
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setBackgroundColor(isDark ? '#000000' : '#ffffff');
   }
 });
 

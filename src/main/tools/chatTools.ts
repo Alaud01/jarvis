@@ -3,14 +3,14 @@ import { getNotionToolDefinitions } from '../notionMcpService';
 
 export const MAX_TAVILY_SEARCH_CALLS_PER_TURN = 5;
 export const MAX_FETCH_URL_CALLS_PER_TURN = 5;
-export const MAX_NOTION_CALLS_PER_TURN = 8;
+export const MAX_NOTION_CALLS_PER_TURN = 16;
 
 const STATIC_CHAT_TOOLS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
       name: 'tavily_search',
-      description: 'Search the live public web with Tavily and return ranked source results with URLs and snippets. Use this for current events, recent facts, discovery of relevant public sources, or when the user asks to search the web. Prefer answering from these results when snippets are enough; only use fetch_url on one or two high-value primary sources if you need full page text.',
+      description: 'Search the live public web with Tavily and return ranked source results with URLs and snippets. Use only when the user explicitly asks for web search, the answer depends on information that may have changed recently, reliable sources are required, or you have a meaningful knowledge gap. Do not search for stable facts or topics you already know well enough to answer accurately. Prefer answering from search snippets when they are enough; only use fetch_url on one or two high-value primary sources if you need full page text.',
       parameters: {
         type: 'object',
         properties: {
@@ -323,13 +323,4 @@ export const BROWSER_CONTROL_TOOL_NAMES = new Set([
   'browser_type',
   'browser_wait',
   'browser_evaluate',
-]);
-
-export const NOTION_TOOL_NAMES = new Set([
-  'notion_search',
-  'notion_fetch_page',
-  'notion_query_data_source',
-  'notion_create_page',
-  'notion_append_blocks',
-  'notion_update_page_properties',
 ]);

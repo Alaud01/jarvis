@@ -18,6 +18,8 @@ type VoiceTranscriptPayload = {
 };
 
 let voiceFlowState: VoiceFlowState = 'idle';
+let recordingStarting = false;
+let startErrorTimer: ReturnType<typeof setTimeout> | null = null;
 
 export type VoiceFlowResult = {
   text: string;
@@ -135,6 +137,7 @@ function beginPreRecordingCapture(): void {
 }
 
 async function handleVoiceShortcut(): Promise<void> {
+  if (recordingStarting) return;
   debugLog('[VoiceFlow] handleVoiceShortcut state:', voiceFlowState);
 
   if (voiceFlowState === 'idle') {
@@ -147,30 +150,42 @@ async function handleVoiceShortcut(): Promise<void> {
 }
 
 async function startVoiceRecording(): Promise<void> {
-  if (voiceFlowState !== 'idle') {
+  if (voiceFlowState !== 'idle' || recordingStarting) {
     return;
   }
 
-  voiceFlowState = 'recording';
-  sendStateToRenderer('recording');
-  await capturePreRecordingTarget();
-  showOverlay('recording');
-  beginPreRecordingCapture();
+  if (startErrorTimer) {
+    clearTimeout(startErrorTimer);
+    startErrorTimer = null;
+  }
+  recordingStarting = true;
+  try {
+    await capturePreRecordingTarget();
 
-  const result = await startRecording();
+    const result = await startRecording();
 
-  if (!result.success) {
-    preRecordingApp = null;
-    preRecordingProjectFocused = false;
-    preRecordingContext = EMPTY_VOICE_CONTEXT;
-    voiceFlowState = 'idle';
-    sendStateToRenderer('idle');
-    sendErrorToRenderer(result.error || 'Failed to start recording');
-    showOverlay('error', undefined, result.error || 'Failed to start recording');
-    setTimeout(() => {
-      hideOverlay();
-      setOverlayAnchorBounds(null);
-    }, 2000);
+    if (!result.success) {
+      preRecordingApp = null;
+      preRecordingProjectFocused = false;
+      preRecordingContext = EMPTY_VOICE_CONTEXT;
+      voiceFlowState = 'idle';
+      sendStateToRenderer('idle');
+      sendErrorToRenderer(result.error || 'Failed to start recording');
+      showOverlay('error', undefined, result.error || 'Failed to start recording');
+      startErrorTimer = setTimeout(() => {
+        startErrorTimer = null;
+        hideOverlay();
+        setOverlayAnchorBounds(null);
+      }, 2000);
+      return;
+    }
+
+    voiceFlowState = 'recording';
+    sendStateToRenderer('recording');
+    showOverlay('recording');
+    beginPreRecordingCapture();
+  } finally {
+    recordingStarting = false;
   }
 }
 
@@ -182,10 +197,17 @@ async function stopAndProcess(): Promise<void> {
   voiceFlowState = 'processing';
   sendStateToRenderer('processing');
   showOverlay('processing');
+  const flowStartedAt = performance.now();
+  const timings: Record<string, number> = {};
 
   try {
+    let stepStartedAt = performance.now();
     await preRecordingCapturePromise;
+    timings.contextCaptureMs = Math.round(performance.now() - stepStartedAt);
+
+    stepStartedAt = performance.now();
     const audioBuffer = await stopRecording();
+    timings.stopRecordingMs = Math.round(performance.now() - stepStartedAt);
     if (audioBuffer.durationMs < 250 || audioBuffer.peak < 0.001) {
       const errorMessage = `Microphone captured silence (${Math.round(audioBuffer.durationMs)}ms, peak ${audioBuffer.peak.toFixed(4)})`;
       console.warn('[VoiceFlow] Microphone capture rejected as silence:', {
@@ -193,13 +215,16 @@ async function stopAndProcess(): Promise<void> {
         byteLength: audioBuffer.byteLength,
         peak: Number(audioBuffer.peak.toFixed(4)),
         rms: Number(audioBuffer.rms.toFixed(4)),
+        timings,
       });
       showOverlay('error', undefined, errorMessage);
       sendErrorToRenderer(errorMessage);
       return;
     }
 
+    stepStartedAt = performance.now();
     const result = await processVoiceFlow(audioBuffer, preRecordingContext);
+    timings.processVoiceFlowMs = Math.round(performance.now() - stepStartedAt);
     const dictationId = randomUUID();
 
     if (result.success && result.text) {
@@ -211,8 +236,13 @@ async function stopAndProcess(): Promise<void> {
       });
 
       showOverlay('complete', result.text);
+      stepStartedAt = performance.now();
       await new Promise(resolve => setTimeout(resolve, 300));
+      timings.completeOverlayDelayMs = Math.round(performance.now() - stepStartedAt);
+
+      stepStartedAt = performance.now();
       const targetApp = preRecordingProjectFocused ? null : await resolveTargetApp();
+      timings.resolveTargetAppMs = Math.round(performance.now() - stepStartedAt);
       const targetIsProjectApp = preRecordingProjectFocused || isProjectApp(targetApp);
       const routeToProjectAppOnly = shouldRouteToProjectAppOnly(result.text);
       const sendToProjectApp = targetIsProjectApp || routeToProjectAppOnly;
@@ -245,14 +275,18 @@ async function stopAndProcess(): Promise<void> {
         const targetBundleId = targetApp?.bundleId?.trim();
         if (targetBundleId) {
           try {
+            stepStartedAt = performance.now();
             await activateApp(targetBundleId);
             await new Promise(resolve => setTimeout(resolve, 100));
+            timings.activateAppMs = Math.round(performance.now() - stepStartedAt);
           } catch (err) {
             console.warn('[VoiceFlow] Could not activate pre-recording app before paste:', err);
           }
         }
 
+        stepStartedAt = performance.now();
         await typeTextInActiveApp(result.text);
+        timings.typeTextMs = Math.round(performance.now() - stepStartedAt);
         if (targetApp) {
           void observePostInsertionCorrection(targetApp, result.text, {
             dictationId,
@@ -294,6 +328,8 @@ async function stopAndProcess(): Promise<void> {
     showOverlay('error', undefined, errorMessage);
     sendErrorToRenderer(errorMessage);
   } finally {
+    timings.totalBeforeHideMs = Math.round(performance.now() - flowStartedAt);
+    console.warn('[VoiceFlow] stopAndProcess timing breakdown:', timings);
     await new Promise(resolve => setTimeout(resolve, 800));
     hideOverlay();
     preRecordingApp = null;
@@ -368,6 +404,10 @@ export function registerVoiceFlowIPC(): void {
 }
 
 export async function cleanupVoiceFlow(): Promise<void> {
+  if (startErrorTimer) {
+    clearTimeout(startErrorTimer);
+    startErrorTimer = null;
+  }
   teardownGlobalHotkey();
   destroyOverlay();
   await cleanupAudioCapture();

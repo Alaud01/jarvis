@@ -38,7 +38,9 @@ export function serializeConversation(c: Conversation): SerializedConversation {
         completedAt: compaction.completedAt?.toISOString(),
       })),
     })),
+    branches: c.branches ? { ...c.branches, archived: serializeConversation({ ...c, messages: c.branches.archived, branches: undefined }).messages } : undefined,
     folderId: c.folderId,
+    isPinned: c.isPinned,
   };
 }
 
@@ -48,6 +50,7 @@ export function serializeConversationMetadata(c: Conversation): SerializedConver
     title: c.title,
     timestamp: c.timestamp.toISOString(),
     folderId: c.folderId,
+    isPinned: c.isPinned,
   };
 }
 
@@ -69,7 +72,9 @@ export function deserializeConversation(c: SerializedConversation): Conversation
         completedAt: compaction.completedAt ? new Date(compaction.completedAt) : undefined,
       })),
     })),
+    branches: c.branches ? { ...c.branches, archived: deserializeConversation({ ...c, messages: c.branches.archived, branches: undefined }).messages } : undefined,
     folderId: c.folderId ?? null,
+    isPinned: Boolean(c.isPinned),
     isLoaded: true,
   };
 }
@@ -81,6 +86,7 @@ export function deserializeConversationMetadata(c: SerializedConversationMetadat
     timestamp: new Date(c.timestamp),
     messages: [],
     folderId: c.folderId ?? null,
+    isPinned: Boolean(c.isPinned),
     isLoaded: false,
   };
 }
@@ -135,7 +141,7 @@ export function hashUnknown(value: unknown, seed = 2166136261): number {
 export function getConversationMetadataRevision(conversations: Conversation[]): string {
   const hash = conversations.reduce((metadataHash, conversation) => (
     hashString(
-      `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
+      `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}\u0000${conversation.isPinned}`,
       metadataHash
     )
   ), 2166136261);
@@ -154,11 +160,17 @@ export function getConversationRevision(conversation: Conversation): string {
     nextHash = hashUnknown(message.compactions, nextHash);
     return nextHash;
   }, hashString(
-    `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}`,
+    `${conversation.id}\u0000${conversation.title}\u0000${conversation.timestamp.toISOString()}\u0000${conversation.folderId ?? ''}\u0000${conversation.isPinned}`,
     2166136261
   ));
 
-  return `${conversation.messages.length}:${hash}`;
+  const branches = conversation.branches;
+  const branchRevision = branches
+    ? `${hashUnknown([branches.contextKey, branches.parents, branches.selected])}:${getConversationRevision({
+        ...conversation, messages: branches.archived, branches: undefined,
+      })}`
+    : '';
+  return `${conversation.messages.length}:${hash}:${branchRevision}`;
 }
 
 export function getNextFolderName(existingFolders: Folder[]): string {

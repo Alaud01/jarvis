@@ -101,13 +101,13 @@
   --color-bg-code: #f8f8f8;
   --color-bg-navbar: #ffffff;
   
-  --color-text-primary: #1f1f1f;
+  --color-text-primary: #252525;
   --color-text-secondary: #555555;
   --color-text-tertiary: #777777;
   --color-text-muted: #aaaaaa;
   --color-text-inverse: #f7f7f7;
   
-  --color-accent-primary: #1f1f1f;
+  --color-accent-primary: #252525;
   --color-accent-primary-hover: #3a3a3a;
   --color-accent-secondary: #555555;
   --color-accent-secondary-hover: #222222;
@@ -135,13 +135,13 @@
   --color-bg-code: #f8f8f8;
   --color-bg-navbar: #ffffff;
   
-  --color-text-primary: #1f1f1f;
+  --color-text-primary: #252525;
   --color-text-secondary: #555555;
   --color-text-tertiary: #777777;
   --color-text-muted: #aaaaaa;
   --color-text-inverse: #f7f7f7;
   
-  --color-accent-primary: #1f1f1f;
+  --color-accent-primary: #252525;
   --color-accent-primary-hover: #3a3a3a;
   --color-accent-secondary: #555555;
   --color-accent-secondary-hover: #222222;
@@ -153,7 +153,7 @@
 
 [data-theme="dark"],
 [data-resolved-theme="dark"] {
-  --color-bg-primary: #0a0a0a;
+  --color-bg-primary: #000000;
   --color-bg-secondary: #111111;
   --color-bg-tertiary: #161616;
   --color-bg-sidebar: #0f0f0f;
@@ -165,13 +165,13 @@
   --color-bg-code: #161616;
   --color-bg-navbar: #0a0a0a;
   
-  --color-text-primary: #e8e8e8;
+  --color-text-primary: #e3e3e3;
   --color-text-secondary: #a0a0a0;
   --color-text-tertiary: #777777;
   --color-text-muted: #555555;
   --color-text-inverse: #171717;
   
-  --color-accent-primary: #e8e8e8;
+  --color-accent-primary: #e3e3e3;
   --color-accent-primary-hover: #cfcfcf;
   
   --color-border-primary: #222222;
@@ -208,6 +208,7 @@ body {
   height: 100%;
   min-width: 720px;
   min-height: 520px;
+  background-color: var(--color-bg-primary);
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -278,12 +279,43 @@ h1, h2, h3, h4, h5, h6 {
   overflow-anchor: none;
   overflow-x: hidden;
   scrollbar-gutter: stable;
-  margin-inline: 2px;
+  margin-inline: 0;
   box-sizing: border-box;
+}
+
+.sidebar-window-drag-region {
+  -webkit-app-region: drag;
+}
+
+/* Keep data-sidebar-item on interactive rows: Electron otherwise swallows
+   their clicks as native window dragging, even when React has onClick. */
+.sidebar-window-drag-region button,
+.sidebar-window-drag-region input,
+.sidebar-window-drag-region [data-sidebar-item] {
+  -webkit-app-region: no-drag;
 }
 
 .message-scroll-container::-webkit-scrollbar-track {
   margin-right: 2px;
+}
+
+/* Keep expanded trail scrollbar thickness in lockstep with the convo list. */
+.expanded-trail-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.expanded-trail-scroll::-webkit-scrollbar-track {
+  background: transparent;
+  margin-right: 2px;
+}
+
+.expanded-trail-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-border-secondary);
+}
+
+.expanded-trail-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
 }
 
 .thinking-panel-toggle-label {
@@ -505,8 +537,8 @@ select option {
 }
 
 .marktext-content blockquote {
-  border-left: 3px solid var(--color-border-hover);
-  color: var(--color-text-secondary);
+  border-left: 3px solid var(--color-text-primary);
+  color: var(--color-text-primary);
   margin: 1.15rem 0;
   padding: 0.2rem 0 0.2rem 1rem;
 }
@@ -631,8 +663,8 @@ select option {
   display: inline;
 }
 
-[data-message-trail],
-[data-message-trail] * {
+[data-message-trail-collapsed],
+[data-message-trail-collapsed] * {
   border-radius: 0 !important;
 }
 
@@ -858,4 +890,46 @@ select option {
     color: var(--color-text-primary) !important;
     transition: none !important;
   }
+}
+
+/* The rail and scrollbar share the conversation's symmetric composer gutters. */
+.chat-layout {
+  --trail-width: 32px;
+  --conversation-width: 800px;
+  --conversation-right-gutter: calc(var(--trail-width) - 6px);
+}
+
+.conversation-body {
+  /* Grow with the messages so padding follows the content instead of sitting
+     inside a viewport-height flex item whose messages overflow underneath it.
+     The composer overlay height includes its transparent bottom gutter, so a
+     small negative offset still leaves the last message fully above the input. */
+  align-self: flex-start;
+  min-height: 100%;
+  padding-bottom: calc(var(--composer-height, 120px) - 8px);
+}
+
+.conversation-body[data-generating='true'] {
+  padding-bottom: calc(var(--composer-height, 120px) + 48px);
+}
+
+.conversation-column {
+  max-width: calc(var(--conversation-width) + var(--conversation-right-gutter));
+  padding-right: var(--conversation-right-gutter);
+}
+
+.composer-overlay {
+  position: absolute;
+  inset: auto 0 0;
+  z-index: 20;
+  background: transparent;
+  pointer-events: none;
+}
+
+.composer-overlay > * {
+  pointer-events: auto;
+}
+
+.composer-input {
+  padding-inline: var(--trail-width);
 }

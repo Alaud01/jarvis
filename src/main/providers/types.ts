@@ -60,7 +60,9 @@ export interface ToolExecutionResult {
 export interface StreamChatTurnOptions {
   tools?: ToolDefinition[] | null;
   keepAlive?: string | number;
+  reasoningEffort?: string;
   conversationId?: string;
+  contextKey?: string;
   prepareReplayMessages?: (messages: ChatMessage[]) => Promise<ChatMessage[]>;
   executeTool?: (
     name: string,
@@ -77,6 +79,13 @@ export interface ModelInfo {
   name: string;
   provider: string;
   contextLength?: number;
+  reasoningEfforts?: ReasoningEffortOption[];
+  defaultReasoningEffort?: string;
+}
+
+export interface ReasoningEffortOption {
+  value: string;
+  description?: string;
 }
 
 export interface ProviderInfo {

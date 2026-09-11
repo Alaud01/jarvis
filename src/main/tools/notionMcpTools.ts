@@ -11,7 +11,6 @@ export interface ProjectedNotionTool {
   nativeName: string;
   allowedCommands?: string[];
   allowedParameters?: string[];
-  singlePageOnly?: boolean;
 }
 
 const TOOL_SPECS: Array<{
@@ -20,7 +19,6 @@ const TOOL_SPECS: Array<{
   description: string;
   commandPatterns?: RegExp[];
   allowedParameters?: string[];
-  singlePageOnly?: boolean;
 }> = [
   {
     name: 'notion_search',
@@ -40,9 +38,8 @@ const TOOL_SPECS: Array<{
   {
     name: 'notion_create_page',
     candidates: ['notion-create-pages', 'create-pages'],
-    description: 'Create one child page under a page, or one row under a data source. A parent is required; this tool cannot create a private top-level page.',
-    allowedParameters: ['parent', 'pages'],
-    singlePageOnly: true,
+    description: 'Create one or more Notion pages or data-source rows in one call. Omit parent to create private workspace-level pages. Prefer one batch call when creating several rows.',
+    allowedParameters: ['parent', 'pages', 'allow_async'],
   },
   {
     name: 'notion_append_blocks',
@@ -56,7 +53,39 @@ const TOOL_SPECS: Array<{
     candidates: ['notion-update-page', 'update-page'],
     description: 'Update properties on an existing Notion page or data-source row. This tool cannot archive or delete it.',
     commandPatterns: [/^update_properties$/i, /^update_page_properties$/i],
-    allowedParameters: ['page_id', 'command', 'properties'],
+    allowedParameters: ['page_id', 'command', 'properties', 'icon', 'cover', 'template', 'template_id', 'erase_content', 'allow_async'],
+  },
+  {
+    name: 'notion_update_page_content',
+    candidates: ['notion-update-page', 'update-page'],
+    description: 'Edit existing Notion page content with targeted replacements or replace the complete page content. Use update_content for precise old_str/new_str edits and replace_content for a complete rewrite.',
+    commandPatterns: [/^update_content$/i, /^replace_content$/i, /^replace_content_range$/i],
+    allowedParameters: ['page_id', 'command', 'new_str', 'content', 'content_updates', 'selection_with_ellipsis', 'insert_after', 'insert_before', 'allow_async'],
+  },
+  {
+    name: 'notion_create_database',
+    candidates: ['notion-create-database', 'create-database'],
+    description: 'Create a Notion database with its initial data-source schema and default view. Define all known properties, such as Date, Price, Category, and Closed, in this call instead of creating a placeholder database.',
+  },
+  {
+    name: 'notion_update_data_source',
+    candidates: ['notion-update-data-source', 'update-data-source'],
+    description: 'Update a Notion data source schema or metadata. Use this to add, rename, configure, or remove database properties (columns). Pass the data-source ID, not the containing database ID.',
+  },
+  {
+    name: 'notion_create_view',
+    candidates: ['notion-create-view', 'create-view'],
+    description: 'Create a Notion database view with filters, sorts, grouping, visible properties, and layout configuration. Use the database ID for a top-level database view and the data-source ID for its rows.',
+  },
+  {
+    name: 'notion_update_view',
+    candidates: ['notion-update-view', 'update-view'],
+    description: 'Update a Notion database view name, filters, sorts, grouping, visible properties, or layout configuration. Accepts the native Notion view identifier formats.',
+  },
+  {
+    name: 'notion_move_pages',
+    candidates: ['notion-move-pages', 'move-pages'],
+    description: 'Move one or more existing Notion pages or databases to a new parent in one call.',
   },
 ];
 
@@ -96,7 +125,6 @@ function asToolParameters(schema: Record<string, unknown>): ToolDefinition['func
 function restrictParameters(
   schema: Record<string, unknown>,
   allowedNames: string[],
-  requireParent = false,
 ): Record<string, unknown> | null {
   const cloned = cloneSchema(schema);
   if (!cloned.properties || typeof cloned.properties !== 'object' || Array.isArray(cloned.properties)) return null;
@@ -104,11 +132,9 @@ function restrictParameters(
   for (const name of Object.keys(properties)) {
     if (!allowedNames.includes(name)) delete properties[name];
   }
-  if (requireParent && !properties.parent) return null;
   const required = Array.isArray(cloned.required)
     ? cloned.required.filter((name): name is string => typeof name === 'string' && allowedNames.includes(name))
     : [];
-  if (requireParent && !required.includes('parent')) required.push('parent');
   cloned.required = required;
   cloned.additionalProperties = false;
   return cloned;
@@ -131,7 +157,7 @@ export function projectNotionTools(nativeTools: NativeMcpTool[]): ProjectedNotio
       allowedCommands = restricted.allowedCommands;
     }
     if (spec.allowedParameters) {
-      const restricted = restrictParameters(schema, spec.allowedParameters, spec.singlePageOnly === true);
+      const restricted = restrictParameters(schema, spec.allowedParameters);
       if (!restricted) continue;
       schema = restricted;
     }
@@ -142,7 +168,6 @@ export function projectNotionTools(nativeTools: NativeMcpTool[]): ProjectedNotio
       nativeName: native.name,
       allowedCommands,
       allowedParameters: spec.allowedParameters,
-      singlePageOnly: spec.singlePageOnly,
       definition: {
         type: 'function',
         function: {
@@ -172,15 +197,6 @@ export function validateProjectedNotionArguments(
     const unexpected = Object.keys(args).filter(name => !tool.allowedParameters?.includes(name));
     if (unexpected.length > 0) {
       return `${tool.definition.function.name} does not permit parameter ${unexpected.map(value => JSON.stringify(value)).join(', ')}.`;
-    }
-  }
-
-  if (tool.singlePageOnly) {
-    if (!args.parent || typeof args.parent !== 'object' || Array.isArray(args.parent)) {
-      return 'notion_create_page requires a parent page or data source; private top-level pages are outside this tool boundary.';
-    }
-    if (!Array.isArray(args.pages) || args.pages.length !== 1) {
-      return 'notion_create_page creates exactly one page or data-source row per call.';
     }
   }
 

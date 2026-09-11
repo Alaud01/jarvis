@@ -8,7 +8,7 @@ const ScrollToBottomButton: React.FC<ScrollToBottomButtonProps> = ({ onClick }) 
   return (
     <button
       onClick={onClick}
-      className="absolute bottom-4 right-4 w-10 h-10 rounded-full bg-bg-secondary border border-border-primary shadow-lg hover:bg-bg-tertiary transition-colors flex items-center justify-center group"
+      className="absolute bottom-[calc(var(--composer-height,120px)+1rem)] z-20 right-4 w-10 h-10 rounded-full bg-bg-secondary border border-border-primary shadow-lg hover:bg-bg-tertiary transition-colors flex items-center justify-center group"
       aria-label="Scroll to bottom"
     >
       <svg

@@ -29,8 +29,10 @@ type ChatMessagePayload = {
 type SendMessageStreamRequest = {
   conversationId: string;
   assistantMessageId: string;
+  contextKey?: string;
   model: string;
   provider: string;
+  reasoningEffort?: string;
   messages: ChatMessagePayload[];
 };
 
@@ -116,12 +118,16 @@ contextBridge.exposeInMainWorld('assistant', {
   storeDeleteFolder: (id: string) => ipcRenderer.invoke('store:delete-folder', id),
   storeLoadModel: () => ipcRenderer.invoke('store:load-model'),
   storeSaveModel: (model: string) => ipcRenderer.invoke('store:save-model', model),
+  storeLoadReasoningEffort: () => ipcRenderer.invoke('store:load-reasoning-effort'),
+  storeSaveReasoningEffort: (effort: string) => ipcRenderer.invoke('store:save-reasoning-effort', effort),
   storeLoadProvider: () => ipcRenderer.invoke('store:load-provider'),
   storeSaveProvider: (provider: string) => ipcRenderer.invoke('store:save-provider', provider),
-  storeLoadOpenTabIds: () => ipcRenderer.invoke('store:load-open-tab-ids'),
-  storeSaveOpenTabIds: (tabIds: string[]) => ipcRenderer.invoke('store:save-open-tab-ids', tabIds),
   storeLoadCurrentConversationId: () => ipcRenderer.invoke('store:load-current-conversation-id'),
   storeSaveCurrentConversationId: (id: string | null) => ipcRenderer.invoke('store:save-current-conversation-id', id),
+  storeLoadWorkspaceView: () => ipcRenderer.invoke('store:load-workspace-view'),
+  storeSaveWorkspaceView: (view: string) => ipcRenderer.invoke('store:save-workspace-view', view),
+  storeLoadScrollPositions: () => ipcRenderer.invoke('store:load-scroll-positions'),
+  storeSaveScrollPositions: (positions: Record<string, number>) => ipcRenderer.invoke('store:save-scroll-positions', positions),
   storeLoadConversationDrafts: () => ipcRenderer.invoke('store:load-conversation-drafts'),
   storeSaveConversationDrafts: (drafts: Record<string, string>) => ipcRenderer.invoke('store:save-conversation-drafts', drafts),
   dictionaryList: () => ipcRenderer.invoke('dictionary:list'),

@@ -11,7 +11,6 @@ import {
 import {
   getChatTools,
   BROWSER_CONTROL_TOOL_NAMES,
-  NOTION_TOOL_NAMES,
   MAX_TAVILY_SEARCH_CALLS_PER_TURN,
   MAX_FETCH_URL_CALLS_PER_TURN,
   MAX_NOTION_CALLS_PER_TURN,
@@ -29,7 +28,7 @@ import {
   requiresToolResultSynthesis,
   runBrowserControlTool,
 } from '../tools/dispatcher';
-import { executeNotionMcpTool } from '../notionMcpService';
+import { executeNotionMcpTool, isNotionToolName } from '../notionMcpService';
 import { tavilySearch } from '../tavilySearchService';
 import { fetchUrlContent } from '../fetchService';
 import { logMainProcess, CHAT_MODEL_KEEP_ALIVE } from '../app/lifecycle';
@@ -38,8 +37,10 @@ import { recordResolvedTurnUsage } from '../usageService';
 interface SendMessageStreamRequest {
   conversationId: string;
   assistantMessageId: string;
+  contextKey?: string;
   model: string;
   provider: string;
+  reasoningEffort?: string;
   messages: ChatMessage[];
 }
 
@@ -285,7 +286,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           }
         }
 
-        if (NOTION_TOOL_NAMES.has(toolName)) {
+        if (isNotionToolName(toolName)) {
           if (notionCallsThisTurn >= MAX_NOTION_CALLS_PER_TURN) {
             return {
               success: false,
@@ -374,7 +375,9 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           {
             tools: chatTools,
             keepAlive: CHAT_MODEL_KEEP_ALIVE,
+            reasoningEffort: request.reasoningEffort,
             conversationId: request.conversationId,
+            contextKey: request.contextKey,
             prepareReplayMessages: replayMessages => (
               compactMessagesForContext(replayMessages, 'thread-replay')
             ),
@@ -446,7 +449,11 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
             synthesisMessages,
             abortController,
             emitStreamChunk,
-            { tools: null, keepAlive: CHAT_MODEL_KEEP_ALIVE },
+            {
+              tools: null,
+              keepAlive: CHAT_MODEL_KEEP_ALIVE,
+              reasoningEffort: request.reasoningEffort,
+            },
           );
           recordResolvedTurnUsage({
             model: request.model,

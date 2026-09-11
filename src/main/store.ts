@@ -1,9 +1,11 @@
+import type { ConversationBranches } from '../shared/conversationBranches';
 import Store from 'electron-store';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
-import { isValidOpenTabId } from '../shared/workspaceTabs';
+import { isWorkspaceView } from '../shared/workspaceViews';
+import type { WorkspaceView } from '../shared/workspaceViews';
 import type {
   CorrectionObservation,
   LegacyDictionaryEntry,
@@ -32,7 +34,9 @@ export interface SerializedConversation {
   title: string;
   timestamp: string;
   messages: SerializedMessage[];
+  branches?: ConversationBranches<SerializedMessage>;
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedConversationMetadata {
@@ -40,6 +44,7 @@ export interface SerializedConversationMetadata {
   title: string;
   timestamp: string;
   folderId: string | null;
+  isPinned?: boolean;
 }
 
 export interface SerializedFolder {
@@ -55,9 +60,11 @@ interface StoreSchema {
   conversationMessageFilesMigrated?: boolean;
   folders: SerializedFolder[];
   selectedModel: string;
+  selectedReasoningEffort: string;
   selectedProvider: string;
-  openTabIds: string[];
   currentConversationId: string | null;
+  workspaceView: WorkspaceView;
+  scrollPositions: Record<string, number>;
   conversationDrafts: Record<string, string>;
   dictionaryEntries: LegacyDictionaryEntry[];
   vocabularyEntries: VocabularyEntry[];
@@ -82,9 +89,11 @@ const store = new Store<StoreSchema>({
     conversationMessageFilesMigrated: false,
     folders: [],
     selectedModel: '',
+    selectedReasoningEffort: '',
     selectedProvider: 'ollama',
-    openTabIds: [],
     currentConversationId: null,
+    workspaceView: 'chat',
+    scrollPositions: {},
     conversationDrafts: {},
     dictionaryEntries: [],
     vocabularyEntries: [],
@@ -168,15 +177,9 @@ function pruneLegacyConversations(validIds: Set<string>): void {
 }
 
 function pruneConversationReferences(validIds: Set<string>): void {
-  const openTabIds = loadOpenTabIds();
-  const nextOpenTabIds = openTabIds.filter(id => isValidOpenTabId(id, validIds));
-  if (nextOpenTabIds.length !== openTabIds.length) {
-    store.set('openTabIds', nextOpenTabIds);
-  }
-
   const currentConversationId = loadCurrentConversationId();
   if (currentConversationId && !validIds.has(currentConversationId)) {
-    store.set('currentConversationId', nextOpenTabIds[0] ?? null);
+    store.set('currentConversationId', null);
   }
 }
 
@@ -205,6 +208,7 @@ function conversationToMetadata(conversation: SerializedConversation): Serialize
     title: conversation.title,
     timestamp: conversation.timestamp,
     folderId: conversation.folderId ?? null,
+    isPinned: Boolean(conversation.isPinned),
   };
 }
 
@@ -268,6 +272,7 @@ export function loadConversation(id: string): SerializedConversation | null {
 
   const storedConversation = readConversationFile(id);
   return {
+    ...storedConversation,
     ...metadata,
     messages: storedConversation?.messages ?? [],
   };
@@ -280,10 +285,10 @@ export function loadConversations(ids?: string[]): SerializedConversation[] {
 
   return metadata
     .filter(c => !requestedIds || requestedIds.has(c.id))
-    .map(c => ({
-      ...c,
-      messages: readConversationFile(c.id)?.messages ?? [],
-    }));
+    .map(c => {
+      const stored = readConversationFile(c.id);
+      return { ...stored, ...c, messages: stored?.messages ?? [] };
+    });
 }
 
 export function saveConversationMetadata(metadata: SerializedConversationMetadata[]): void {
@@ -375,6 +380,14 @@ export function saveSelectedModel(model: string): void {
   store.set('selectedModel', model);
 }
 
+export function loadSelectedReasoningEffort(): string {
+  return store.get('selectedReasoningEffort', '') as string;
+}
+
+export function saveSelectedReasoningEffort(effort: string): void {
+  store.set('selectedReasoningEffort', effort);
+}
+
 export function loadSelectedProvider(): string {
   return store.get('selectedProvider', 'ollama') as string;
 }
@@ -388,20 +401,40 @@ export function deleteLegacyStoredProviderApiKeys(): void {
   store.delete('openRouterApiKey');
 }
 
-export function loadOpenTabIds(): string[] {
-  return store.get('openTabIds', []) as string[];
-}
-
-export function saveOpenTabIds(tabIds: string[]): void {
-  store.set('openTabIds', tabIds);
-}
-
 export function loadCurrentConversationId(): string | null {
   return store.get('currentConversationId', null) as string | null;
 }
 
 export function saveCurrentConversationId(id: string | null): void {
   store.set('currentConversationId', id);
+}
+
+export function loadWorkspaceView(): WorkspaceView {
+  const stored = store.get('workspaceView', 'chat');
+  return isWorkspaceView(stored) ? stored : 'chat';
+}
+
+export function saveWorkspaceView(view: WorkspaceView): void {
+  store.set('workspaceView', view);
+}
+
+export function loadScrollPositions(): Record<string, number> {
+  const stored = store.get('scrollPositions', {});
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+    return {};
+  }
+
+  const positions: Record<string, number> = {};
+  for (const [key, value] of Object.entries(stored)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      positions[key] = value;
+    }
+  }
+  return positions;
+}
+
+export function saveScrollPositions(positions: Record<string, number>): void {
+  store.set('scrollPositions', positions);
 }
 
 export function loadConversationDrafts(): Record<string, string> {

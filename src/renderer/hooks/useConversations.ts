@@ -18,28 +18,38 @@ import {
   serializeConversationMetadata,
   serializeFolder,
 } from '../utils/conversation';
-import { isWorkspaceTabId } from '../../shared/workspaceTabs';
+import { resolveWorkspaceView } from '../../shared/workspaceViews';
+import { folderDeletionMessage } from '../../shared/folderDeletion';
+import type { WorkspaceView } from '../../shared/workspaceViews';
 
 export interface UseConversationsResult {
   conversations: Conversation[];
   folders: Folder[];
   currentConversationId: string | null;
-  openTabIds: string[];
   conversationDrafts: SerializedConversationDrafts;
   unreadCompleteConversationIds: Set<string>;
+  restoredWorkspaceView: WorkspaceView;
   hasHydratedStore: boolean;
   setCurrentConversationId: (id: string | null) => void;
-  setOpenTabIds: React.Dispatch<React.SetStateAction<string[]>>;
   setConversations: React.Dispatch<React.SetStateAction<Conversation[]>>;
   setFolders: React.Dispatch<React.SetStateAction<Folder[]>>;
   setConversationDrafts: React.Dispatch<React.SetStateAction<SerializedConversationDrafts>>;
   setUnreadCompleteConversationIds: React.Dispatch<React.SetStateAction<Set<string>>>;
+  getScrollPosition: (key: string) => number | undefined;
+  setScrollPosition: (key: string, top: number) => void;
   ensureConversationLoaded: (id: string) => Promise<void>;
   handleComposeChange: (value: string) => void;
   handleCreateFolder: () => string;
   handleRenameFolder: (id: string, name: string) => void;
   handleDeleteFolder: (id: string) => void;
   handleMoveConversation: (conversationId: string, folderId: string | null) => void;
+  handlePinConversation: (conversationId: string, isPinned: boolean) => void;
+  handleReorderConversation: (
+    conversationId: string,
+    targetConversationId: string,
+    placement: 'before' | 'after',
+  ) => void;
+  handleRenameConversation: (id: string, title: string) => void;
   handleDeleteConversation: (id: string) => void;
   newChatTrigger: number;
   triggerNewChat: () => void;
@@ -50,39 +60,77 @@ export function useConversations(): UseConversationsResult {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
-  const [openTabIds, setOpenTabIds] = useState<string[]>([]);
   const [conversationDrafts, setConversationDrafts] = useState<SerializedConversationDrafts>({});
   const [unreadCompleteConversationIds, setUnreadCompleteConversationIds] = useState<Set<string>>(() => new Set());
+  const [restoredWorkspaceView, setRestoredWorkspaceView] = useState<WorkspaceView>('chat');
   const [hasHydratedStore, setHasHydratedStore] = useState(false);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
   const conversationAccessRef = useRef<Map<string, number>>(new Map());
+  const savedStreamingSnapshotsRef = useRef<Map<string, string>>(new Map());
   const savedConversationRevisionsRef = useRef<Map<string, string>>(new Map());
   const savedConversationMetadataRevisionRef = useRef<string>('');
   const metadataSaveTimerRef = useRef<number | null>(null);
   const conversationSaveTimersRef = useRef<Map<string, number>>(new Map());
   const draftSaveTimerRef = useRef<number | null>(null);
+  const scrollSaveTimerRef = useRef<number | null>(null);
+  const scrollPositionsRef = useRef<Record<string, number>>({});
+  const scrollPositionsDirtyRef = useRef(false);
 
-  useEffect(() => () => {
-    if (metadataSaveTimerRef.current !== null) {
-      window.clearTimeout(metadataSaveTimerRef.current);
+  const flushScrollPositions = useCallback(() => {
+    if (scrollSaveTimerRef.current !== null) {
+      window.clearTimeout(scrollSaveTimerRef.current);
+      scrollSaveTimerRef.current = null;
     }
-    if (draftSaveTimerRef.current !== null) {
-      window.clearTimeout(draftSaveTimerRef.current);
+    if (!scrollPositionsDirtyRef.current) {
+      return;
     }
-    conversationSaveTimersRef.current.forEach(timerId => window.clearTimeout(timerId));
+
+    const positionsToSave = scrollPositionsRef.current;
+    scrollPositionsDirtyRef.current = false;
+    window.assistant.storeSaveScrollPositions(positionsToSave).catch(err => {
+      if (scrollPositionsRef.current === positionsToSave) {
+        scrollPositionsDirtyRef.current = true;
+      }
+      console.error('Failed to save scroll positions:', err);
+    });
   }, []);
+
+  useEffect(() => {
+    const conversationSaveTimers = conversationSaveTimersRef.current;
+    window.addEventListener('pagehide', flushScrollPositions);
+
+    return () => {
+      window.removeEventListener('pagehide', flushScrollPositions);
+      if (metadataSaveTimerRef.current !== null) {
+        window.clearTimeout(metadataSaveTimerRef.current);
+      }
+      if (draftSaveTimerRef.current !== null) {
+        window.clearTimeout(draftSaveTimerRef.current);
+      }
+      conversationSaveTimers.forEach(timerId => window.clearTimeout(timerId));
+      flushScrollPositions();
+    };
+  }, [flushScrollPositions]);
 
   useEffect(() => {
     let isMounted = true;
 
     const loadStoredData = async () => {
-      const [conversationsResult, foldersResult, tabIdsResult, currentConvResult, draftsResult] = await Promise.allSettled([
+      const [
+        conversationsResult,
+        foldersResult,
+        currentConvResult,
+        draftsResult,
+        workspaceViewResult,
+        scrollPositionsResult,
+      ] = await Promise.allSettled([
         window.assistant.storeLoadConversationList(),
         window.assistant.storeLoadFolders(),
-        window.assistant.storeLoadOpenTabIds(),
         window.assistant.storeLoadCurrentConversationId(),
         window.assistant.storeLoadConversationDrafts(),
+        window.assistant.storeLoadWorkspaceView(),
+        window.assistant.storeLoadScrollPositions(),
       ]);
 
       if (!isMounted) {
@@ -94,14 +142,12 @@ export function useConversations(): UseConversationsResult {
         const deserialized = storedMetadata.map(deserializeConversationMetadata);
         if (storedMetadata.length > 0) {
           const validIds = new Set(deserialized.map(c => c.id));
-          const storedTabIds = tabIdsResult.status === 'fulfilled' ? tabIdsResult.value : [];
           const storedCurrentId = currentConvResult.status === 'fulfilled' ? currentConvResult.value : null;
-          const filteredTabs = storedTabIds.filter((id: string) => validIds.has(id) || isWorkspaceTabId(id));
-          const filteredConversationTabs = filteredTabs.filter((id: string) => validIds.has(id));
-          const resolvedCurrentId = (storedCurrentId && validIds.has(storedCurrentId)) ? storedCurrentId : (filteredConversationTabs.length > 0 ? filteredConversationTabs[filteredConversationTabs.length - 1] : deserialized[deserialized.length - 1].id);
+          const resolvedCurrentId = storedCurrentId && validIds.has(storedCurrentId)
+            ? storedCurrentId
+            : deserialized[deserialized.length - 1].id;
           const warmIds = Array.from(new Set([
             resolvedCurrentId,
-            ...filteredConversationTabs,
             ...deserialized.slice(0, CONVERSATION_CACHE_LIMIT).map(c => c.id),
           ].filter((id): id is string => Boolean(id)))).slice(0, CONVERSATION_CACHE_LIMIT);
           const warmConversations = warmIds.length > 0
@@ -110,9 +156,16 @@ export function useConversations(): UseConversationsResult {
           const warmConversationMap = new Map(
             warmConversations.map(c => [c.id, deserializeConversation(c)])
           );
-          const hydratedConversations = deserialized.map(conversation =>
-            warmConversationMap.get(conversation.id) ?? conversation
-          );
+          const hydratedConversations = deserialized.map(conversation => {
+            const warmConversation = warmConversationMap.get(conversation.id);
+            return warmConversation
+              ? {
+                  ...warmConversation,
+                  folderId: conversation.folderId,
+                  isPinned: conversation.isPinned,
+                }
+              : conversation;
+          });
 
           warmIds.forEach((id, index) => {
             conversationAccessRef.current.set(id, Date.now() - index);
@@ -124,12 +177,10 @@ export function useConversations(): UseConversationsResult {
 
           setConversations(hydratedConversations);
           setCurrentConversationId(resolvedCurrentId);
-          setOpenTabIds(filteredTabs.length > 0 ? filteredTabs : [resolvedCurrentId]);
         } else {
           savedConversationMetadataRevisionRef.current = getConversationMetadataRevision([]);
           setConversations([]);
           setCurrentConversationId(null);
-          setOpenTabIds([]);
         }
       } else {
         console.error('Failed to load stored conversations:', conversationsResult.reason);
@@ -147,6 +198,21 @@ export function useConversations(): UseConversationsResult {
         console.error('Failed to load stored conversation drafts:', draftsResult.reason);
       }
 
+      const storedWorkspaceView = workspaceViewResult.status === 'fulfilled'
+        ? workspaceViewResult.value
+        : 'chat';
+      if (workspaceViewResult.status === 'rejected') {
+        console.error('Failed to load stored workspace view:', workspaceViewResult.reason);
+      }
+
+      setRestoredWorkspaceView(resolveWorkspaceView(storedWorkspaceView));
+
+      if (scrollPositionsResult.status === 'fulfilled') {
+        scrollPositionsRef.current = scrollPositionsResult.value;
+      } else {
+        console.error('Failed to load stored scroll positions:', scrollPositionsResult.reason);
+      }
+
       setHasHydratedStore(true);
     };
 
@@ -161,9 +227,6 @@ export function useConversations(): UseConversationsResult {
     if (!hasHydratedStore) {
       return;
     }
-
-    const hasStreaming = conversations.some(c => c.messages.some(m => m.isStreaming));
-    if (hasStreaming) return;
 
     const metadataRevision = getConversationMetadataRevision(conversations);
     if (metadataRevision !== savedConversationMetadataRevisionRef.current) {
@@ -182,6 +245,16 @@ export function useConversations(): UseConversationsResult {
     conversations.forEach(conversation => {
       if (!conversation.isLoaded) {
         return;
+      }
+
+      const streamingMessage = conversation.messages.find(message => message.isStreaming);
+      if (streamingMessage) {
+        // Save the initial branch before waiting for generation; avoid hashing and
+        // writing the transcript on every streamed token.
+        if (!conversation.branches || savedStreamingSnapshotsRef.current.get(conversation.id) === streamingMessage.id) return;
+        savedStreamingSnapshotsRef.current.set(conversation.id, streamingMessage.id);
+      } else {
+        savedStreamingSnapshotsRef.current.delete(conversation.id);
       }
 
       const revision = getConversationRevision(conversation);
@@ -209,17 +282,12 @@ export function useConversations(): UseConversationsResult {
 
     const validIds = new Set(conversations.map(c => c.id));
 
-    setOpenTabIds(prev => {
-      const filtered = prev.filter(id => validIds.has(id) || isWorkspaceTabId(id));
-      return filtered.length !== prev.length ? filtered : prev;
-    });
-
     if (currentConversationId && !validIds.has(currentConversationId)) {
       setCurrentConversationId(conversations[0]?.id ?? null);
     }
 
     setUnreadCompleteConversationIds(prev => {
-      const next = new Set([...prev].filter(id => validIds.has(id) && id !== currentConversationId));
+      const next = new Set([...prev].filter(id => validIds.has(id)));
       return next.size === prev.size ? prev : next;
     });
   }, [conversations, currentConversationId, hasHydratedStore]);
@@ -232,14 +300,6 @@ export function useConversations(): UseConversationsResult {
       console.error('Failed to save folders:', err);
     });
   }, [folders, hasHydratedStore]);
-
-  useEffect(() => {
-    if (!hasHydratedStore) return;
-
-    window.assistant.storeSaveOpenTabIds(openTabIds).catch(err => {
-      console.error('Failed to save open tab IDs:', err);
-    });
-  }, [openTabIds, hasHydratedStore]);
 
   useEffect(() => {
     if (!hasHydratedStore) return;
@@ -283,7 +343,13 @@ export function useConversations(): UseConversationsResult {
       setConversations(prev =>
         prev.map(conversation =>
           conversation.id === id
-            ? loadedConversation
+            ? {
+                ...loadedConversation,
+                title: conversation.title,
+                timestamp: conversation.timestamp,
+                folderId: conversation.folderId,
+                isPinned: conversation.isPinned,
+              }
             : conversation
         )
       );
@@ -305,10 +371,7 @@ export function useConversations(): UseConversationsResult {
       return;
     }
 
-    const pinnedIds = new Set<string>([
-      ...openTabIds,
-      ...(currentConversationId ? [currentConversationId] : []),
-    ]);
+    const pinnedIds = new Set<string>(currentConversationId ? [currentConversationId] : []);
     const loadedConversations = conversations.filter(c => c.isLoaded);
 
     if (loadedConversations.length <= CONVERSATION_CACHE_LIMIT) {
@@ -330,11 +393,11 @@ export function useConversations(): UseConversationsResult {
     setConversations(prev =>
       prev.map(conversation =>
         evictIds.has(conversation.id)
-          ? { ...conversation, messages: [], isLoaded: false }
+          ? { ...conversation, messages: [], branches: undefined, isLoaded: false }
           : conversation
       )
     );
-  }, [conversations, currentConversationId, hasHydratedStore, openTabIds]);
+  }, [conversations, currentConversationId, hasHydratedStore]);
 
   const handleComposeChange = useCallback((value: string) => {
     const draftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
@@ -372,13 +435,6 @@ export function useConversations(): UseConversationsResult {
             conversationSaveTimersRef.current.delete(id);
           }
           setConversations(prevInner => prevInner.filter(c => c.id !== id));
-          setOpenTabIds(prevTabs => {
-            const filtered = prevTabs.filter(tabId => tabId !== id);
-            return nextConversationId && !filtered.includes(nextConversationId)
-              ? [...filtered, nextConversationId]
-              : filtered;
-          });
-
           if (currentConversationId === id) {
             setCurrentConversationId(nextConversationId);
           }
@@ -415,12 +471,8 @@ export function useConversations(): UseConversationsResult {
     const folder = folders.find(f => f.id === id);
     if (!folder) return;
     const convosInFolder = conversations.filter(c => c.folderId === id);
-    const count = convosInFolder.length;
     const deletedIds = new Set(convosInFolder.map(c => c.id));
-    const confirmationMessage = count === 0
-      ? `Delete empty folder "${folder.name}"?`
-      : `Delete folder "${folder.name}"? This will permanently delete ${count} conversation${count !== 1 ? 's' : ''} inside it.`;
-    if (!window.confirm(confirmationMessage)) return;
+    if (!window.confirm(folderDeletionMessage(folder.name, convosInFolder))) return;
 
     const remainingConversations = conversations.filter(c => c.folderId !== id);
     const nextConversationId = currentConversationId && deletedIds.has(currentConversationId)
@@ -440,13 +492,6 @@ export function useConversations(): UseConversationsResult {
         });
         setConversations(prev => prev.filter(c => c.folderId !== id));
         setFolders(prev => prev.filter(f => f.id !== id));
-        setOpenTabIds(prev => {
-          const filtered = prev.filter(tabId => !deletedIds.has(tabId));
-          return nextConversationId && !filtered.includes(nextConversationId)
-            ? [...filtered, nextConversationId]
-            : filtered;
-        });
-
         if (currentConversationId && deletedIds.has(currentConversationId)) {
           setCurrentConversationId(nextConversationId);
         }
@@ -461,6 +506,51 @@ export function useConversations(): UseConversationsResult {
     setConversations(prev => prev.map(c =>
       c.id === conversationId ? { ...c, folderId } : c
     ));
+  }, []);
+
+  const handlePinConversation = useCallback((conversationId: string, isPinned: boolean) => {
+    setConversations(prev => prev.map(conversation =>
+      conversation.id === conversationId
+        ? { ...conversation, isPinned }
+        : conversation
+    ));
+  }, []);
+
+  const handleReorderConversation = useCallback((
+    conversationId: string,
+    targetConversationId: string,
+    placement: 'before' | 'after',
+  ) => {
+    if (conversationId === targetConversationId) {
+      return;
+    }
+
+    setConversations(prev => {
+      const source = prev.find(conversation => conversation.id === conversationId);
+      const target = prev.find(conversation => conversation.id === targetConversationId);
+      if (!source || !target) {
+        return prev;
+      }
+
+      const remaining = prev.filter(conversation => conversation.id !== conversationId);
+      const targetIndex = remaining.findIndex(conversation => conversation.id === targetConversationId);
+      const repositioned = {
+        ...source,
+        folderId: target.isPinned ? source.folderId : target.folderId,
+        isPinned: target.isPinned,
+      };
+      remaining.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, repositioned);
+      return remaining;
+    });
+  }, []);
+
+  const handleRenameConversation = useCallback((id: string, title: string) => {
+    const trimmedTitle = title.trim();
+    if (!trimmedTitle) {
+      return;
+    }
+
+    setConversations(prev => prev.map(c => c.id === id ? { ...c, title: trimmedTitle } : c));
   }, []);
 
   const triggerNewChat = useCallback(() => {
@@ -478,26 +568,58 @@ export function useConversations(): UseConversationsResult {
     }
   }, []);
 
+  const getScrollPosition = useCallback((key: string) => (
+    scrollPositionsRef.current[key]
+  ), []);
+
+  const setScrollPosition = useCallback((key: string, top: number) => {
+    const nextTop = Math.max(0, top);
+    const currentTop = scrollPositionsRef.current[key];
+    if (currentTop === nextTop) {
+      return;
+    }
+
+    const nextPositions = {
+      ...scrollPositionsRef.current,
+      [key]: nextTop,
+    };
+    scrollPositionsRef.current = nextPositions;
+
+    if (!hasHydratedStore) {
+      return;
+    }
+
+    scrollPositionsDirtyRef.current = true;
+    if (scrollSaveTimerRef.current !== null) {
+      window.clearTimeout(scrollSaveTimerRef.current);
+    }
+    scrollSaveTimerRef.current = window.setTimeout(flushScrollPositions, SAVE_DEBOUNCE_MS);
+  }, [flushScrollPositions, hasHydratedStore]);
+
   return {
     conversations,
     folders,
     currentConversationId,
-    openTabIds,
     conversationDrafts,
     unreadCompleteConversationIds,
+    restoredWorkspaceView,
     hasHydratedStore,
     setCurrentConversationId,
-    setOpenTabIds,
     setConversations,
     setFolders,
     setConversationDrafts,
     setUnreadCompleteConversationIds,
+    getScrollPosition,
+    setScrollPosition,
     ensureConversationLoaded,
     handleComposeChange,
     handleCreateFolder,
     handleRenameFolder,
     handleDeleteFolder,
     handleMoveConversation,
+    handlePinConversation,
+    handleReorderConversation,
+    handleRenameConversation,
     handleDeleteConversation,
     newChatTrigger,
     triggerNewChat,
