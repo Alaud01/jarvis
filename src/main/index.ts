@@ -9,7 +9,7 @@ import { getCodexProvider, initializeProviders } from './providers/registry';
 import { deleteLegacyStoredProviderApiKeys, flushConversationStorage } from './store';
 import { flushRenderer } from './ipc/flushRenderer';
 import { QuitCoordinator } from './app/quitCoordinator';
-import { resolveCodexSwitcherAuthPath } from './codexAppServer';
+import { resolveCodexSwitcherAuthPath } from './codexSharedAuth';
 import {
   buildAppMenu,
   broadcastMenuAction,

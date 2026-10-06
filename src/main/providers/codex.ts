@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   CodexAppServerClient,
+  CodexTurnError,
   isMissingThreadError,
   type CodexAccountStatus,
   type CodexAppServerOptions,
@@ -41,8 +42,19 @@ interface PersistentThreadSelection {
 }
 
 export function isCodexUsageLimitError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /usage limit|usage_limit|usageLimitExceeded|rate limit|token limit|quota/i.test(error.message);
+  if (error instanceof CodexTurnError && error.codexErrorInfo !== null) {
+    return error.codexErrorInfo === 'usageLimitExceeded';
+  }
+  return error instanceof Error && /usage limit|usage_limit_reached/i.test(error.message);
+}
+
+function withSwitcherGuidance(error: unknown): Error {
+  const message = error instanceof Error ? error.message : 'Codex usage limit reached.';
+  const guided = new Error(
+    `${message}\n\nSwitch to another account in Codex Switcher and resend; Jarvis uses the newly selected account automatically.`,
+  );
+  (guided as Error & { cause?: unknown }).cause = error;
+  return guided;
 }
 
 export function toCodexModelId(model: string): string {
@@ -313,29 +325,35 @@ export class CodexProvider implements Provider {
   }
 
   /**
-   * Runs an operation against the account currently active in Codex Switcher.
-   * If the account hits its limit and the user (or Switcher) has since moved
-   * to another account, the operation is retried once on the new account.
+   * Runs a request on the account selected in Codex Switcher. When that
+   * account hits its usage limit and Switcher has since moved to another
+   * account, the request is retried once, but only if the failed attempt
+   * produced no visible output and ran no tools, so nothing is duplicated.
    */
   private async runOnActiveAccount<T>(
-    operation: () => Promise<T>,
+    run: (markObserved: () => void) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
+    if (!this.client.followsSharedAuth) return run(() => undefined);
+
+    const attemptedIdentity = await this.client.syncSharedAuth();
+    let observed = false;
     try {
-      return await this.client.withAccountSync(operation);
+      return await run(() => {
+        observed = true;
+      });
     } catch (error) {
-      if (!this.client.followsSharedAuth || !isCodexUsageLimitError(error) || signal?.aborted) {
-        throw error;
+      if (!isCodexUsageLimitError(error) || signal?.aborted) throw error;
+      const currentIdentity = await this.client.readSharedAccountIdentity().catch(() => null);
+      if (observed || !currentIdentity || currentIdentity === attemptedIdentity) {
+        throw withSwitcherGuidance(error);
       }
-      if (await this.client.hasSharedAccountChanged()) {
-        return this.client.withAccountSync(operation);
-      }
-      const limitError = new Error(
-        `${error instanceof Error ? error.message : 'Codex usage limit reached.'}\n\n`
-        + 'Switch to another account in Codex Switcher and resend; Jarvis uses the newly active account automatically.',
-      );
-      (limitError as Error & { cause?: unknown }).cause = error;
-      throw limitError;
+    }
+
+    try {
+      return await run(() => undefined);
+    } catch (error) {
+      throw isCodexUsageLimitError(error) ? withSwitcherGuidance(error) : error;
     }
   }
 
@@ -346,10 +364,23 @@ export class CodexProvider implements Provider {
     onChunk: (chunk: StreamChunk) => void,
     options?: StreamChatTurnOptions,
   ): Promise<StreamTurnResult> {
-    return this.runOnActiveAccount(
-      () => this.streamChatOnActiveAccount(modelId, messages, abortController, onChunk, options),
-      abortController.signal,
-    );
+    const executeTool = options?.executeTool;
+    return this.runOnActiveAccount(markObserved => this.streamChatOnActiveAccount(
+      modelId,
+      messages,
+      abortController,
+      chunk => {
+        markObserved();
+        onChunk(chunk);
+      },
+      options && {
+        ...options,
+        executeTool: executeTool && ((tool, argumentsValue) => {
+          markObserved();
+          return executeTool(tool, argumentsValue);
+        }),
+      },
+    ), abortController.signal);
   }
 
   private async streamChatOnActiveAccount(
@@ -476,6 +507,7 @@ export class CodexProvider implements Provider {
     messages: ChatMessage[],
     options?: SendChatOptions,
   ): Promise<string> {
+    // sendChat streams nothing and runs no tools, so a retry duplicates nothing.
     return this.runOnActiveAccount(() => this.sendChatOnActiveAccount(modelId, messages));
   }
 
