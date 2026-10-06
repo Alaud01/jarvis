@@ -170,13 +170,15 @@ async function startVoiceRecording(): Promise<void> {
   setOverlayAnchorBounds(null);
   showOverlay('starting', undefined, undefined, { requestId: voiceRequestId, startedAt });
   try {
-    let stepStartedAt = performance.now();
-    await capturePreRecordingTarget();
-    timings.targetCaptureMs = performance.now() - stepStartedAt;
-
-    stepStartedAt = performance.now();
-    const result = await startRecording(voiceRequestId);
-    timings.microphoneSetupMs = performance.now() - stepStartedAt;
+    const targetStartedAt = performance.now();
+    const targetCapture = capturePreRecordingTarget().finally(() => {
+      timings.targetCaptureMs = performance.now() - targetStartedAt;
+    });
+    const microphoneStartedAt = performance.now();
+    const microphoneCapture = startRecording(voiceRequestId).finally(() => {
+      timings.microphoneSetupMs = performance.now() - microphoneStartedAt;
+    });
+    const [, result] = await Promise.all([targetCapture, microphoneCapture]);
 
     if (!result.success) {
       preRecordingApp = null;
@@ -217,13 +219,16 @@ async function stopAndProcess(): Promise<void> {
   const timings: Record<string, number> = {};
 
   try {
-    let stepStartedAt = performance.now();
-    await preRecordingCapturePromise;
-    timings.remainingContextWaitMs = Math.round(performance.now() - stepStartedAt);
-
-    stepStartedAt = performance.now();
-    const audioBuffer = await stopRecording();
-    timings.stopRecordingMs = Math.round(performance.now() - stepStartedAt);
+    const contextStartedAt = performance.now();
+    const contextCapture = preRecordingCapturePromise.finally(() => {
+      timings.remainingContextWaitMs = performance.now() - contextStartedAt;
+    });
+    const microphoneStoppedAt = performance.now();
+    const microphoneStop = stopRecording().finally(() => {
+      timings.stopRecordingMs = performance.now() - microphoneStoppedAt;
+    });
+    const [, audioBuffer] = await Promise.all([contextCapture, microphoneStop]);
+    let stepStartedAt: number;
     if (audioBuffer.durationMs < 250 || audioBuffer.peak < 0.001) {
       const errorMessage = `Microphone captured silence (${Math.round(audioBuffer.durationMs)}ms, peak ${audioBuffer.peak.toFixed(4)})`;
       console.warn('[VoiceFlow] Microphone capture rejected as silence:', {

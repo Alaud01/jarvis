@@ -97,12 +97,63 @@ test('recording triggers warmup immediately and does not wait for model loading'
   delete require.cache[modulePath];
   const flow = require(modulePath);
   const starting = flow.startVoiceRecordingFromUI();
-  assert.deepEqual(events, ['warmup', 'overlay:starting']);
+  assert.deepEqual(events, ['warmup', 'overlay:starting', 'recording']);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(events, ['warmup', 'overlay:starting'], 'startup status is requested while target capture is pending');
+  assert.deepEqual(events, ['warmup', 'overlay:starting', 'recording'], 'microphone starts while target capture is pending');
   releaseTarget();
   assert.equal((await starting).success, true);
   assert.deepEqual(events, ['warmup', 'overlay:starting', 'recording', 'overlay:recording']);
+});
+
+test('stopping ends microphone capture while context is still pending, then uses that context', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const events = [];
+  let releaseContext;
+  const context = { destination: 'jarvis', app: null };
+  const contextReady = new Promise(resolve => { releaseContext = resolve; });
+  const originalLoad = Module._load;
+  const noOp = () => {};
+  const mocks = {
+    electron: { ipcMain: {}, BrowserWindow: { getAllWindows: () => [] } },
+    './pythonService': {
+      warmupVoiceModel: async () => {},
+      processVoiceFlow: async (_audio, capturedContext) => {
+        assert.equal(capturedContext, context);
+        events.push('process');
+        return { success: true, text: 'Jarvis hello' };
+      },
+    },
+    './audioRecorder': {
+      startRecording: async () => ({ success: true }),
+      stopRecording: async () => {
+        events.push('stop');
+        return { durationMs: 1000, byteLength: 100, peak: 0.5, rms: 0.1 };
+      },
+    },
+    './hotkeyManager': {},
+    './textInserter': { getFrontmostApp: async () => ({ pid: process.pid, name: 'Jarvis' }) },
+    './overlayWindow': { setOverlayAnchorBounds: noOp, showOverlay: noOp, hideOverlay: noOp },
+    './voiceContext': { captureVoiceContext: () => contextReady },
+  };
+  t.mock.method(Module, '_load', function (request, ...args) {
+    if (mocks[request]) return mocks[request];
+    return originalLoad.call(this, request, ...args);
+  });
+  const modulePath = require.resolve('../dist/main/voiceFlow');
+  delete require.cache[modulePath];
+  const flow = require(modulePath);
+  assert.equal((await flow.startVoiceRecordingFromUI()).success, true);
+  const stopping = flow.stopVoiceRecordingFromUI();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['stop'], 'stop does not wait for context, and upload waits for it');
+  releaseContext(context);
+  for (let step = 0; step < 4; step++) {
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(1000);
+  }
+  assert.equal((await stopping).success, true);
+  assert.deepEqual(events, ['stop', 'process']);
+  assert.equal(flow.getVoiceFlowState(), 'idle');
 });
 
 test('dictation uploads immediately without a health-check round trip and carries its timing ID', async t => {

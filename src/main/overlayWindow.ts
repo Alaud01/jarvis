@@ -15,6 +15,9 @@ type OverlayAnchorBounds = {
 let overlayWindow: BrowserWindow | null = null;
 let hideOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 let overlayReady = false;
+// Whether the pill is on screen (or entering). On macOS the window itself stays
+// shown and transparent; only its contents are revealed and dismissed.
+let overlayContentVisible = false;
 let overlayDesiredVisible = false;
 let overlayPresentationId = 0;
 let overlayAnchorBounds: OverlayAnchorBounds | null = null;
@@ -34,12 +37,13 @@ const OVERLAY_Y_PADDING = 10;
 const OVERLAY_HEIGHT = (OVERLAY_Y_PADDING * 2) + PIXEL_SPINNER_SIZE;
 const OVERLAY_MIN_WIDTH = 300;
 const OVERLAY_SHADOW_MARGIN = 16;
-const OVERLAY_EXIT_MS = 180;
-const OVERLAY_WIDTH_MS = 420;
-const OVERLAY_LABEL_MS = 320;
-const PROCESSING_FILL_MS = 260;
-const COMPLETE_FILL_MS = 300;
-const STATUS_PULSE_MS = 420;
+const OVERLAY_ENTER_MS = 160;
+const OVERLAY_EXIT_MS = 140;
+const OVERLAY_WIDTH_MS = 260;
+const OVERLAY_LABEL_MS = 200;
+const PROCESSING_FILL_MS = 180;
+const COMPLETE_FILL_MS = 200;
+const STATUS_PULSE_MS = 260;
 
 const OVERLAY_EASE = 'cubic-bezier(0.22, 1, 0.36, 1)';
 
@@ -328,8 +332,8 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
       transform-origin: top center;
       transition: width ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE},
-        transform ${OVERLAY_WIDTH_MS}ms ${OVERLAY_EASE},
-        opacity ${OVERLAY_EXIT_MS}ms ease;
+        transform ${OVERLAY_ENTER_MS}ms ${OVERLAY_EASE},
+        opacity ${OVERLAY_ENTER_MS}ms ease;
     }
     .overlay::before, .overlay::after {
       content: '';
@@ -356,6 +360,10 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.92);
       transition-duration: ${OVERLAY_EXIT_MS}ms;
     }
+    /* Resting state of the persistent window: nothing painted, no spinner animations running. */
+    body.idle .overlay {
+      display: none;
+    }
     @media (prefers-reduced-motion: reduce) {
       .overlay, .label, .pixel-spinner .cell { transition: none !important; }
       .overlay, .label, .pixel-spinner { animation: none !important; }
@@ -380,10 +388,10 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       animation-iteration-count: infinite;
       animation-timing-function: linear;
       transition:
-        opacity 260ms ${OVERLAY_EASE},
-        background 320ms ${OVERLAY_EASE},
-        box-shadow 320ms ${OVERLAY_EASE},
-        transform 260ms ${OVERLAY_EASE};
+        opacity 180ms ${OVERLAY_EASE},
+        background 220ms ${OVERLAY_EASE},
+        box-shadow 220ms ${OVERLAY_EASE},
+        transform 180ms ${OVERLAY_EASE};
       will-change: opacity, transform;
     }
 ${PIXEL_STAGE_STYLES}
@@ -391,8 +399,8 @@ ${PIXEL_STAGE_STYLES}
       animation: none;
       transition:
         opacity ${PROCESSING_FILL_MS}ms ${OVERLAY_EASE},
-        background 320ms ${OVERLAY_EASE},
-        box-shadow 320ms ${OVERLAY_EASE},
+        background 220ms ${OVERLAY_EASE},
+        box-shadow 220ms ${OVERLAY_EASE},
         transform ${PROCESSING_FILL_MS}ms ${OVERLAY_EASE};
     }
     .pixel-spinner.stage-processing-fill .cell-0,
@@ -508,7 +516,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
     }
   </style>
 </head>
-<body class="preparing">
+<body class="idle">
   <div class="overlay" role="status" aria-live="polite">
     <div class="pixel-spinner stage-${payload.stage}" id="spinner">
       ${PIXEL_SPINNER_CELLS}
@@ -522,6 +530,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
       var state = ${JSON.stringify(state)};
       var fillTimer = null;
       var statusTimer = null;
+      var idleTimer = null;
       var overlay = document.querySelector('.overlay');
       var spinner = document.getElementById('spinner');
       var labelStack = document.getElementById('label-stack');
@@ -571,8 +580,53 @@ ${PIXEL_SPINNER_KEYFRAMES}
         setLabel(payload.label);
         setStage(payload.stage);
       }
+      // Jump straight to a payload without the status-change animations, used
+      // while the pill is hidden so a reveal never replays the previous state.
+      function resetToPayload(payload) {
+        if (fillTimer) {
+          clearTimeout(fillTimer);
+          fillTimer = null;
+        }
+        if (statusTimer) {
+          clearTimeout(statusTimer);
+          statusTimer = null;
+        }
+        state = payload.state;
+        if (overlay) overlay.classList.remove('is-changing');
+        Array.prototype.slice.call(labelStack.querySelectorAll('.label')).forEach(function(node) {
+          if (node !== label && node.parentNode) node.parentNode.removeChild(node);
+        });
+        if (label) {
+          label.className = 'label';
+          label.textContent = payload.label;
+        }
+        if (spinner) spinner.className = 'pixel-spinner stage-' + payload.stage;
+        setOverlayWidth(payload.width);
+      }
+      window.revealOverlay = function(payload) {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+        document.body.classList.remove('idle', 'exiting');
+        document.body.classList.add('preparing');
+        resetToPayload(payload);
+        // Force a style flush so the off-screen 'preparing' style is the starting
+        // point; removing it in the same task then transitions in without waiting
+        // on a frame callback.
+        void document.body.offsetWidth;
+        document.body.classList.remove('preparing');
+      };
+      window.dismissOverlay = function() {
+        document.body.classList.add('exiting');
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(function() {
+          idleTimer = null;
+          document.body.classList.remove('exiting');
+          document.body.classList.add('idle');
+        }, ${OVERLAY_EXIT_MS});
+      };
       window.updateOverlayState = function(payload) {
-        document.body.classList.remove('exiting');
         if (fillTimer) {
           clearTimeout(fillTimer);
           fillTimer = null;
@@ -605,18 +659,6 @@ ${PIXEL_SPINNER_KEYFRAMES}
         }
 
         applyPayload(payload);
-      };
-      window.prepareOverlayShow = function() {
-        document.body.classList.remove('exiting');
-        document.body.classList.add('preparing');
-        void document.body.offsetWidth;
-      };
-      window.startOverlayShow = function() {
-        requestAnimationFrame(function() {
-          requestAnimationFrame(function() {
-            document.body.classList.remove('preparing');
-          });
-        });
       };
       window.updateOverlayTheme = function(colors) {
         document.body.style.setProperty('--overlay-bg', colors.background);
@@ -676,10 +718,18 @@ function positionOverlay(win: BrowserWindow): void {
   ).catch(() => { /* A replacement renderer receives geometry on reveal. */ });
 }
 
+// On macOS the overlay window is created once and kept shown (transparent and
+// click-through, on every Space); showing the pill is then a single renderer
+// call instead of a new window, renderer process and page load. A shown window
+// also follows Space switches, which hidden macOS windows do not.
+function keepsOverlayWindowShown(): boolean {
+  return process.platform === 'darwin';
+}
+
 async function applyOverlayPayload(
   win: BrowserWindow,
   payload: ReturnType<typeof getOverlayPayload>,
-  prepareForReveal: boolean,
+  entering: boolean,
 ): Promise<void> {
   if (win !== overlayWindow || win.isDestroyed()) {
     return;
@@ -687,13 +737,15 @@ async function applyOverlayPayload(
 
   hideOverlayWindowButtons(win);
   await win.webContents.executeJavaScript(`
-    if (!window.updateOverlayState) {
+    if (!window.updateOverlayState || !window.revealOverlay) {
       throw new Error('Overlay renderer is not ready');
     }
-    window.updateOverlayState(${JSON.stringify(payload)});
-    if (${prepareForReveal} && window.prepareOverlayShow) {
-      window.prepareOverlayShow();
+    if (${entering}) {
+      window.revealOverlay(${JSON.stringify(payload)});
+    } else {
+      window.updateOverlayState(${JSON.stringify(payload)});
     }
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   `);
 }
 
@@ -701,6 +753,7 @@ function destroyOverlayWindow(win: BrowserWindow): void {
   if (win === overlayWindow) {
     overlayWindow = null;
     overlayReady = false;
+    overlayContentVisible = false;
   }
   if (!win.isDestroyed()) {
     win.destroy();
@@ -726,10 +779,10 @@ function recreateOverlayAfterRendererFailure(
 
   destroyOverlayWindow(win);
   pendingOverlayPayload = { payload, state, transcript, errorMessage, presentationId };
-  createOverlayWindow(state, transcript, errorMessage);
+  createOverlayWindow();
 }
 
-async function revealOverlay(
+async function presentOverlay(
   win: BrowserWindow,
   payload: ReturnType<typeof getOverlayPayload>,
   state: OverlayState,
@@ -738,68 +791,34 @@ async function revealOverlay(
   presentationId = overlayPresentationId,
 ): Promise<void> {
   if (
-    win !== overlayWindow ||
-    win.isDestroyed() ||
-    !overlayDesiredVisible ||
-    presentationId !== overlayPresentationId
-  ) {
-    return;
-  }
+    win !== overlayWindow || win.isDestroyed() || !overlayDesiredVisible
+    || presentationId !== overlayPresentationId
+  ) return;
 
-  const shouldShowWindow = !win.isVisible();
+  const entering = !overlayContentVisible || !win.isVisible();
   const timingContext = overlayTimingContext;
   const requestedAt = overlayRequestedAt;
-  try {
-    await applyOverlayPayload(win, payload, shouldShowWindow);
-  } catch {
-    recreateOverlayAfterRendererFailure(
-      win,
-      payload,
-      state,
-      transcript,
-      errorMessage,
-      presentationId,
-    );
-    return;
-  }
-
-  if (
-    win !== overlayWindow ||
-    win.isDestroyed() ||
-    !overlayDesiredVisible ||
-    presentationId !== overlayPresentationId
-  ) {
-    return;
-  }
-
-  if (shouldShowWindow) {
+  overlayContentVisible = true;
+  if (entering) {
+    // The persistent page is idle and paints nothing until its reveal call.
     positionOverlay(win);
-    showOverlayWithoutFocus(win);
+    if (!win.isVisible()) showOverlayWithoutFocus(win);
   }
-  void win.webContents.executeJavaScript(`new Promise(resolve => {
-      if (${shouldShowWindow}) window.startOverlayShow?.();
-      requestAnimationFrame(() => requestAnimationFrame(resolve));
-    })`).then(() => {
-      if (timingContext && win === overlayWindow && !win.isDestroyed()
-        && overlayDesiredVisible && presentationId === overlayPresentationId) {
-        logVoiceTiming(timingContext.requestId, `overlay (${state}; renderer frame acknowledged)`, {
-          requestToRendererFrameMs: performance.now() - requestedAt,
-          phaseStartToRendererFrameMs: performance.now() - timingContext.startedAt,
-        });
-      }
-    }).catch(() => {
-      recreateOverlayAfterRendererFailure(
-        win,
-        payload,
-        state,
-        transcript,
-        errorMessage,
-        presentationId,
-      );
-    });
+  try {
+    await applyOverlayPayload(win, payload, entering);
+    if (timingContext && win === overlayWindow && !win.isDestroyed()
+      && overlayDesiredVisible && presentationId === overlayPresentationId) {
+      logVoiceTiming(timingContext.requestId, `overlay (${state}; renderer frame acknowledged)`, {
+        requestToRendererFrameMs: performance.now() - requestedAt,
+        phaseStartToRendererFrameMs: performance.now() - timingContext.startedAt,
+      });
+    }
+  } catch {
+    recreateOverlayAfterRendererFailure(win, payload, state, transcript, errorMessage, presentationId);
+  }
 }
 
-function recreateHiddenOverlayForCurrentMacSpace(): void {
+function recreateHiddenOverlayForCurrentMacSpace(): boolean {
   if (
     process.platform !== 'darwin' ||
     !overlayWindow ||
@@ -807,26 +826,23 @@ function recreateHiddenOverlayForCurrentMacSpace(): void {
     !overlayReady ||
     overlayWindow.isVisible()
   ) {
-    return;
+    return false;
   }
 
-  // Hidden macOS windows can remain tied to the Space where they were created.
+  // The persistent window should always be shown; if something hid it (e.g. the
+  // app was hidden), it may be tied to the Space it was hidden on.
   const previousOverlayWindow = overlayWindow;
   destroyOverlayWindow(previousOverlayWindow);
+  return true;
 }
 
-function createOverlayWindow(
-  state: OverlayState,
-  transcript?: string,
-  errorMessage?: string,
-  revealOnReady = true,
-): void {
+function createOverlayWindow(): void {
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     return;
   }
 
   overlayReady = false;
-  const payload = getOverlayPayload(state, transcript, errorMessage);
+  overlayContentVisible = false;
   const layout = getOverlayLayout();
 
   const win = new BrowserWindow({
@@ -847,12 +863,16 @@ function createOverlayWindow(
     maximizable: false,
     fullscreenable: false,
     skipTaskbar: true,
+    hiddenInMissionControl: true,
     hasShadow: false,
     focusable: false,
     show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      // Keep the idle page's timers and animations at full speed so a reveal
+      // starts on the very next frame.
+      backgroundThrottling: false,
     },
   });
   overlayWindow = win;
@@ -869,11 +889,12 @@ function createOverlayWindow(
     if (overlayWindow === win) {
       overlayWindow = null;
       overlayReady = false;
+      overlayContentVisible = false;
     }
   });
 
   win.webContents.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML(state, transcript, errorMessage))}`
+    `data:text/html;charset=utf-8,${encodeURIComponent(createOverlayHTML('recording'))}`
   );
 
   win.once('ready-to-show', () => {
@@ -884,6 +905,12 @@ function createOverlayWindow(
     overlayReady = true;
     hideOverlayWindowButtons(win);
 
+    if (keepsOverlayWindowShown()) {
+      // The page starts idle, so the shown window paints nothing.
+      positionOverlay(win);
+      showOverlayWithoutFocus(win);
+    }
+
     const pending = pendingOverlayPayload;
     if (
       pending &&
@@ -891,7 +918,7 @@ function createOverlayWindow(
       pending.presentationId === overlayPresentationId
     ) {
       pendingOverlayPayload = null;
-      void revealOverlay(
+      void presentOverlay(
         win,
         pending.payload,
         pending.state,
@@ -899,26 +926,17 @@ function createOverlayWindow(
         pending.errorMessage,
         pending.presentationId,
       );
-      return;
-    }
-
-    if (revealOnReady && overlayDesiredVisible) {
-      void revealOverlay(win, payload, state, transcript, errorMessage);
     }
   });
 }
 
 export function preloadOverlay(): void {
-  if (process.platform === 'darwin') {
-    return;
-  }
-
-  createOverlayWindow('recording', undefined, undefined, false);
+  createOverlayWindow();
 }
 
 export function setOverlayAnchorBounds(bounds: OverlayAnchorBounds | null): void {
   overlayAnchorBounds = bounds;
-  if (!overlayWindow || overlayWindow.isDestroyed() || !overlayWindow.isVisible()) {
+  if (!overlayWindow || overlayWindow.isDestroyed() || !overlayContentVisible) {
     return;
   }
 
@@ -953,7 +971,7 @@ export function setOverlayThemeBackground(_isDark: boolean): void {
       document.body.style.setProperty('--overlay-text', ${JSON.stringify(colors.text)});
     }
   `).catch(() => {
-    // The overlay may be between data URL loads; the next show call will pick up the theme.
+    // The overlay may still be loading; its HTML already embeds the theme colors.
   });
 }
 
@@ -974,7 +992,7 @@ export function showOverlay(
 
   if (!overlayWindow || overlayWindow.isDestroyed()) {
     pendingOverlayPayload = { payload, state, transcript, errorMessage, presentationId };
-    createOverlayWindow(state, transcript, errorMessage);
+    createOverlayWindow();
     return;
   }
 
@@ -984,7 +1002,7 @@ export function showOverlay(
   }
 
   pendingOverlayPayload = null;
-  void revealOverlay(overlayWindow, payload, state, transcript, errorMessage, presentationId);
+  void presentOverlay(overlayWindow, payload, state, transcript, errorMessage, presentationId);
 }
 
 export function hideOverlay(): void {
@@ -1000,16 +1018,28 @@ export function hideOverlay(): void {
   if (!win || win.isDestroyed()) {
     return;
   }
-  if (!overlayReady || !win.isVisible()) {
-    win.hide();
+  const keepShown = keepsOverlayWindowShown();
+  if (!overlayReady || !overlayContentVisible) {
+    if (!keepShown) win.hide();
     return;
   }
 
-  void win.webContents.executeJavaScript("document.body.classList.add('exiting');").catch(() => {
-    if (win === overlayWindow && presentationId === overlayPresentationId && !win.isDestroyed()) {
+  overlayContentVisible = false;
+  void win.webContents.executeJavaScript('window.dismissOverlay();').catch(() => {
+    if (win !== overlayWindow || presentationId !== overlayPresentationId || win.isDestroyed()) {
+      return;
+    }
+    if (keepShown) {
+      // The renderer is broken; replace it so the next show starts from a working page.
+      destroyOverlayWindow(win);
+      createOverlayWindow();
+    } else {
       win.hide();
     }
   });
+  if (keepShown) {
+    return;
+  }
   hideOverlayTimer = setTimeout(() => {
     if (win === overlayWindow && presentationId === overlayPresentationId && !win.isDestroyed()) {
       win.hide();
@@ -1030,5 +1060,6 @@ export function destroyOverlay(): void {
   }
   overlayWindow = null;
   overlayReady = false;
+  overlayContentVisible = false;
   pendingOverlayPayload = null;
 }

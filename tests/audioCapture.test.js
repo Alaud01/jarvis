@@ -72,6 +72,7 @@ test('reports an unavailable macOS capture device as no mic detected', async t =
 test('checks the lid even when getUserMedia would return a live stream', async t => {
   const originalLoad = Module._load;
   let lidClosed = true;
+  let enumerateCalls = 0;
   Module._load = function(request, parent, isMain) {
     if (request === './macLidState') return { isMacLidClosed: async () => lidClosed };
     if (request === 'electron') return {
@@ -88,28 +89,30 @@ test('checks the lid even when getUserMedia would return a live stream', async t
     Module._load = originalLoad;
   });
 
-  async function attempt(defaultLabel, trackLabel) {
+  async function attempt(defaultLabel, trackLabel, repeat = false) {
+    let blobUrls = 0;
+    const loadedModules = [];
     let opened = false;
     let stopped = false;
     const track = { label: trackLabel, readyState: 'live', stop() { stopped = true; } };
     class AudioContext {
       state = 'running';
-      audioWorklet = { addModule: async () => {} };
+      audioWorklet = { addModule: async url => loadedModules.push(url) };
       createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
       close() {}
     }
     const context = vm.createContext({
       navigator: { mediaDevices: {
-        enumerateDevices: async () => [{ kind: 'audioinput', deviceId: 'default', label: defaultLabel }],
+        enumerateDevices: async () => (enumerateCalls++, [{ kind: 'audioinput', deviceId: 'default', label: defaultLabel }]),
         getUserMedia: async () => {
           opened = true;
           return { getAudioTracks: () => [track], getTracks: () => [track] };
         },
       } },
       window: { AudioContext },
-      AudioWorkletNode: class { port = {}; connect() {} },
-      URL: { createObjectURL: () => 'blob:test' },
-      Blob,
+      AudioWorkletNode: class { port = {}; connect() {} disconnect() {} },
+      URL: { createObjectURL: () => `blob:test-${++blobUrls}` },
+      Blob, performance,
     });
     recorder.setMainWindow({
       isDestroyed: () => false,
@@ -117,6 +120,13 @@ test('checks the lid even when getUserMedia would return a live stream', async t
     });
     const result = await recorder.startRecording();
     await recorder.cleanupAudioCapture();
+    if (repeat) {
+      assert.equal(result.success, true);
+      assert.equal((await recorder.startRecording()).success, true);
+      await recorder.cleanupAudioCapture();
+      assert.equal(blobUrls, 1, 'repeat recordings reuse the module URL');
+      assert.deepEqual(loadedModules, ['blob:test-1', 'blob:test-1'], 'each new context loads the cached module');
+    }
     return { result, opened, stopped };
   }
 
@@ -128,5 +138,8 @@ test('checks the lid even when getUserMedia would return a live stream', async t
   });
   assert.equal((await attempt('Default - USB Microphone', 'USB Microphone')).result.success, true);
   lidClosed = false;
+  enumerateCalls = 0;
   assert.equal((await attempt('Default - MacBook Pro Microphone', 'MacBook Pro Microphone')).result.success, true);
+  assert.equal(enumerateCalls, 0, 'an open lid must not wait for device enumeration');
+  await attempt('Default - USB Microphone', 'USB Microphone', true);
 });

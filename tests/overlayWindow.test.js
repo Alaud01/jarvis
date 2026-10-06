@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const Module = require('node:module');
+const vm = require('node:vm');
 
 const waitForAsyncWork = () => new Promise(resolve => setImmediate(resolve));
 
@@ -29,6 +30,10 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
 
     executeJavaScript(script) {
       this.scripts.push(script);
+      if (this.failPresentation && script.includes('window.revealOverlay(')) {
+        this.failPresentation = false;
+        return Promise.reject(new Error('renderer lost'));
+      }
       return Promise.resolve();
     }
   }
@@ -109,18 +114,67 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   const firstWindow = FakeBrowserWindow.instances[0];
   assert.equal(firstWindow.options.backgroundColor, '#00000000');
   assert.equal(firstWindow.options.focusable, false);
+  assert.equal(firstWindow.options.hiddenInMissionControl, true);
+  assert.equal(firstWindow.options.webPreferences.backgroundThrottling, false);
   assert.equal(firstWindow.bounds.y, -200, 'attach to the display edge, not its work area');
   assert.equal(firstWindow.bounds.x + firstWindow.bounds.width / 2, 2196);
 
   const html = decodeURIComponent(firstWindow.webContents.url.split(',')[1]);
-  assert.match(html, /Starting microphone\.\.\./);
-  assert.match(html, /<body class="preparing">/);
+  assert.match(html, /<body class="idle">/);
+  assert.match(html, /body\.idle \.overlay \{\s*display: none;/);
   assert.match(html, /body\.exiting/);
   assert.match(html, /@keyframes label-enter/);
   assert.match(html, /@keyframes label-leave/);
   assert.match(html, /@keyframes spinner-stage-change/);
   assert.match(html, /previousState !== payload\.state/,
     'every actual status change must restart the coordinated transition');
+
+  // Execute the actual renderer lifecycle, including a canceled dismissal.
+  const timers = new Map();
+  let timerId = 0;
+  const node = (className = '') => {
+    const value = { className, textContent: '', style: { setProperty() {} } };
+    value.classList = {
+      add: (...names) => { value.className = [...new Set([...value.className.split(' '), ...names])].join(' ').trim(); },
+      remove: (...names) => { value.className = value.className.split(' ').filter(name => !names.includes(name)).join(' '); },
+      contains: name => value.className.split(' ').includes(name),
+    };
+    return value;
+  };
+  const body = node('idle');
+  const pill = node('overlay');
+  const spinner = node('pixel-spinner');
+  const initialLabel = node('label');
+  const labels = [initialLabel];
+  const stack = {
+    querySelectorAll: () => [...labels],
+    appendChild: item => { labels.push(item); item.parentNode = stack; },
+    removeChild: item => { labels.splice(labels.indexOf(item), 1); item.parentNode = null; },
+  };
+  initialLabel.parentNode = stack;
+  const renderer = vm.createContext({
+    window: {},
+    document: {
+      body, querySelector: () => pill, createElement: () => node(),
+      getElementById: id => ({ spinner, 'label-stack': stack, label: initialLabel })[id],
+    },
+    setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
+    clearTimeout: id => timers.delete(id),
+  });
+  vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], renderer);
+  renderer.window.revealOverlay({ state: 'starting', label: 'Starting microphone...', stage: 'processing', width: 300 });
+  assert.equal(body.classList.contains('idle'), false);
+  assert.equal(initialLabel.textContent, 'Starting microphone...');
+  renderer.window.dismissOverlay();
+  renderer.window.revealOverlay({ state: 'recording', label: 'Listening...', stage: 'recording', width: 300 });
+  for (const callback of timers.values()) callback();
+  timers.clear();
+  assert.equal(body.classList.contains('idle'), false, 'an old dismissal cannot hide a new recording');
+  assert.equal(body.classList.contains('exiting'), false);
+  assert.equal(initialLabel.textContent, 'Listening...');
+  renderer.window.dismissOverlay();
+  for (const callback of timers.values()) callback();
+  assert.equal(body.classList.contains('idle'), true, 'dismissed content stops painting');
 
   firstWindow.emit('ready-to-show');
   await waitForAsyncWork();
@@ -129,9 +183,11 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   assert.equal(timingLogs.length, 1, 'only the current presentation should acknowledge a renderer frame');
   assert.match(timingLogs[0], /^\[VoiceTiming overlay-test\] overlay \(processing; renderer frame acknowledged\)/);
   assert.match(timingLogs[0], /phaseStartToRendererFrameMs=\d+ms/);
-  assert.match(firstWindow.webContents.scripts.join('\n'), /prepareOverlayShow/);
-  assert.match(firstWindow.webContents.scripts.join('\n'), /startOverlayShow/);
+  assert.match(firstWindow.webContents.scripts.join('\n'), /window\.revealOverlay\(\{"state":"processing"/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /--top-reserve', '40px'/);
+  overlay.showOverlay('starting');
+  await waitForAsyncWork();
+  assert.match(firstWindow.webContents.scripts.at(-1), /Starting microphone\.\.\./);
   const initialBounds = { ...firstWindow.bounds };
 
   overlay.hideOverlay();
@@ -162,10 +218,21 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
 
   overlay.hideOverlay();
   await new Promise(resolve => setTimeout(resolve, 220));
-  assert.equal(firstWindow.visible, false);
+  assert.equal(firstWindow.visible, true, 'idle macOS overlay remains shown and transparent');
+  assert.match(firstWindow.webContents.scripts.at(-1), /window\.dismissOverlay\(\)/);
 
+  const scriptsBeforeReshow = firstWindow.webContents.scripts.length;
   overlay.showOverlay('recording');
-  assert.equal(firstWindow.destroyed, true, 'a hidden macOS window should be force-destroyed');
+  await waitForAsyncWork();
+  assert.equal(FakeBrowserWindow.instances.length, 1, 'reuse the renderer on later recordings');
+  assert.equal(firstWindow.destroyed, false);
+  assert.match(firstWindow.webContents.scripts.slice(scriptsBeforeReshow).join('\n'),
+    /window\.revealOverlay\(\{"state":"recording"/);
+
+  firstWindow.hide();
+  overlay.hideOverlay();
+  overlay.showOverlay('recording');
+  assert.equal(firstWindow.destroyed, true, 'replace a macOS window that was externally hidden');
   assert.equal(FakeBrowserWindow.instances.length, 2);
 
   const secondWindow = FakeBrowserWindow.instances[1];
@@ -181,4 +248,14 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   await waitForAsyncWork();
   await waitForAsyncWork();
   assert.equal(thirdWindow.visible, true);
+
+  thirdWindow.webContents.failPresentation = true;
+  overlay.showOverlay('processing');
+  await waitForAsyncWork();
+  assert.equal(thirdWindow.destroyed, true, 'replace a broken overlay renderer');
+  const replacement = FakeBrowserWindow.instances[3];
+  replacement.emit('ready-to-show');
+  await waitForAsyncWork();
+  assert.equal(replacement.visible, true);
+  assert.match(replacement.webContents.scripts.join('\n'), /window\.revealOverlay\(\{"state":"processing"/);
 });

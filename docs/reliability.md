@@ -118,6 +118,20 @@ Replacement Rules, and correction observations are suspended, with saved entries
 for future reactivation as described in ADR 0009. Native model inference remains
 noninterruptible.
 
+Electron starts microphone setup and target-app detection concurrently. Stopping a
+dictation stops audio capture while the remaining context lookup finishes; upload
+waits for both results. Open-lid capture relies on `getUserMedia` for missing-device
+errors, while closed-lid capture checks the default microphone before opening it.
+The audio-worklet module URL is cached per renderer and loaded into each new audio
+context. Existing request IDs tie finer microphone timings to service and delivery
+measurements.
+
+On macOS, the click-through overlay is preloaded and kept shown with fully transparent
+idle content. Dismissal stops painting and spinner animation; the next recording
+reveals the same renderer. A window hidden externally or a failed renderer is replaced.
+The overlay stays off Mission Control and shows Starting microphone before capture is
+ready. Faster transitions retain the existing styles and reduced-motion behavior.
+
 ## Tool turns
 
 A native provider turn permits twelve model rounds and thirty-two total attempted tool
