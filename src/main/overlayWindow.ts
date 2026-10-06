@@ -37,24 +37,19 @@ const OVERLAY_Y_PADDING = 10;
 const OVERLAY_HEIGHT = (OVERLAY_Y_PADDING * 2) + PIXEL_SPINNER_SIZE;
 const OVERLAY_MIN_WIDTH = 300;
 const OVERLAY_SHADOW_MARGIN = 16;
-const OVERLAY_ENTER_MS = 160;
-const OVERLAY_EXIT_MS = 140;
+const OVERLAY_ENTER_MS = 300;
+const OVERLAY_EXIT_MS = 220;
 const OVERLAY_WIDTH_MS = 260;
 const OVERLAY_LABEL_MS = 200;
 const PROCESSING_FILL_MS = 180;
 const COMPLETE_FILL_MS = 200;
-const STATUS_PULSE_MS = 260;
 
 const OVERLAY_EASE = 'cubic-bezier(0.22, 1, 0.36, 1)';
 
-type OverlayState = 'starting' | 'recording' | 'processing' | 'complete' | 'error';
+type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
 type OverlayVisualStage = OverlayState | 'processing-fill' | 'complete-fill';
 
 const STATE_CONFIG: Record<OverlayState, { label: string; stage: OverlayVisualStage }> = {
-  starting: {
-    label: 'Starting microphone...',
-    stage: 'processing',
-  },
   recording: {
     label: 'Listening...',
     stage: 'recording',
@@ -352,12 +347,12 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
     }
     body.preparing .overlay {
       opacity: 0;
-      transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.92);
+      transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.96);
       transition: none;
     }
     body.exiting .overlay {
       opacity: 0;
-      transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.92);
+      transform: translateY(-${OVERLAY_HEIGHT}px) scaleX(0.96);
       transition-duration: ${OVERLAY_EXIT_MS}ms;
     }
     /* Resting state of the persistent window: nothing painted, no spinner animations running. */
@@ -376,9 +371,6 @@ function createOverlayHTML(state: OverlayState, transcript?: string, errorMessag
       gap: 0;
       flex-shrink: 0;
       transform-origin: center;
-    }
-    .pixel-spinner.is-changing {
-      animation: spinner-stage-change ${STATUS_PULSE_MS}ms ${OVERLAY_EASE} both;
     }
     .pixel-spinner .cell {
       width: 5px;
@@ -435,56 +427,13 @@ ${PIXEL_CELL_ANIMATION_RULES}
         transform: scale(1);
       }
     }
-    @keyframes spinner-stage-change {
-      0% {
-        transform: scale(0.76) rotate(-8deg);
-        filter: saturate(0.75);
-      }
-      58% {
-        transform: scale(1.1) rotate(2deg);
-        filter: saturate(1.2);
-      }
-      100% {
-        transform: scale(1) rotate(0);
-        filter: saturate(1);
-      }
-    }
-    @keyframes overlay-status-change {
-      0% { transform: scaleX(0.985); }
-      62% { transform: scaleX(1.012); }
-      100% { transform: scaleX(1); }
-    }
     @keyframes label-enter {
-      0% {
-        opacity: 0;
-        transform: translateY(8px) scale(0.97);
-        filter: blur(4px);
-      }
-      68% {
-        opacity: 1;
-        transform: translateY(-1px) scale(1.005);
-        filter: blur(0);
-      }
-      100% {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-        filter: blur(0);
-      }
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
     }
     @keyframes label-leave {
-      from {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-        filter: blur(0);
-      }
-      to {
-        opacity: 0;
-        transform: translateY(-8px) scale(0.97);
-        filter: blur(4px);
-      }
-    }
-    .overlay.is-changing {
-      animation: overlay-status-change ${STATUS_PULSE_MS}ms ${OVERLAY_EASE} both;
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(-4px); }
     }
 ${PIXEL_SPINNER_KEYFRAMES}
     .label {
@@ -499,7 +448,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
       overflow: hidden;
       text-overflow: ellipsis;
       max-width: ${OVERLAY_MAX_WIDTH - (OVERLAY_X_PADDING * 2) - PIXEL_SPINNER_SIZE - OVERLAY_CONTENT_GAP}px;
-      will-change: opacity, transform, filter;
+      will-change: opacity, transform;
     }
     .label-stack {
       display: grid;
@@ -529,9 +478,8 @@ ${PIXEL_SPINNER_KEYFRAMES}
     (function() {
       var state = ${JSON.stringify(state)};
       var fillTimer = null;
-      var statusTimer = null;
+      var revealFrame = null;
       var idleTimer = null;
-      var overlay = document.querySelector('.overlay');
       var spinner = document.getElementById('spinner');
       var labelStack = document.getElementById('label-stack');
       var label = document.getElementById('label');
@@ -554,22 +502,8 @@ ${PIXEL_SPINNER_KEYFRAMES}
         }, ${OVERLAY_LABEL_MS});
       }
       function setStage(stage) {
-        if (!spinner) return;
+        if (!spinner || spinner.classList.contains('stage-' + stage)) return;
         spinner.className = 'pixel-spinner stage-' + stage;
-        void spinner.offsetWidth;
-        spinner.classList.add('is-changing');
-      }
-      function animateStatusChange() {
-        if (!overlay) return;
-        if (statusTimer) clearTimeout(statusTimer);
-        overlay.classList.remove('is-changing');
-        void overlay.offsetWidth;
-        overlay.classList.add('is-changing');
-        statusTimer = setTimeout(function() {
-          overlay.classList.remove('is-changing');
-          if (spinner) spinner.classList.remove('is-changing');
-          statusTimer = null;
-        }, ${STATUS_PULSE_MS});
       }
       function setOverlayWidth(width) {
         document.body.style.setProperty('--surface-width', width + 'px');
@@ -587,12 +521,7 @@ ${PIXEL_SPINNER_KEYFRAMES}
           clearTimeout(fillTimer);
           fillTimer = null;
         }
-        if (statusTimer) {
-          clearTimeout(statusTimer);
-          statusTimer = null;
-        }
         state = payload.state;
-        if (overlay) overlay.classList.remove('is-changing');
         Array.prototype.slice.call(labelStack.querySelectorAll('.label')).forEach(function(node) {
           if (node !== label && node.parentNode) node.parentNode.removeChild(node);
         });
@@ -608,17 +537,35 @@ ${PIXEL_SPINNER_KEYFRAMES}
           clearTimeout(idleTimer);
           idleTimer = null;
         }
+        if (revealFrame !== null) {
+          cancelAnimationFrame(revealFrame);
+          revealFrame = null;
+        }
+        var wasIdle = document.body.classList.contains('idle');
+        if (wasIdle) {
+          document.body.classList.add('preparing');
+          resetToPayload(payload);
+        } else {
+          window.updateOverlayState(payload);
+        }
         document.body.classList.remove('idle', 'exiting');
-        document.body.classList.add('preparing');
-        resetToPayload(payload);
-        // Force a style flush so the off-screen 'preparing' style is the starting
-        // point; removing it in the same task then transitions in without waiting
-        // on a frame callback.
-        void document.body.offsetWidth;
-        document.body.classList.remove('preparing');
+        // An interrupted dismissal reverses from its current position. Only a
+        // fully idle surface starts offscreen; status changes never transform it.
+        if (wasIdle || document.body.classList.contains('preparing')) {
+          void document.body.offsetWidth;
+          revealFrame = requestAnimationFrame(function() {
+            revealFrame = null;
+            document.body.classList.remove('preparing');
+          });
+        }
       };
       window.dismissOverlay = function() {
+        if (revealFrame !== null) {
+          cancelAnimationFrame(revealFrame);
+          revealFrame = null;
+        }
         document.body.classList.add('exiting');
+        document.body.classList.remove('preparing');
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(function() {
           idleTimer = null;
@@ -634,7 +581,6 @@ ${PIXEL_SPINNER_KEYFRAMES}
 
         var previousState = state;
         state = payload.state;
-        if (previousState !== payload.state) animateStatusChange();
 
         if (previousState === 'recording' && payload.state === 'processing') {
           setOverlayWidth(payload.width);

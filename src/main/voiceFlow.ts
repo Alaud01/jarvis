@@ -168,7 +168,6 @@ async function startVoiceRecording(): Promise<void> {
   // Start loading as soon as the shortcut/UI is hit, in parallel with capture.
   void warmupVoiceModel();
   setOverlayAnchorBounds(null);
-  showOverlay('starting', undefined, undefined, { requestId: voiceRequestId, startedAt });
   try {
     const targetStartedAt = performance.now();
     const targetCapture = capturePreRecordingTarget().finally(() => {

@@ -107,7 +107,7 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   });
 
   const timingContext = { requestId: 'overlay-test', startedAt: performance.now() };
-  overlay.showOverlay('starting', undefined, undefined, timingContext);
+  overlay.showOverlay('recording', undefined, undefined, timingContext);
   overlay.showOverlay('processing', undefined, undefined, timingContext);
 
   assert.equal(FakeBrowserWindow.instances.length, 1, 'a loading window must not be recreated');
@@ -125,12 +125,12 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   assert.match(html, /body\.exiting/);
   assert.match(html, /@keyframes label-enter/);
   assert.match(html, /@keyframes label-leave/);
-  assert.match(html, /@keyframes spinner-stage-change/);
-  assert.match(html, /previousState !== payload\.state/,
-    'every actual status change must restart the coordinated transition');
+  assert.doesNotMatch(html, /overlay-status-change|spinner-stage-change|Starting microphone/,
+    'status updates must not compete with the surface entrance or pulse on startup');
 
   // Execute the actual renderer lifecycle, including a canceled dismissal.
   const timers = new Map();
+  const frames = new Map();
   let timerId = 0;
   const node = (className = '') => {
     const value = { className, textContent: '', style: { setProperty() {} } };
@@ -160,21 +160,56 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
     },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: id => timers.delete(id),
+    requestAnimationFrame: callback => { frames.set(++timerId, callback); return timerId; },
+    cancelAnimationFrame: id => frames.delete(id),
   });
   vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], renderer);
-  renderer.window.revealOverlay({ state: 'starting', label: 'Starting microphone...', stage: 'processing', width: 300 });
+  const recording = { state: 'recording', label: 'Listening...', stage: 'recording', width: 300 };
+  const flushFrames = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback();
+  };
+  const flushTimers = () => {
+    const pending = [...timers.values()];
+    timers.clear();
+    for (const callback of pending) callback();
+  };
+  renderer.window.revealOverlay(recording);
   assert.equal(body.classList.contains('idle'), false);
-  assert.equal(initialLabel.textContent, 'Starting microphone...');
+  assert.equal(body.classList.contains('preparing'), true, 'stage the initial reveal before its frame');
+  assert.equal(initialLabel.textContent, 'Listening...');
+  renderer.window.updateOverlayState({ state: 'processing', label: 'Processing...', stage: 'processing', width: 300 });
+  assert.equal(pill.classList.contains('is-changing'), false, 'an early status update cannot override entrance motion');
+  assert.equal(frames.size, 1, 'status changes leave the scheduled entrance intact');
+  flushFrames();
+  assert.equal(body.classList.contains('preparing'), false);
+  flushTimers();
+  const spinnerClass = spinner.className;
+  renderer.window.updateOverlayState({ state: 'processing', label: 'Processing...', stage: 'processing', width: 300 });
+  assert.equal(spinner.className, spinnerClass, 'unchanged stages keep their animation running');
+
   renderer.window.dismissOverlay();
-  renderer.window.revealOverlay({ state: 'recording', label: 'Listening...', stage: 'recording', width: 300 });
-  for (const callback of timers.values()) callback();
-  timers.clear();
+  renderer.window.revealOverlay(recording);
+  assert.equal(body.classList.contains('preparing'), false, 'reverse an exit without restarting the entrance');
+  assert.equal(frames.size, 0);
+  flushTimers();
   assert.equal(body.classList.contains('idle'), false, 'an old dismissal cannot hide a new recording');
   assert.equal(body.classList.contains('exiting'), false);
-  assert.equal(initialLabel.textContent, 'Listening...');
+  assert.equal(labels.at(-1).textContent, 'Listening...');
   renderer.window.dismissOverlay();
-  for (const callback of timers.values()) callback();
+  flushTimers();
   assert.equal(body.classList.contains('idle'), true, 'dismissed content stops painting');
+
+  renderer.window.revealOverlay(recording);
+  assert.equal(frames.size, 1);
+  renderer.window.dismissOverlay();
+  assert.equal(frames.size, 0, 'a dismissal cancels an entrance that has not painted yet');
+  flushFrames();
+  assert.equal(body.classList.contains('exiting'), true);
+  assert.equal(body.classList.contains('preparing'), false);
+  flushTimers();
+  assert.equal(body.classList.contains('idle'), true);
 
   firstWindow.emit('ready-to-show');
   await waitForAsyncWork();
@@ -185,14 +220,14 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   assert.match(timingLogs[0], /phaseStartToRendererFrameMs=\d+ms/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /window\.revealOverlay\(\{"state":"processing"/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /--top-reserve', '40px'/);
-  overlay.showOverlay('starting');
+  overlay.showOverlay('recording');
   await waitForAsyncWork();
-  assert.match(firstWindow.webContents.scripts.at(-1), /Starting microphone\.\.\./);
+  assert.match(firstWindow.webContents.scripts.at(-1), /Listening\.\.\./);
   const initialBounds = { ...firstWindow.bounds };
 
   overlay.hideOverlay();
   overlay.showOverlay('complete', 'Hello');
-  await new Promise(resolve => setTimeout(resolve, 220));
+  await new Promise(resolve => setTimeout(resolve, 280));
   assert.equal(firstWindow.visible, true, 'an old hide timer must not hide a newer presentation');
   assert.deepEqual(firstWindow.bounds, initialBounds, 'status changes morph within fixed window bounds');
 
@@ -217,7 +252,7 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
     'external displays omit the built-in display cutout clearance');
 
   overlay.hideOverlay();
-  await new Promise(resolve => setTimeout(resolve, 220));
+  await new Promise(resolve => setTimeout(resolve, 280));
   assert.equal(firstWindow.visible, true, 'idle macOS overlay remains shown and transparent');
   assert.match(firstWindow.webContents.scripts.at(-1), /window\.dismissOverlay\(\)/);
 

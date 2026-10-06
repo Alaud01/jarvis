@@ -72,8 +72,10 @@ test('warmup requests are sent directly to the voice service', async t => {
   assert.equal(calls[0].options.method, 'POST');
 });
 
-test('recording triggers warmup immediately and does not wait for model loading', async t => {
+test('recording warms the model in parallel and reveals the overlay only when capture is ready', async t => {
   const events = [];
+  let releaseMicrophone;
+  const microphoneReady = new Promise(resolve => { releaseMicrophone = resolve; });
   let releaseTarget;
   const targetReady = new Promise(resolve => { releaseTarget = resolve; });
   const originalLoad = Module._load;
@@ -83,7 +85,7 @@ test('recording triggers warmup immediately and does not wait for model loading'
     './pythonService': {
       warmupVoiceModel: () => { events.push('warmup'); return new Promise(() => {}); },
     },
-    './audioRecorder': { startRecording: async () => { events.push('recording'); return { success: true }; } },
+    './audioRecorder': { startRecording: async () => { events.push('recording'); await microphoneReady; return { success: true }; } },
     './hotkeyManager': {},
     './textInserter': { getFrontmostApp: async () => { await targetReady; return { pid: 1, name: 'Mail', bundleId: 'com.apple.mail' }; } },
     './overlayWindow': { setOverlayAnchorBounds: noOp, showOverlay: state => events.push(`overlay:${state}`) },
@@ -97,12 +99,15 @@ test('recording triggers warmup immediately and does not wait for model loading'
   delete require.cache[modulePath];
   const flow = require(modulePath);
   const starting = flow.startVoiceRecordingFromUI();
-  assert.deepEqual(events, ['warmup', 'overlay:starting', 'recording']);
+  assert.deepEqual(events, ['warmup', 'recording']);
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(events, ['warmup', 'overlay:starting', 'recording'], 'microphone starts while target capture is pending');
+  assert.deepEqual(events, ['warmup', 'recording'], 'microphone starts while target capture is pending');
   releaseTarget();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ['warmup', 'recording'], 'Listening must wait for microphone readiness too');
+  releaseMicrophone();
   assert.equal((await starting).success, true);
-  assert.deepEqual(events, ['warmup', 'overlay:starting', 'recording', 'overlay:recording']);
+  assert.deepEqual(events, ['warmup', 'recording', 'overlay:recording']);
 });
 
 test('stopping ends microphone capture while context is still pending, then uses that context', async t => {

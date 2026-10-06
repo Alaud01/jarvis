@@ -129,8 +129,10 @@ measurements.
 On macOS, the click-through overlay is preloaded and kept shown with fully transparent
 idle content. Dismissal stops painting and spinner animation; the next recording
 reveals the same renderer. A window hidden externally or a failed renderer is replaced.
-The overlay stays off Mission Control and shows Starting microphone before capture is
-ready. Faster transitions retain the existing styles and reduced-motion behavior.
+The overlay stays off Mission Control and reveals Listening only after microphone setup
+and target detection finish. Its surface has a single entrance/exit transition, with
+status changes confined to the label and pixels. Interrupted dismissals reverse from
+the current position. The existing notch styling and reduced-motion behavior remain.
 
 ## Tool turns
 
