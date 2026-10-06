@@ -529,7 +529,8 @@ test('reports a missing or expired Codex Switcher login instead of signing in', 
 test('answers app-server token refreshes from the Codex Switcher file', async () => {
   await withSharedAuthFixture('jarvis-shared-refresh-', async ({ options, writeSharedAuth }) => {
     const client = new CodexAppServerClient(options);
-    const runRefreshingTurn = async () => {
+    // The thread's connection is opened with the soon-rejected token.
+    const startExpiringThread = async () => {
       await writeSharedAuth('expiring');
       await client.syncSharedAuth();
       const threadId = await client.startThread({
@@ -547,18 +548,66 @@ test('answers app-server token refreshes from the Codex Switcher file', async ()
       });
     };
     try {
-      // Nobody refreshed the file, so Jarvis cannot supply a newer token.
-      const unrefreshedTurn = await runRefreshingTurn();
-      await assert.rejects(unrefreshedTurn(), /has expired/);
+      // Nobody refreshed the file, so the backend rejects the same token again.
+      const unrefreshedTurn = await startExpiringThread();
+      await assert.rejects(unrefreshedTurn(), /could not be refreshed/);
 
-      const refreshedTurn = await runRefreshingTurn();
+      // Another request already supplied the refreshed token before this
+      // thread's old token was rejected; the refresh must still recover it.
+      const refreshedTurn = await startExpiringThread();
       await writeSharedAuth('refreshed');
-      assert.equal(await refreshedTurn(), 'Tool completed.');
       assert.equal((await client.getAccountStatus()).email, 'refreshed@example.com');
+      assert.equal(await refreshedTurn(), 'Tool completed by refreshed.');
     } finally {
       await client.stop();
     }
   });
+});
+
+test('moves an ongoing conversation to the newly selected account', async () => {
+  await withSharedAuthFixture('jarvis-shared-conversation-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const executions = { count: 0 };
+    const send = conversation => provider.streamChat(
+      'codex:gpt-test',
+      conversation,
+      new AbortController(),
+      () => undefined,
+      streamOptions(executions),
+    );
+    try {
+      await writeSharedAuth('alice');
+      const first = await send([{ role: 'user', content: 'First question' }]);
+      assert.equal(first.assistantMessage.content, 'Tool completed by alice.');
+
+      // Codex would keep reusing Alice's connection for the existing thread.
+      await writeSharedAuth('bob');
+      const followUp = await send([
+        { role: 'user', content: 'First question' },
+        first.assistantMessage,
+        { role: 'user', content: 'Follow-up' },
+      ]);
+      assert.equal(followUp.assistantMessage.content, 'Tool completed by bob.');
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('answers tool-free requests without invoking Jarvis tools', async () => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-plain-'));
+  const provider = new CodexProvider({
+    binaryPath: FAKE_CODEX_SERVER,
+    codexHome: path.join(temporaryRoot, 'codex-home'),
+    workspaceRoot: path.join(temporaryRoot, 'workspace'),
+    openExternal: async () => undefined,
+  });
+  try {
+    assert.equal(await provider.sendChat('codex:gpt-test', [{ role: 'user', content: 'Title this' }]), 'Answer.');
+  } finally {
+    await provider.shutdown();
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  }
 });
 
 test('retries a usage-limited turn once Codex Switcher selects another account', async () => {
@@ -577,7 +626,7 @@ test('retries a usage-limited turn once Codex Switcher selects another account',
         () => undefined,
         streamOptions(executions),
       ));
-      assert.equal(result.assistantMessage.content, 'Tool completed.');
+      assert.equal(result.assistantMessage.content, 'Tool completed by fresh.');
       assert.equal(executions.count, 1);
       assert.equal((await provider.getAccountStatus()).email, 'fresh@example.com');
     } finally {
@@ -604,7 +653,7 @@ test('does not retry a usage-limited turn that already produced output', async (
           chunk => chunks.push(chunk.content),
           streamOptions(executions),
         ),
-        /Workspace credits are depleted[\s\S]*Switch to another account in Codex Switcher/,
+        /Workspace credits are depleted \(attempt 1\)\.\n\nSwitch to another account in Codex Switcher/,
       ));
       assert.deepEqual(chunks, ['Partial answer']);
       assert.equal(executions.count, 0);
@@ -621,7 +670,8 @@ test('explains how to switch when the selected account is out of usage', async (
       await writeSharedAuth('exhausted');
       await assert.rejects(
         provider.sendChat('codex:gpt-test', [{ role: 'user', content: 'Title this' }]),
-        /Workspace credits are depleted[\s\S]*Switch to another account in Codex Switcher/,
+        // The account never changed, so there must be no second attempt.
+        /Workspace credits are depleted \(attempt 1\)\.\n\nSwitch to another account in Codex Switcher/,
       );
     } finally {
       await provider.shutdown();

@@ -99,6 +99,9 @@ export function sharedCredentialIdentity(credential: SharedCodexCredential): str
   return `${credential.accountId}\n${credential.userId ?? ''}`;
 }
 
+// Leave borderline tokens to the backend rather than trusting a skewed local clock.
+const EXPIRY_CLOCK_SKEW_MS = 60_000;
+
 export function isSharedCredentialExpired(credential: SharedCodexCredential, now = Date.now()): boolean {
-  return credential.expiresAt !== null && credential.expiresAt <= now;
+  return credential.expiresAt !== null && credential.expiresAt + EXPIRY_CLOCK_SKEW_MS <= now;
 }
