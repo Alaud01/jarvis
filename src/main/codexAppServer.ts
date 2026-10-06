@@ -19,6 +19,7 @@ const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const CODEX_TURN_TIMEOUT_MS = 15 * 60_000;
 const CODEX_LOGIN_TIMEOUT_MS = 5 * 60_000;
 const STATE_VERSION = 1;
+const SHARED_AUTH_REREAD_DELAY_MS = 100;
 
 const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
   'x86_64-unknown-linux-musl': '@openai/codex-linux-x64',
@@ -943,6 +944,11 @@ export class CodexAppServerClient {
     return Boolean(this.options.sharedAuthPath);
   }
 
+  /** Identity of the Codex Switcher account last supplied to the app-server. */
+  get suppliedSharedIdentity(): string | null {
+    return this.suppliedSharedCredential ? sharedCredentialIdentity(this.suppliedSharedCredential) : null;
+  }
+
   /** Identity of the Codex Switcher account currently selected on disk. */
   async readSharedAccountIdentity(): Promise<string | null> {
     if (!this.options.sharedAuthPath) return null;
@@ -951,7 +957,13 @@ export class CodexAppServerClient {
   }
 
   private async readUsableSharedCredential(): Promise<SharedCodexCredential> {
-    const credential = await readSharedCodexCredential(this.options.sharedAuthPath as string);
+    const authPath = this.options.sharedAuthPath as string;
+    let credential = await readSharedCodexCredential(authPath);
+    if (!credential) {
+      // Codex Switcher may be mid-rewrite; give it a moment before giving up.
+      await new Promise(resolve => setTimeout(resolve, SHARED_AUTH_REREAD_DELAY_MS));
+      credential = await readSharedCodexCredential(authPath);
+    }
     if (!credential) throw new SharedCodexAuthError(SHARED_AUTH_MISSING_MESSAGE);
     if (isSharedCredentialExpired(credential)) throw new SharedCodexAuthError(SHARED_AUTH_EXPIRED_MESSAGE);
     return credential;
@@ -982,13 +994,15 @@ export class CodexAppServerClient {
     return sync;
   }
 
-  /** The app-server asks for a new token after a 401; Codex Switcher owns refreshing it. */
+  /**
+   * The app-server asks for a new token after a 401; Codex Switcher owns
+   * refreshing it, so answer with whatever the file holds now. The rejected
+   * token may be older than the last one Jarvis supplied, and Codex retries
+   * only once after a refresh, so this cannot loop.
+   */
   private async answerSharedAuthRefresh(id: unknown): Promise<void> {
     try {
       const credential = await this.readUsableSharedCredential();
-      if (credential.accessToken === this.suppliedSharedCredential?.accessToken) {
-        throw new SharedCodexAuthError(SHARED_AUTH_EXPIRED_MESSAGE);
-      }
       this.suppliedSharedCredential = credential;
       this.send({
         id,

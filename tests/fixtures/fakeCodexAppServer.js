@@ -10,6 +10,11 @@ let turnCount = 0;
 let externalAccount = null;
 let nextServerRequestId = 5000;
 const pendingServerRequests = new Map();
+let threadCount = 0;
+let exhaustedAttempts = 0;
+// Per thread: the declared dynamic tools, and the account whose model
+// connection the thread keeps open (real Codex reuses it across turns).
+const threads = new Map();
 
 function accountFromAccessToken(accessToken) {
   const claims = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString('utf8'));
@@ -20,6 +25,21 @@ function failTurn(threadId, turnId, message, codexErrorInfo = null) {
   send({
     method: 'turn/completed',
     params: { threadId, turn: { id: turnId, status: 'failed', error: { message, codexErrorInfo } } },
+  });
+}
+
+function finishWithText(threadId, turnId, text) {
+  send({
+    method: 'item/started',
+    params: { threadId, turnId, item: { type: 'agentMessage', id: 'message-text', phase: 'final_answer' } },
+  });
+  send({
+    method: 'item/agentMessage/delta',
+    params: { threadId, turnId, itemId: 'message-text', delta: text },
+  });
+  send({
+    method: 'turn/completed',
+    params: { threadId, turn: { id: turnId, status: 'completed', error: null } },
   });
 }
 
@@ -99,6 +119,10 @@ lines.on('line', line => {
   }
 
   if (message.method === 'thread/resume') {
+    // Resuming an unloaded thread opens a new connection; a loaded one keeps its own.
+    if (!threads.has(message.params.threadId)) {
+      threads.set(message.params.threadId, { hasTools: true, account: externalAccount });
+    }
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
     return;
   }
@@ -110,7 +134,10 @@ lines.on('line', line => {
       fail(message.id, 'Jarvis dynamic tools were not provided');
       return;
     }
-    send({ id: message.id, result: { thread: { id: 'thread-test' } } });
+    threadCount += 1;
+    const threadId = `thread-test-${threadCount}`;
+    threads.set(threadId, { hasTools: dynamicTools.length > 0, account: externalAccount });
+    send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
 
@@ -119,8 +146,10 @@ lines.on('line', line => {
     activeTurn = { threadId: message.params.threadId, turnId: `turn-test-${turnCount}`, requestId: 9000 + turnCount };
     send({ id: message.id, result: { turn: { id: activeTurn.turnId } } });
     const { threadId, turnId, requestId } = activeTurn;
+    const thread = threads.get(threadId);
+    activeTurn.account = thread.account;
 
-    if (externalAccount === 'exhausted') {
+    if (thread.account === 'exhausted') {
       setImmediate(() => {
         if (process.env.FAKE_CODEX_DELTA_BEFORE_LIMIT === '1') {
           send({
@@ -134,12 +163,13 @@ lines.on('line', line => {
           fs.writeFileSync(authPath, auth);
         }
         // A real usage-limit message that does not say "usage limit".
-        failTurn(threadId, turnId, 'Workspace credits are depleted.', 'usageLimitExceeded');
+        exhaustedAttempts += 1;
+        failTurn(threadId, turnId, `Workspace credits are depleted (attempt ${exhaustedAttempts}).`, 'usageLimitExceeded');
       });
       return;
     }
 
-    if (externalAccount === 'expiring') {
+    if (thread.account === 'expiring') {
       // The backend rejected the token; ask the client for a fresh one.
       const refreshId = nextServerRequestId++;
       pendingServerRequests.set(refreshId, response => {
@@ -147,7 +177,14 @@ lines.on('line', line => {
           failTurn(threadId, turnId, response.error.message, 'unauthorized');
           return;
         }
-        externalAccount = accountFromAccessToken(response.result.accessToken);
+        const refreshedAccount = accountFromAccessToken(response.result.accessToken);
+        if (refreshedAccount === 'expiring') {
+          failTurn(threadId, turnId, 'Your access token could not be refreshed.', 'unauthorized');
+          return;
+        }
+        externalAccount = refreshedAccount;
+        thread.account = refreshedAccount;
+        activeTurn.account = refreshedAccount;
         startToolCall(threadId, turnId, requestId);
       });
       send({
@@ -158,6 +195,10 @@ lines.on('line', line => {
       return;
     }
 
+    if (!thread.hasTools) {
+      setImmediate(() => finishWithText(threadId, turnId, 'Answer.'));
+      return;
+    }
     setImmediate(() => startToolCall(threadId, turnId, requestId));
     return;
   }
@@ -201,7 +242,7 @@ lines.on('line', line => {
         threadId: activeTurn.threadId,
         turnId: activeTurn.turnId,
         itemId: 'message-test',
-        delta: 'Tool completed.',
+        delta: activeTurn.account ? `Tool completed by ${activeTurn.account}.` : 'Tool completed.',
       },
     });
     send({

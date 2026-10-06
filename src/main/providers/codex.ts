@@ -36,6 +36,19 @@ export interface BuiltCodexTurnInput {
   conversationMessageCount: number;
 }
 
+/** Lets a request attempt report what the retry policy needs to know. */
+interface AccountAttempt {
+  /** The attempt streamed output or ran a tool, so retrying would duplicate it. */
+  markObserved(): void;
+  /** Supplies the currently selected account right before turn/start. */
+  startTurnOnActiveAccount(): Promise<void>;
+}
+
+const PRIVATE_ACCOUNT_ATTEMPT: AccountAttempt = {
+  markObserved: () => undefined,
+  startTurnOnActiveAccount: async () => undefined,
+};
+
 interface PersistentThreadSelection {
   record: CodexConversationThreadRecord;
   replayRequired: boolean;
@@ -325,33 +338,46 @@ export class CodexProvider implements Provider {
   }
 
   /**
-   * Runs a request on the account selected in Codex Switcher. When that
-   * account hits its usage limit and Switcher has since moved to another
-   * account, the request is retried once, but only if the failed attempt
-   * produced no visible output and ran no tools, so nothing is duplicated.
+   * Runs a request on the account selected in Codex Switcher. When the turn
+   * hits its usage limit and Switcher has since selected a different account,
+   * the request is retried once, but only if the failed attempt streamed no
+   * output and ran no tools, so nothing is duplicated.
    */
   private async runOnActiveAccount<T>(
-    run: (markObserved: () => void) => Promise<T>,
+    run: (attempt: AccountAttempt) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (!this.client.followsSharedAuth) return run(() => undefined);
+    if (!this.client.followsSharedAuth) return run(PRIVATE_ACCOUNT_ATTEMPT);
 
-    const attemptedIdentity = await this.client.syncSharedAuth();
     let observed = false;
+    let turnIdentity: string | null = null;
     try {
-      return await run(() => {
-        observed = true;
+      return await run({
+        markObserved: () => {
+          observed = true;
+        },
+        // Sync immediately before turn/start so the recorded identity is the
+        // account the turn actually runs on, even if Switcher changed during
+        // thread setup or replay compaction.
+        startTurnOnActiveAccount: async () => {
+          turnIdentity = await this.client.syncSharedAuth();
+        },
       });
     } catch (error) {
       if (!isCodexUsageLimitError(error) || signal?.aborted) throw error;
       const currentIdentity = await this.client.readSharedAccountIdentity().catch(() => null);
-      if (observed || !currentIdentity || currentIdentity === attemptedIdentity) {
+      if (observed || !turnIdentity || !currentIdentity || currentIdentity === turnIdentity) {
         throw withSwitcherGuidance(error);
       }
     }
 
     try {
-      return await run(() => undefined);
+      return await run({
+        markObserved: () => undefined,
+        startTurnOnActiveAccount: async () => {
+          await this.client.syncSharedAuth();
+        },
+      });
     } catch (error) {
       throw isCodexUsageLimitError(error) ? withSwitcherGuidance(error) : error;
     }
@@ -365,18 +391,19 @@ export class CodexProvider implements Provider {
     options?: StreamChatTurnOptions,
   ): Promise<StreamTurnResult> {
     const executeTool = options?.executeTool;
-    return this.runOnActiveAccount(markObserved => this.streamChatOnActiveAccount(
+    return this.runOnActiveAccount(attempt => this.streamChatOnActiveAccount(
+      attempt,
       modelId,
       messages,
       abortController,
       chunk => {
-        markObserved();
+        attempt.markObserved();
         onChunk(chunk);
       },
       options && {
         ...options,
         executeTool: executeTool && ((tool, argumentsValue) => {
-          markObserved();
+          attempt.markObserved();
           return executeTool(tool, argumentsValue);
         }),
       },
@@ -384,6 +411,7 @@ export class CodexProvider implements Provider {
   }
 
   private async streamChatOnActiveAccount(
+    attempt: AccountAttempt,
     modelId: string,
     messages: ChatMessage[],
     abortController: AbortController,
@@ -401,8 +429,16 @@ export class CodexProvider implements Provider {
     const dynamicTools = executeTool
       ? toCodexDynamicTools(options.tools ?? [])
       : [];
+    // Codex keeps a thread's model connection open across turns, authenticated
+    // as whichever account opened it, so a thread must not outlive an account
+    // switch. Binding the account into the fingerprint replays the
+    // conversation into a fresh thread after a switch.
+    const sharedIdentity = this.client.suppliedSharedIdentity;
     const toolSchemaFingerprint = fingerprintCodexDynamicTools(dynamicTools)
-      + (options?.contextKey ? `:branch:${options.contextKey}` : '');
+      + (options?.contextKey ? `:branch:${options.contextKey}` : '')
+      + (sharedIdentity
+        ? `:account:${createHash('sha256').update(sharedIdentity).digest('hex').slice(0, 16)}`
+        : '');
     const onToolCall = executeTool
       ? (tool: string, argumentsValue: Record<string, unknown>) => (
           executeTool(tool, argumentsValue)
@@ -430,6 +466,7 @@ export class CodexProvider implements Provider {
         ephemeral: true,
         dynamicTools,
       });
+      await attempt.startTurnOnActiveAccount();
       const content = await this.client.runTurn({
         threadId,
         model,
@@ -463,6 +500,7 @@ export class CodexProvider implements Provider {
       selection.replayRequired ? 0 : selection.record.syncedMessageCount,
     );
 
+    await attempt.startTurnOnActiveAccount();
     try {
       const content = await this.client.runTurn({
         threadId: selection.record.threadId,
@@ -508,10 +546,11 @@ export class CodexProvider implements Provider {
     _options?: SendChatOptions,
   ): Promise<string> {
     // sendChat streams nothing and runs no tools, so a retry duplicates nothing.
-    return this.runOnActiveAccount(() => this.sendChatOnActiveAccount(modelId, messages));
+    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages));
   }
 
   private async sendChatOnActiveAccount(
+    attempt: AccountAttempt,
     modelId: string,
     messages: ChatMessage[],
   ): Promise<string> {
@@ -528,6 +567,7 @@ export class CodexProvider implements Provider {
       ephemeral: true,
       dynamicTools: [],
     });
+    await attempt.startTurnOnActiveAccount();
     return this.client.runTurn({
       threadId,
       model,
