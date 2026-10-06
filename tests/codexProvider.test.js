@@ -637,6 +637,57 @@ test('prepares the turn again when Switcher changes accounts during replay compa
   });
 });
 
+test('discards a thread prepared while Switcher switched away and back', async () => {
+  await withSharedAuthFixture('jarvis-shared-aba-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const client = provider.client;
+    const getConversationThread = client.getConversationThread.bind(client);
+    let interleaved = false;
+    let replayPreparations = 0;
+    // After Jarvis captured Alice but before it creates the thread, another
+    // request supplies Bob, so Codex opens the new thread's connection as Bob.
+    client.getConversationThread = async conversationId => {
+      if (!interleaved) {
+        interleaved = true;
+        await writeSharedAuth('bob');
+        await provider.fetchModels();
+      }
+      return getConversationThread(conversationId);
+    };
+    const send = conversation => provider.streamChat(
+      'codex:gpt-test',
+      conversation,
+      new AbortController(),
+      () => undefined,
+      {
+        ...streamOptions({ count: 0 }),
+        prepareReplayMessages: async replayMessages => {
+          replayPreparations += 1;
+          // Switcher returns to Alice before the turn starts.
+          await writeSharedAuth('alice');
+          return replayMessages;
+        },
+      },
+    );
+    try {
+      await writeSharedAuth('alice');
+      const first = await send([{ role: 'user', content: 'Question' }]);
+      assert.equal(first.assistantMessage.content, 'Tool completed by alice.');
+      assert.equal(replayPreparations, 2);
+
+      const followUp = await send([
+        { role: 'user', content: 'Question' },
+        first.assistantMessage,
+        { role: 'user', content: 'Follow-up' },
+      ]);
+      assert.equal(followUp.assistantMessage.content, 'Tool completed by alice.');
+      assert.equal(replayPreparations, 2);
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
 test('defers an account switch until running turns finish', async () => {
   await withSharedAuthFixture('jarvis-shared-defer-', async ({ options, writeSharedAuth }) => {
     const provider = new CodexProvider(options);

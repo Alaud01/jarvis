@@ -206,6 +206,20 @@ export class CodexTurnError extends Error {
   }
 }
 
+/**
+ * The Codex Switcher account supplied to the app-server. `generation`
+ * increases whenever the supplied account changes, so callers can detect a
+ * switch even if it later switched back to the same account.
+ */
+export interface SharedAccountSnapshot {
+  identity: string | null;
+  generation: number;
+}
+
+export interface SharedAccountReservation extends SharedAccountSnapshot {
+  release: () => void;
+}
+
 export class CodexAppServerError extends Error {
   constructor(
     message: string,
@@ -496,6 +510,7 @@ export class CodexAppServerClient {
   private suppliedSharedCredential: SharedCodexCredential | null = null;
   private sharedAuthQueue: Promise<unknown> = Promise.resolve();
   private sharedTurnReservations = 0;
+  private sharedAuthGeneration = 0;
 
   constructor(private readonly options: CodexAppServerOptions) {}
 
@@ -864,6 +879,7 @@ export class CodexAppServerClient {
     this.child = null;
     // External auth lives only in the app-server's memory.
     this.suppliedSharedCredential = null;
+    this.sharedAuthGeneration += 1;
     this.startPromise = null;
     this.stopping = false;
     const detail = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`;
@@ -971,7 +987,11 @@ export class CodexAppServerClient {
    * of the supplied account (null in private mode).
    */
   async syncSharedAuth(): Promise<string | null> {
-    if (!this.options.sharedAuthPath) return null;
+    return (await this.syncSharedAccount()).identity;
+  }
+
+  async syncSharedAccount(): Promise<SharedAccountSnapshot> {
+    if (!this.options.sharedAuthPath) return { identity: null, generation: 0 };
     return this.syncSharedAuthStep(false);
   }
 
@@ -979,12 +999,12 @@ export class CodexAppServerClient {
    * Syncs, then holds the supplied account fixed until `release` so the turn
    * opens its model connection as the account it reports.
    */
-  async reserveSharedAccountForTurn(): Promise<{ identity: string | null; release: () => void }> {
-    if (!this.options.sharedAuthPath) return { identity: null, release: () => undefined };
-    const identity = await this.syncSharedAuthStep(true);
+  async reserveSharedAccountForTurn(): Promise<SharedAccountReservation> {
+    if (!this.options.sharedAuthPath) return { identity: null, generation: 0, release: () => undefined };
+    const snapshot = await this.syncSharedAuthStep(true);
     let released = false;
     return {
-      identity,
+      ...snapshot,
       release: () => {
         if (released) return;
         released = true;
@@ -993,34 +1013,45 @@ export class CodexAppServerClient {
     };
   }
 
-  private syncSharedAuthStep(reserve: boolean): Promise<string> {
+  private supplySharedCredential(credential: SharedCodexCredential): void {
+    const previous = this.suppliedSharedCredential;
+    if (!previous || sharedCredentialIdentity(previous) !== sharedCredentialIdentity(credential)) {
+      this.sharedAuthGeneration += 1;
+    }
+    this.suppliedSharedCredential = credential;
+  }
+
+  private sharedAccountSnapshot(): SharedAccountSnapshot {
+    const supplied = this.suppliedSharedCredential;
+    return {
+      identity: supplied ? sharedCredentialIdentity(supplied) : null,
+      generation: this.sharedAuthGeneration,
+    };
+  }
+
+  private syncSharedAuthStep(reserve: boolean): Promise<SharedAccountSnapshot> {
     // Serialized so reading, supplying, and reserving are one atomic step.
     const sync = this.sharedAuthQueue.catch(() => undefined).then(async () => {
       await this.ensureStarted();
       const credential = await this.readUsableSharedCredential();
       const supplied = this.suppliedSharedCredential;
-      if (
-        supplied
+      const deferSwitch = supplied
         && this.sharedTurnReservations > 0
-        && sharedCredentialIdentity(supplied) !== sharedCredentialIdentity(credential)
-      ) {
-        // A running turn's connection belongs to the supplied account. Defer
-        // the switch until no turn holds it rather than waiting, which could
-        // deadlock a request nested inside a turn.
-        if (reserve) this.sharedTurnReservations += 1;
-        return sharedCredentialIdentity(supplied);
-      }
-      if (credential.accessToken !== supplied?.accessToken) {
+        && sharedCredentialIdentity(supplied) !== sharedCredentialIdentity(credential);
+      // A running turn's connection belongs to the supplied account. Defer the
+      // switch until no turn holds it rather than waiting, which could
+      // deadlock a request nested inside a turn.
+      if (!deferSwitch && credential.accessToken !== supplied?.accessToken) {
         await this.requestStarted('account/login/start', {
           type: 'chatgptAuthTokens',
           accessToken: credential.accessToken,
           chatgptAccountId: credential.accountId,
           chatgptPlanType: credential.planType,
         });
-        this.suppliedSharedCredential = credential;
+        this.supplySharedCredential(credential);
       }
       if (reserve) this.sharedTurnReservations += 1;
-      return sharedCredentialIdentity(credential);
+      return this.sharedAccountSnapshot();
     });
     this.sharedAuthQueue = sync;
     return sync;
@@ -1035,7 +1066,7 @@ export class CodexAppServerClient {
   private async answerSharedAuthRefresh(id: unknown): Promise<void> {
     try {
       const credential = await this.readUsableSharedCredential();
-      this.suppliedSharedCredential = credential;
+      this.supplySharedCredential(credential);
       this.send({
         id,
         result: {
