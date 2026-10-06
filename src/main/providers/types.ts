@@ -15,6 +15,12 @@ export interface ChatMessage {
   images?: string[];
   imageMimeTypes?: string[];
   thinking?: string;
+  // Main-process-only replay state for stateless Go Responses tool rounds.
+  // Keep native item order, encrypted reasoning, call IDs and message phases.
+  openCodeGoResponse?: {
+    model: string;
+    output: Array<Record<string, unknown>>;
+  };
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   tool_name?: string;
@@ -72,6 +78,10 @@ export interface StreamChatTurnOptions {
 
 export interface SendChatOptions {
   keepAlive?: string | number;
+  signal?: AbortSignal;
+  conversationId?: string;
+  contextKey?: string;
+  sessionId?: string;
 }
 
 export interface ModelInfo {
@@ -94,11 +104,17 @@ export interface ProviderInfo {
   available: boolean;
 }
 
+export interface ModelDiscoverySource {
+  readonly id: string;
+  fetchModels(signal?: AbortSignal): Promise<ModelInfo[]>;
+}
+
 export interface Provider {
   readonly id: string;
   readonly name: string;
+  readonly modelSources?: readonly ModelDiscoverySource[];
   readonly conversationMode?: 'stateless' | 'threaded';
-  fetchModels(): Promise<ModelInfo[]>;
+  fetchModels(signal?: AbortSignal): Promise<ModelInfo[]>;
   streamChat(
     model: string,
     messages: ChatMessage[],

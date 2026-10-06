@@ -1,4 +1,9 @@
 import { BrowserWindow, screen } from 'electron';
+import { logVoiceTiming } from './voiceTiming';
+
+type OverlayTimingContext = { requestId: string; startedAt: number };
+let overlayTimingContext: OverlayTimingContext | undefined;
+let overlayRequestedAt = 0;
 
 type OverlayAnchorBounds = {
   x: number;
@@ -38,10 +43,14 @@ const STATUS_PULSE_MS = 420;
 
 const OVERLAY_EASE = 'cubic-bezier(0.22, 1, 0.36, 1)';
 
-type OverlayState = 'recording' | 'processing' | 'complete' | 'error';
+type OverlayState = 'starting' | 'recording' | 'processing' | 'complete' | 'error';
 type OverlayVisualStage = OverlayState | 'processing-fill' | 'complete-fill';
 
 const STATE_CONFIG: Record<OverlayState, { label: string; stage: OverlayVisualStage }> = {
+  starting: {
+    label: 'Starting microphone...',
+    stage: 'processing',
+  },
   recording: {
     label: 'Listening...',
     stage: 'recording',
@@ -738,6 +747,8 @@ async function revealOverlay(
   }
 
   const shouldShowWindow = !win.isVisible();
+  const timingContext = overlayTimingContext;
+  const requestedAt = overlayRequestedAt;
   try {
     await applyOverlayPayload(win, payload, shouldShowWindow);
   } catch {
@@ -764,7 +775,19 @@ async function revealOverlay(
   if (shouldShowWindow) {
     positionOverlay(win);
     showOverlayWithoutFocus(win);
-    void win.webContents.executeJavaScript('window.startOverlayShow?.();').catch(() => {
+  }
+  void win.webContents.executeJavaScript(`new Promise(resolve => {
+      if (${shouldShowWindow}) window.startOverlayShow?.();
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    })`).then(() => {
+      if (timingContext && win === overlayWindow && !win.isDestroyed()
+        && overlayDesiredVisible && presentationId === overlayPresentationId) {
+        logVoiceTiming(timingContext.requestId, `overlay (${state}; renderer frame acknowledged)`, {
+          requestToRendererFrameMs: performance.now() - requestedAt,
+          phaseStartToRendererFrameMs: performance.now() - timingContext.startedAt,
+        });
+      }
+    }).catch(() => {
       recreateOverlayAfterRendererFailure(
         win,
         payload,
@@ -774,7 +797,6 @@ async function revealOverlay(
         presentationId,
       );
     });
-  }
 }
 
 function recreateHiddenOverlayForCurrentMacSpace(): void {
@@ -935,7 +957,11 @@ export function setOverlayThemeBackground(_isDark: boolean): void {
   });
 }
 
-export function showOverlay(state: OverlayState, transcript?: string, errorMessage?: string): void {
+export function showOverlay(
+  state: OverlayState, transcript?: string, errorMessage?: string, timingContext?: OverlayTimingContext,
+): void {
+  overlayTimingContext = timingContext;
+  overlayRequestedAt = performance.now();
   const payload = getOverlayPayload(state, transcript, errorMessage);
   const presentationId = ++overlayPresentationId;
   overlayDesiredVisible = true;

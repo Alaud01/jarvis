@@ -185,7 +185,7 @@ const PersonalDictionary: React.FC<{
             <div className="font-mono text-[0.6rem] uppercase tracking-[2px] text-text-muted">Voice</div>
             <h1 className="mt-2 text-2xl font-semibold text-text-primary">Personal Dictionary</h1>
             <p className="mt-2 max-w-2xl text-sm leading-relaxed text-text-tertiary">
-              Manage vocabulary Jarvis should recognize separately from exact replacement rules it may apply after transcription.
+              Personal Dictionary is paused while Whisper Turbo is active. Saved entries are kept for later; dictation does not use them or learn new corrections.
             </p>
           </div>
           <div className="rounded-md border border-border-primary bg-bg-secondary px-4 py-3 text-right">

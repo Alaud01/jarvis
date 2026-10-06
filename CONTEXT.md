@@ -1,3 +1,7 @@
+> Current voice runtime: Whisper large-v3-turbo on Apple MLX. Personal Dictionary, Vocabulary Guidance,
+> Replacement Rules, and Observation Sessions are suspended for dictation. The domain model below is retained
+> for future reactivation; saved entries remain stored. See [the Whisper runtime decision](docs/adr/0009-use-mlx-whisper-turbo-without-personalization.md).
+
 # Voice Personalization
 
 This context describes how Jarvis adapts voice transcription to a user's vocabulary without treating every text edit as a reusable correction.

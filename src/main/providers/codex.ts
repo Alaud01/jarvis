@@ -425,7 +425,7 @@ export class CodexProvider implements Provider {
   async sendChat(
     modelId: string,
     messages: ChatMessage[],
-    _options?: SendChatOptions,
+    options?: SendChatOptions,
   ): Promise<string> {
     const account = await this.client.ensureChatGptAccount();
     if (account.type !== 'chatgpt') {
@@ -445,6 +445,7 @@ export class CodexProvider implements Provider {
       model,
       input: builtInput.input,
       onDelta: () => undefined,
+      signal: options?.signal,
     });
   }
 

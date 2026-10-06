@@ -227,6 +227,10 @@ export function buildToolResultSynthesisMessages(
 ): ChatMessage[] {
   const synthesisMessages = [...baseMessages];
   const assistantContent = assistantMessage?.content.trim();
+  const toolImages = toolMessages.flatMap(toolMessage => (toolMessage.images ?? []).map((image, index) => ({
+    image,
+    mimeType: toolMessage.imageMimeTypes?.[index],
+  })));
 
   if (assistantContent) {
     synthesisMessages.push({
@@ -249,6 +253,10 @@ export function buildToolResultSynthesisMessages(
       'Use these tool results to answer my previous request directly:',
       ...toolMessages.map((toolMessage, index) => formatToolResultForSynthesis(toolMessage, index)),
     ].join('\n\n'),
+    ...(toolImages.length ? {
+      images: toolImages.map(({ image }) => image),
+      imageMimeTypes: toolImages.map(({ mimeType }) => mimeType ?? 'image/png'),
+    } : {}),
   });
 
   return synthesisMessages;

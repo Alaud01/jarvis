@@ -14,7 +14,6 @@ export interface LocalVoiceModelStatus {
   pythonExecutable: string | null;
   modelName: string;
   estimatedDownloadSize: string;
-  openRouterFallbackConfigured: boolean;
   lastStep?: string;
   lastError?: string;
   logs?: string[];

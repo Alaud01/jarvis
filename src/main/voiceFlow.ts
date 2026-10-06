@@ -2,13 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { ipcMain, BrowserWindow } from 'electron';
 import { startRecording, stopRecording, requestMicrophoneAccess, cleanupAudioCapture } from './audioRecorder';
 import { getVoiceShortcutLabel, setupGlobalHotkey, setupLocalHotkey, teardownGlobalHotkey } from './hotkeyManager';
-import { processVoiceFlow } from './pythonService';
+import { processVoiceFlow, warmupVoiceModel } from './pythonService';
 import { typeTextInActiveApp, getFrontmostApp, activateApp, type FrontmostApp } from './textInserter';
 import { showOverlay, hideOverlay, destroyOverlay, preloadOverlay, setOverlayAnchorBounds } from './overlayWindow';
 import { captureVoiceContext } from './voiceContext';
 import { EMPTY_VOICE_CONTEXT, type VoiceContext } from '../shared/voice';
-import { cancelCorrectionObservation, observePostInsertionCorrection } from './correctionObserver';
+// Personal dictionary learning is suspended for Whisper Turbo.
+// import { cancelCorrectionObservation, observePostInsertionCorrection } from './correctionObserver';
 import { debugLog, infoLog } from './logger';
+import { logVoiceTiming } from './voiceTiming';
 
 type VoiceFlowState = 'idle' | 'recording' | 'processing';
 type VoiceTranscriptPayload = {
@@ -19,6 +21,7 @@ type VoiceTranscriptPayload = {
 
 let voiceFlowState: VoiceFlowState = 'idle';
 let recordingStarting = false;
+let voiceRequestId = '';
 let startErrorTimer: ReturnType<typeof setTimeout> | null = null;
 
 export type VoiceFlowResult = {
@@ -96,7 +99,7 @@ async function resolveTargetApp(): Promise<FrontmostApp | null> {
 }
 
 async function capturePreRecordingTarget(): Promise<void> {
-  cancelCorrectionObservation();
+  // cancelCorrectionObservation();
   preRecordingProjectFocused = isProjectWindowFocused();
   if (preRecordingProjectFocused) {
     preRecordingApp = null;
@@ -159,10 +162,21 @@ async function startVoiceRecording(): Promise<void> {
     startErrorTimer = null;
   }
   recordingStarting = true;
+  voiceRequestId = randomUUID().slice(0, 8);
+  const startedAt = performance.now();
+  const timings: Record<string, number> = {};
+  // Start loading as soon as the shortcut/UI is hit, in parallel with capture.
+  void warmupVoiceModel();
+  setOverlayAnchorBounds(null);
+  showOverlay('starting', undefined, undefined, { requestId: voiceRequestId, startedAt });
   try {
+    let stepStartedAt = performance.now();
     await capturePreRecordingTarget();
+    timings.targetCaptureMs = performance.now() - stepStartedAt;
 
-    const result = await startRecording();
+    stepStartedAt = performance.now();
+    const result = await startRecording(voiceRequestId);
+    timings.microphoneSetupMs = performance.now() - stepStartedAt;
 
     if (!result.success) {
       preRecordingApp = null;
@@ -182,9 +196,11 @@ async function startVoiceRecording(): Promise<void> {
 
     voiceFlowState = 'recording';
     sendStateToRenderer('recording');
-    showOverlay('recording');
+    showOverlay('recording', undefined, undefined, { requestId: voiceRequestId, startedAt });
     beginPreRecordingCapture();
   } finally {
+    timings.shortcutToRecordingReadyMs = performance.now() - startedAt;
+    logVoiceTiming(voiceRequestId, 'startup', timings);
     recordingStarting = false;
   }
 }
@@ -196,14 +212,14 @@ async function stopAndProcess(): Promise<void> {
 
   voiceFlowState = 'processing';
   sendStateToRenderer('processing');
-  showOverlay('processing');
   const flowStartedAt = performance.now();
+  showOverlay('processing', undefined, undefined, { requestId: voiceRequestId, startedAt: flowStartedAt });
   const timings: Record<string, number> = {};
 
   try {
     let stepStartedAt = performance.now();
     await preRecordingCapturePromise;
-    timings.contextCaptureMs = Math.round(performance.now() - stepStartedAt);
+    timings.remainingContextWaitMs = Math.round(performance.now() - stepStartedAt);
 
     stepStartedAt = performance.now();
     const audioBuffer = await stopRecording();
@@ -223,12 +239,12 @@ async function stopAndProcess(): Promise<void> {
     }
 
     stepStartedAt = performance.now();
-    const result = await processVoiceFlow(audioBuffer, preRecordingContext);
-    timings.processVoiceFlowMs = Math.round(performance.now() - stepStartedAt);
-    const dictationId = randomUUID();
+    const result = await processVoiceFlow(audioBuffer, preRecordingContext, voiceRequestId);
+    timings.serviceRoundTripMs = Math.round(performance.now() - stepStartedAt);
+    // const dictationId = randomUUID();
 
     if (result.success && result.text) {
-      console.warn('[VoiceFlow] Temporary transcription log:', {
+      debugLog(`[VoiceFlow ${voiceRequestId}] Transcript:`, {
         raw: result.raw_text ?? '',
         refined: result.text,
         refinementMode: result.refinement_mode,
@@ -236,6 +252,7 @@ async function stopAndProcess(): Promise<void> {
       });
 
       showOverlay('complete', result.text);
+      timings.stopToTranscriptReadyMs = Math.round(performance.now() - flowStartedAt);
       stepStartedAt = performance.now();
       await new Promise(resolve => setTimeout(resolve, 300));
       timings.completeOverlayDelayMs = Math.round(performance.now() - stepStartedAt);
@@ -287,14 +304,15 @@ async function stopAndProcess(): Promise<void> {
         stepStartedAt = performance.now();
         await typeTextInActiveApp(result.text);
         timings.typeTextMs = Math.round(performance.now() - stepStartedAt);
-        if (targetApp) {
-          void observePostInsertionCorrection(targetApp, result.text, {
-            dictationId,
-            appliedRules: result.applied_rules,
-            transcriptionMetadata: result.transcription_metadata,
-          });
-        }
+        // if (targetApp) {
+        //   void observePostInsertionCorrection(targetApp, result.text, {
+        //     dictationId,
+        //     appliedRules: result.applied_rules,
+        //     transcriptionMetadata: result.transcription_metadata,
+        //   });
+        // }
       }
+      timings.stopToDeliveredMs = Math.round(performance.now() - flowStartedAt);
     } else if (!result.success && result.error) {
       console.warn('[VoiceFlow] Voice processing failed:', {
         error: result.error,
@@ -328,10 +346,12 @@ async function stopAndProcess(): Promise<void> {
     showOverlay('error', undefined, errorMessage);
     sendErrorToRenderer(errorMessage);
   } finally {
-    timings.totalBeforeHideMs = Math.round(performance.now() - flowStartedAt);
-    console.warn('[VoiceFlow] stopAndProcess timing breakdown:', timings);
+    const holdStartedAt = performance.now();
     await new Promise(resolve => setTimeout(resolve, 800));
+    timings.finalOverlayHoldMs = Math.round(performance.now() - holdStartedAt);
     hideOverlay();
+    timings.stopToHideRequestedMs = Math.round(performance.now() - flowStartedAt);
+    logVoiceTiming(voiceRequestId, 'delivery (totals include nested steps; hide animation follows)', timings);
     preRecordingApp = null;
     preRecordingProjectFocused = false;
     preRecordingContext = EMPTY_VOICE_CONTEXT;

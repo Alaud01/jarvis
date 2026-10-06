@@ -6,6 +6,8 @@ const Module = require('node:module');
 const waitForAsyncWork = () => new Promise(resolve => setImmediate(resolve));
 
 test('overlay lifecycle ignores stale windows and cancels stale hides', async t => {
+  const timingLogs = [];
+  t.mock.method(console, 'warn', line => timingLogs.push(line));
   const originalLoad = Module._load;
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   let display = {
@@ -99,8 +101,9 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
     Object.defineProperty(process, 'platform', platformDescriptor);
   });
 
-  overlay.showOverlay('recording');
-  overlay.showOverlay('processing');
+  const timingContext = { requestId: 'overlay-test', startedAt: performance.now() };
+  overlay.showOverlay('starting', undefined, undefined, timingContext);
+  overlay.showOverlay('processing', undefined, undefined, timingContext);
 
   assert.equal(FakeBrowserWindow.instances.length, 1, 'a loading window must not be recreated');
   const firstWindow = FakeBrowserWindow.instances[0];
@@ -110,6 +113,7 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   assert.equal(firstWindow.bounds.x + firstWindow.bounds.width / 2, 2196);
 
   const html = decodeURIComponent(firstWindow.webContents.url.split(',')[1]);
+  assert.match(html, /Starting microphone\.\.\./);
   assert.match(html, /<body class="preparing">/);
   assert.match(html, /body\.exiting/);
   assert.match(html, /@keyframes label-enter/);
@@ -122,6 +126,9 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   await waitForAsyncWork();
   await waitForAsyncWork();
   assert.equal(firstWindow.visible, true);
+  assert.equal(timingLogs.length, 1, 'only the current presentation should acknowledge a renderer frame');
+  assert.match(timingLogs[0], /^\[VoiceTiming overlay-test\] overlay \(processing; renderer frame acknowledged\)/);
+  assert.match(timingLogs[0], /phaseStartToRendererFrameMs=\d+ms/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /prepareOverlayShow/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /startOverlayShow/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /--top-reserve', '40px'/);

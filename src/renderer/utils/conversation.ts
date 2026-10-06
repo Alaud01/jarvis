@@ -1,3 +1,4 @@
+import { memoizeRevision } from '../../shared/saveQueue';
 import type {
   Conversation,
   Folder,
@@ -148,7 +149,7 @@ export function getConversationMetadataRevision(conversations: Conversation[]): 
   return `${conversations.length}:${hash}`;
 }
 
-export function getConversationRevision(conversation: Conversation): string {
+export const getConversationRevision = memoizeRevision((conversation: Conversation): string => {
   const hash = conversation.messages.reduce((messageHash, message) => {
     let nextHash = hashString(
       `${message.id}\u0000${message.sender}\u0000${message.timestamp.toISOString()}\u0000${message.text.length}`,
@@ -171,7 +172,7 @@ export function getConversationRevision(conversation: Conversation): string {
       })}`
     : '';
   return `${conversation.messages.length}:${hash}:${branchRevision}`;
-}
+});
 
 export function getNextFolderName(existingFolders: Folder[]): string {
   const normalizedNames = new Set(

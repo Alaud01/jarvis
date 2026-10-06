@@ -9,6 +9,7 @@ import type {
   ToolDefinition,
 } from './types';
 import { debugLog } from '../logger';
+import { TOOL_IMAGE_FOLLOW_UP_TEXT, withToolImageFollowUps } from './toolImages';
 
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_TITLE = 'Jarvis';
@@ -161,7 +162,7 @@ function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
   }>;
   tool_call_id?: string;
 }> {
-  return messages.map((msg) => {
+  return withToolImageFollowUps<ReturnType<typeof convertMessagesToOpenAI>[number]>(messages, (msg) => {
     if (msg.role === 'tool') {
       return {
         role: 'tool' as const,
@@ -194,7 +195,16 @@ function convertMessagesToOpenAI(messages: ChatMessage[]): Array<{
       content: convertContentToOpenAI(msg),
       reasoning_content: msg.role === 'assistant' ? msg.thinking : undefined,
     };
-  });
+  }, (images) => ({
+    role: 'user',
+    content: [
+      { type: 'text', text: TOOL_IMAGE_FOLLOW_UP_TEXT },
+      ...images.map(({ image, mimeType }) => ({
+        type: 'image_url',
+        image_url: { url: toImageDataUrl(image, mimeType) },
+      })),
+    ],
+  }));
 }
 
 function extractReasoningDetails(details?: OpenRouterReasoningDetail[]): string {
@@ -360,9 +370,10 @@ export class OpenRouterProvider implements Provider {
     return headers;
   }
 
-  async fetchModels(): Promise<ModelInfo[]> {
+  async fetchModels(signal = AbortSignal.timeout(5_000)): Promise<ModelInfo[]> {
     try {
       const response = await fetch(`${this.baseUrl}/models?output_modalities=text`, {
+        signal,
         headers: this.buildHeaders(Boolean(this.apiKey)),
       });
 
@@ -387,13 +398,14 @@ export class OpenRouterProvider implements Provider {
     }
   }
 
-  async sendChat(model: string, messages: ChatMessage[], _options?: SendChatOptions): Promise<string> {
+  async sendChat(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string> {
     if (!this.apiKey) {
       throw new Error('OpenRouter API key not configured. Set OPENROUTER_API_KEY environment variable.');
     }
 
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
+      signal: options?.signal,
       headers: this.buildHeaders(),
       body: JSON.stringify({
         model,

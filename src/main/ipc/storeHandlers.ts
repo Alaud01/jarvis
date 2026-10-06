@@ -1,4 +1,4 @@
-import { ipcMain, dialog } from 'electron';
+import { ipcMain, dialog, BrowserWindow } from 'electron';
 import {
   loadConversation,
   loadConversationMetadata,
@@ -7,6 +7,10 @@ import {
   saveConversationMetadata,
   saveConversations,
   deleteConversation,
+  listDeletedConversations,
+  restoreConversation,
+  permanentlyDeleteConversation,
+  startDeletedConversationCleanup,
   deleteFolderAndConversations,
   loadFolders,
   saveFolders,
@@ -32,6 +36,9 @@ import type { WorkspaceView } from '../../shared/workspaceViews';
 import {
   deleteProviderConversationState,
   getAllModels,
+  getModelCatalog,
+  getModelCatalogSnapshot,
+  onModelCatalogChanged,
   getAvailableProviders,
   getModelsForProvider,
   getProvider,
@@ -60,6 +67,13 @@ import {
   updateVocabularyCandidate,
 } from '../dictionaryService';
 export function registerStoreHandlers(): void {
+  startDeletedConversationCleanup();
+  ipcMain.handle('store:list-deleted-conversations', () => listDeletedConversations());
+  ipcMain.handle('store:restore-conversation', (_event, id: string) => restoreConversation(id));
+  ipcMain.handle('store:permanently-delete-conversation', async (_event, id: string) => {
+    await permanentlyDeleteConversation(id);
+    return { success: true };
+  });
   ipcMain.handle('store:load-conversations', async () => {
     return loadConversations();
   });
@@ -77,23 +91,27 @@ export function registerStoreHandlers(): void {
   });
 
   ipcMain.handle('store:save-conversations', async (_event, conversations: unknown) => {
-    saveConversations(conversations as SerializedConversation[]);
+    await saveConversations(conversations as SerializedConversation[]);
     return { success: true };
   });
 
   ipcMain.handle('store:save-conversation-list', async (_event, metadata: unknown) => {
-    saveConversationMetadata(metadata as SerializedConversationMetadata[]);
+    await saveConversationMetadata(metadata as SerializedConversationMetadata[]);
     return { success: true };
   });
 
   ipcMain.handle('store:save-conversation', async (_event, conversation: unknown) => {
-    saveConversation(conversation as SerializedConversation);
+    await saveConversation(conversation as SerializedConversation);
     return { success: true };
   });
 
   ipcMain.handle('store:delete-conversation', async (_event, id: string) => {
     await deleteConversation(id);
-    await deleteProviderConversationState([id]);
+    try {
+      await deleteProviderConversationState([id]);
+    } catch (error) {
+      console.warn('Conversation deleted, but provider state cleanup failed:', error);
+    }
     return { success: true };
   });
 
@@ -107,8 +125,12 @@ export function registerStoreHandlers(): void {
   });
 
   ipcMain.handle('store:delete-folder', async (_event, id: string) => {
-    const deletedConversationIds = deleteFolderAndConversations(id);
-    await deleteProviderConversationState(deletedConversationIds);
+    const deletedConversationIds = await deleteFolderAndConversations(id);
+    try {
+      await deleteProviderConversationState(deletedConversationIds);
+    } catch (error) {
+      console.warn('Folder deleted, but provider state cleanup failed:', error);
+    }
     return { success: true };
   });
 
@@ -211,6 +233,14 @@ export function registerDictionaryHandlers(): void {
 }
 
 export function registerModelHandlers(): void {
+  onModelCatalogChanged(() => {
+    const snapshot = getModelCatalogSnapshot();
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.webContents.isDestroyed()) window.webContents.send('model-catalog-changed', snapshot);
+    }
+  });
+  ipcMain.handle('get-model-catalog', (_event, force?: boolean) => getModelCatalog(force === true));
+
   ipcMain.handle('get-models', async () => {
     return await getAllModels();
   });

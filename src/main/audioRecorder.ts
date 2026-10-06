@@ -2,6 +2,7 @@ import { ipcMain, systemPreferences, BrowserWindow, type MessagePortMain } from 
 import { debugLog } from './logger';
 import { isMacLidClosed } from './macLidState';
 import { isMicrophoneUnavailableErrorName, NO_MIC_DETECTED_MESSAGE } from '../shared/audioCapture';
+import { logVoiceTiming } from './voiceTiming';
 
 const SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
@@ -122,14 +123,22 @@ ipcMain.on('audio-data', (_event, chunk: ArrayBuffer | ArrayBufferView) => {
   storeAudioChunk(chunk);
 });
 
-export async function startRecording(): Promise<{ success: boolean; error?: string }> {
+export async function startRecording(requestId = 'standalone'): Promise<{ success: boolean; error?: string }> {
+  const startedAt = performance.now();
+  const timings: Record<string, number> = {};
+  const finish = (result: { success: boolean; error?: string }) => {
+    timings.totalMs = performance.now() - startedAt;
+    logVoiceTiming(requestId, `microphone (${result.success ? 'ready' : 'failed'})`, timings);
+    return result;
+  };
   const hasAccess = await requestMicrophoneAccess();
+  timings.permissionMs = performance.now() - startedAt;
   if (!hasAccess) {
-    return { success: false, error: 'Microphone access denied. Please grant permission in System Preferences.' };
+    return finish({ success: false, error: 'Microphone access denied. Please grant permission in System Preferences.' });
   }
   
   if (!mainWindow) {
-    return { success: false, error: 'Main window not available' };
+    return finish({ success: false, error: 'Main window not available' });
   }
   
   audioChunks = [];
@@ -141,7 +150,10 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
   isRecording = true;
   
   try {
+    let stepStartedAt = performance.now();
     const lidClosed = await isMacLidClosed();
+    timings.lidStateMs = performance.now() - stepStartedAt;
+    stepStartedAt = performance.now();
     // Request microphone access from the renderer
     const result = await mainWindow.webContents.executeJavaScript(`
       (async function() {
@@ -252,6 +264,7 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
         }
       })()
     `);
+    timings.rendererMicrophoneAndWorkletMs = performance.now() - stepStartedAt;
     
     if (!result.success) {
       await cleanupAudioCapture();
@@ -264,13 +277,13 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
       closeAudioPort();
       const noMicrophone = result.errorCode === 'no-microphone'
         || isMicrophoneUnavailableErrorName(result.errorName);
-      return {
+      return finish({
         success: false,
         error: noMicrophone ? NO_MIC_DETECTED_MESSAGE : (result.error || 'Failed to start audio capture'),
-      };
+      });
     }
     
-    return { success: true };
+    return finish({ success: true });
   } catch (error) {
     isRecording = false;
     audioChunks = [];
@@ -279,7 +292,7 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
     audioSumSquares = 0;
     audioPeakAbs = 0;
     closeAudioPort();
-    return { success: false, error: error instanceof Error ? error.message : 'Unknown error starting recording' };
+    return finish({ success: false, error: error instanceof Error ? error.message : 'Unknown error starting recording' });
   }
 }
 
