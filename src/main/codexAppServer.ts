@@ -4,6 +4,16 @@ import * as fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
+import {
+  isSharedCredentialExpired,
+  readSharedCodexCredential,
+  SHARED_AUTH_EXPIRED_MESSAGE,
+  SHARED_AUTH_MANAGED_MESSAGE,
+  SHARED_AUTH_MISSING_MESSAGE,
+  SharedCodexAuthError,
+  sharedCredentialIdentity,
+  type SharedCodexCredential,
+} from './codexSharedAuth';
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const CODEX_TURN_TIMEOUT_MS = 15 * 60_000;
@@ -40,7 +50,7 @@ interface TurnWaiter {
   resolve: (text: string) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
-  error?: string;
+  error?: TurnFailure;
 }
 
 export interface CodexDynamicToolFunction {
@@ -78,12 +88,17 @@ interface EarlyTurnEvents {
   deltas: Array<{ delta: string; phase?: CodexMessagePhase }>;
   tokenUsage?: CodexTokenUsageBreakdown[];
   completion?: TurnCompletion;
-  error?: string;
+  error?: TurnFailure;
+}
+
+interface TurnFailure {
+  message: string;
+  codexErrorInfo: unknown;
 }
 
 interface TurnCompletion {
   status: string;
-  error?: string;
+  error?: TurnFailure;
 }
 
 interface LoginCompletion {
@@ -165,63 +180,11 @@ export interface CodexAppServerOptions {
   openExternal: (url: string) => Promise<void>;
   binaryPath?: string;
   /**
-   * When set, the private runtime's auth.json is a symlink to this file (the
-   * account Codex Switcher activates in ~/.codex), and the app-server is
-   * restarted whenever the active account changes.
+   * auth.json managed by Codex Switcher. When set, Jarvis supplies that
+   * file's access token to the app-server as external auth instead of using
+   * its private login.
    */
   sharedAuthPath?: string;
-}
-
-/**
- * Codex Switcher swaps accounts by rewriting ~/.codex/auth.json. When it is
- * installed, Jarvis follows that file instead of its own private login.
- * Set JARVIS_CODEX_PRIVATE_AUTH=1 to keep the private login.
- */
-export function resolveCodexSwitcherAuthPath(
-  homeDirectory: string,
-  environment: NodeJS.ProcessEnv,
-): string | undefined {
-  if (environment.JARVIS_CODEX_PRIVATE_AUTH === '1') return undefined;
-  if (!existsSync(path.join(homeDirectory, '.codex-switcher', 'accounts.json'))) return undefined;
-  return path.join(homeDirectory, '.codex', 'auth.json');
-}
-
-export const SHARED_AUTH_SIGN_IN_MESSAGE = 'Jarvis follows the account selected in Codex Switcher, but no ChatGPT account is active there. Sign in or pick an account in Codex Switcher, then try again.';
-
-export async function readAuthAccountId(authPath: string): Promise<string | null> {
-  try {
-    const parsed: unknown = JSON.parse(await fs.readFile(authPath, 'utf8'));
-    if (!isRecord(parsed) || !isRecord(parsed.tokens)) return null;
-    return typeof parsed.tokens.account_id === 'string' ? parsed.tokens.account_id : null;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || error instanceof SyntaxError) return null;
-    throw error;
-  }
-}
-
-/**
- * Points `<codexHome>/auth.json` at the shared auth file. Codex rewrites
- * auth.json in place and re-reads it before refreshing tokens, so every Codex
- * process sharing the file sees rotated refresh tokens. A pre-existing private
- * login is kept beside it as auth.json.jarvis-private.
- */
-export async function linkSharedCodexAuth(codexHome: string, sharedAuthPath: string): Promise<void> {
-  const localPath = path.join(codexHome, 'auth.json');
-  let stats: Awaited<ReturnType<typeof fs.lstat>> | null = null;
-  try {
-    stats = await fs.lstat(localPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-
-  if (stats?.isSymbolicLink()) {
-    if (await fs.readlink(localPath) === sharedAuthPath) return;
-    await fs.unlink(localPath);
-  } else if (stats) {
-    await fs.rename(localPath, `${localPath}.jarvis-private`);
-  }
-  await fs.symlink(sharedAuthPath, localPath);
 }
 
 export function buildChatGptLoginParams(): {
@@ -232,6 +195,14 @@ export function buildChatGptLoginParams(): {
     type: 'chatgpt',
     useHostedLoginSuccessPage: false,
   };
+}
+
+/** A failed Codex turn, carrying the app-server's structured error code. */
+export class CodexTurnError extends Error {
+  constructor(message: string, readonly codexErrorInfo: unknown) {
+    super(message);
+    this.name = 'CodexTurnError';
+  }
 }
 
 export class CodexAppServerError extends Error {
@@ -450,11 +421,15 @@ function abortError(): Error {
 
 function turnCompletionFromParams(params: Record<string, unknown>): TurnCompletion {
   const turn = isRecord(params.turn) ? params.turn : {};
-  const turnError = isRecord(turn.error) ? turn.error : {};
   return {
     status: typeof turn.status === 'string' ? turn.status : 'failed',
-    error: typeof turnError.message === 'string' ? turnError.message : undefined,
+    error: turnFailureFromValue(turn.error),
   };
+}
+
+function turnFailureFromValue(value: unknown): TurnFailure | undefined {
+  if (!isRecord(value) || typeof value.message !== 'string') return undefined;
+  return { message: value.message, codexErrorInfo: value.codexErrorInfo ?? null };
 }
 
 function accountStatusFromResponse(response: unknown): CodexAccountStatus {
@@ -517,8 +492,8 @@ export class CodexAppServerClient {
   private stateWritePromise: Promise<void> = Promise.resolve();
   private stopping = false;
   private stderrTail = '';
-  private startedSharedAccountId: string | null = null;
-  private activeOperations = 0;
+  private suppliedSharedCredential: SharedCodexCredential | null = null;
+  private sharedAuthQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: CodexAppServerOptions) {}
 
@@ -705,7 +680,9 @@ export class CodexAppServerClient {
       waiter.reject(abortError());
       return;
     }
-    waiter.reject(new Error(completionError ?? `Codex turn ended with status ${completion.status}.`));
+    waiter.reject(completionError
+      ? new CodexTurnError(completionError.message, completionError.codexErrorInfo)
+      : new Error(`Codex turn ended with status ${completion.status}.`));
   }
 
   private handleTurnCompletion(params: Record<string, unknown>): void {
@@ -717,14 +694,15 @@ export class CodexAppServerClient {
 
   private handleTurnError(params: Record<string, unknown>): void {
     const threadId = typeof params.threadId === 'string' ? params.threadId : null;
-    const error = isRecord(params.error) ? params.error : {};
-    const message = typeof error.message === 'string' ? error.message : 'Codex turn failed.';
-    if (!threadId) return;
+    // Codex retries transient stream errors itself; only terminal ones fail the turn.
+    if (!threadId || params.willRetry === true) return;
+    const failure = turnFailureFromValue(params.error)
+      ?? { message: 'Codex turn failed.', codexErrorInfo: null };
 
     const waiterEntry = [...this.turnWaiters.entries()].find(([, waiter]) => waiter.threadId === threadId);
     if (waiterEntry) {
       const [, waiter] = waiterEntry;
-      waiter.error = message;
+      waiter.error = failure;
     }
   }
 
@@ -773,6 +751,10 @@ export class CodexAppServerClient {
 
   private async handleServerRequest(message: Record<string, unknown>): Promise<void> {
     const id = message.id;
+    if (message.method === 'account/chatgptAuthTokens/refresh' && this.options.sharedAuthPath) {
+      await this.answerSharedAuthRefresh(id);
+      return;
+    }
     if (message.method !== 'item/tool/call') {
       this.send({
         id,
@@ -878,6 +860,8 @@ export class CodexAppServerClient {
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     const wasStopping = this.stopping;
     this.child = null;
+    // External auth lives only in the app-server's memory.
+    this.suppliedSharedCredential = null;
     this.startPromise = null;
     this.stopping = false;
     const detail = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`;
@@ -892,10 +876,6 @@ export class CodexAppServerClient {
   private async start(): Promise<void> {
     await this.prepareDirectories();
     await this.loadRuntimeState();
-    if (this.options.sharedAuthPath) {
-      await linkSharedCodexAuth(this.options.codexHome, this.options.sharedAuthPath);
-      this.startedSharedAccountId = await readAuthAccountId(this.options.sharedAuthPath);
-    }
     const binaryPath = this.options.binaryPath ?? resolveBundledCodexBinary();
     const child = spawn(binaryPath, ['app-server', '--listen', 'stdio://'], {
       cwd: this.options.workspaceRoot,
@@ -963,39 +943,74 @@ export class CodexAppServerClient {
     return Boolean(this.options.sharedAuthPath);
   }
 
-  /** Whether the shared auth file now names a different account than the running app-server. */
-  async hasSharedAccountChanged(): Promise<boolean> {
-    if (!this.options.sharedAuthPath || !this.child) return false;
-    const accountId = await readAuthAccountId(this.options.sharedAuthPath);
-    return accountId !== this.startedSharedAccountId;
+  /** Identity of the Codex Switcher account currently selected on disk. */
+  async readSharedAccountIdentity(): Promise<string | null> {
+    if (!this.options.sharedAuthPath) return null;
+    const credential = await readSharedCodexCredential(this.options.sharedAuthPath);
+    return credential ? sharedCredentialIdentity(credential) : null;
+  }
+
+  private async readUsableSharedCredential(): Promise<SharedCodexCredential> {
+    const credential = await readSharedCodexCredential(this.options.sharedAuthPath as string);
+    if (!credential) throw new SharedCodexAuthError(SHARED_AUTH_MISSING_MESSAGE);
+    if (isSharedCredentialExpired(credential)) throw new SharedCodexAuthError(SHARED_AUTH_EXPIRED_MESSAGE);
+    return credential;
   }
 
   /**
-   * The app-server caches auth in memory, so an account switch made in Codex
-   * Switcher only takes effect after a restart. Restart only when idle so no
-   * loaded thread or in-flight turn is lost.
+   * Supplies the Codex Switcher account to the app-server. Switching accounts
+   * takes effect immediately for later requests; no restart is involved.
+   * Returns the identity of the supplied account (null in private mode).
    */
-  async syncSharedAccount(): Promise<boolean> {
-    if (this.activeOperations > 0 || this.loginPromise) return false;
-    if (this.pendingRequests.size > 0 || this.turnWaiters.size > 0) return false;
-    if (!await this.hasSharedAccountChanged()) return false;
-    console.info('[Codex] Active Codex Switcher account changed; restarting the app-server.');
-    await this.stop();
-    return true;
+  async syncSharedAuth(): Promise<string | null> {
+    if (!this.options.sharedAuthPath) return null;
+    const sync = this.sharedAuthQueue.catch(() => undefined).then(async () => {
+      await this.ensureStarted();
+      const credential = await this.readUsableSharedCredential();
+      if (credential.accessToken !== this.suppliedSharedCredential?.accessToken) {
+        await this.requestStarted('account/login/start', {
+          type: 'chatgptAuthTokens',
+          accessToken: credential.accessToken,
+          chatgptAccountId: credential.accountId,
+          chatgptPlanType: credential.planType,
+        });
+        this.suppliedSharedCredential = credential;
+      }
+      return sharedCredentialIdentity(credential);
+    });
+    this.sharedAuthQueue = sync;
+    return sync;
   }
 
-  /** Runs a multi-request operation that must not straddle an account restart. */
-  async withAccountSync<T>(operation: () => Promise<T>): Promise<T> {
-    await this.syncSharedAccount();
-    this.activeOperations += 1;
+  /** The app-server asks for a new token after a 401; Codex Switcher owns refreshing it. */
+  private async answerSharedAuthRefresh(id: unknown): Promise<void> {
     try {
-      return await operation();
-    } finally {
-      this.activeOperations -= 1;
+      const credential = await this.readUsableSharedCredential();
+      if (credential.accessToken === this.suppliedSharedCredential?.accessToken) {
+        throw new SharedCodexAuthError(SHARED_AUTH_EXPIRED_MESSAGE);
+      }
+      this.suppliedSharedCredential = credential;
+      this.send({
+        id,
+        result: {
+          accessToken: credential.accessToken,
+          chatgptAccountId: credential.accountId,
+          chatgptPlanType: credential.planType,
+        },
+      });
+    } catch (error) {
+      this.send({
+        id,
+        error: {
+          code: -32000,
+          message: error instanceof Error ? error.message : SHARED_AUTH_EXPIRED_MESSAGE,
+        },
+      });
     }
   }
 
   async listModels(): Promise<CodexModel[]> {
+    await this.syncSharedAuth();
     const result = await this.request<unknown>('model/list', { limit: 100, includeHidden: false });
     if (!isRecord(result) || !Array.isArray(result.data)) return [];
     return result.data.flatMap(rawModel => {
@@ -1024,7 +1039,14 @@ export class CodexAppServerClient {
   }
 
   async getAccountStatus(refreshToken = false): Promise<CodexAccountStatus> {
-    await this.syncSharedAccount();
+    if (this.options.sharedAuthPath) {
+      try {
+        await this.syncSharedAuth();
+      } catch (error) {
+        if (error instanceof SharedCodexAuthError) return { connected: false, type: null };
+        throw error;
+      }
+    }
     const response = await this.request<unknown>('account/read', { refreshToken });
     return accountStatusFromResponse(response);
   }
@@ -1054,12 +1076,9 @@ export class CodexAppServerClient {
 
   async loginChatGpt(): Promise<CodexAccountStatus> {
     if (this.options.sharedAuthPath) {
-      // Signing in here would overwrite the account Codex Switcher manages.
-      const account = await this.getAccountStatus(true);
-      if (!account.connected || account.type !== 'chatgpt') {
-        throw new Error(SHARED_AUTH_SIGN_IN_MESSAGE);
-      }
-      return account;
+      // Never open a browser login: it would replace the Switcher's account.
+      await this.syncSharedAuth();
+      return this.getAccountStatus();
     }
     if (this.loginPromise) return this.loginPromise;
     this.loginPromise = (async () => {
@@ -1103,16 +1122,17 @@ export class CodexAppServerClient {
   }
 
   async ensureChatGptAccount(): Promise<CodexAccountStatus> {
+    if (this.options.sharedAuthPath) {
+      await this.syncSharedAuth();
+      return this.getAccountStatus();
+    }
     const account = await this.getAccountStatus();
     if (account.connected && account.type === 'chatgpt') return account;
     return this.loginChatGpt();
   }
 
   async logout(): Promise<void> {
-    if (this.options.sharedAuthPath) {
-      // account/logout would delete and revoke the shared Codex Switcher login.
-      throw new Error('Jarvis follows the account selected in Codex Switcher. Switch or sign out there instead.');
-    }
+    if (this.options.sharedAuthPath) throw new Error(SHARED_AUTH_MANAGED_MESSAGE);
     await this.clearConversationThreads();
     await this.request('account/logout');
   }

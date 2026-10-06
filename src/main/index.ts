@@ -7,7 +7,7 @@ import { initializeVoiceFlow, registerVoiceFlowIPC } from './voiceFlow';
 import { setOverlayThemeBackground } from './overlayWindow';
 import { getCodexProvider, initializeProviders } from './providers/registry';
 import { deleteLegacyStoredProviderApiKeys } from './store';
-import { resolveCodexSwitcherAuthPath } from './codexAppServer';
+import { resolveCodexSwitcherAuthPath } from './codexSharedAuth';
 import {
   buildAppMenu,
   broadcastMenuAction,

@@ -8,14 +8,19 @@ const {
   buildCodexDynamicToolContentItems,
   buildIsolatedCodexEnvironment,
   CodexAppServerClient,
+  CodexTurnError,
   isMissingThreadError,
-  linkSharedCodexAuth,
   resolveBundledCodexBinary,
-  resolveCodexSwitcherAuthPath,
 } = require('../dist/main/codexAppServer');
+const {
+  readSharedCodexCredential,
+  resolveCodexSwitcherAuthPath,
+  sharedCredentialIdentity,
+} = require('../dist/main/codexSharedAuth');
 const {
   buildCodexTurnInput,
   CodexProvider,
+  isCodexUsageLimitError,
   fingerprintCodexDynamicTools,
   fingerprintCodexMessagePrefix,
   fromCodexModelId,
@@ -367,16 +372,85 @@ test('round-trips a Codex dynamic tool call through the Jarvis handler', async (
   }
 });
 
-async function writeAuth(authPath, accountId) {
-  await fs.mkdir(path.dirname(authPath), { recursive: true });
-  await fs.writeFile(authPath, JSON.stringify({ tokens: { account_id: accountId } }));
+const FAKE_CODEX_SERVER = path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js');
+
+function fakeAccessToken(user, { workspace = 'workspace', expiresInSeconds = 3600 } = {}) {
+  const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return [
+    encode({ alg: 'none' }),
+    encode({
+      exp: Math.floor(Date.now() / 1000) + expiresInSeconds,
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: workspace,
+        chatgpt_user_id: user,
+        chatgpt_plan_type: 'plus',
+      },
+    }),
+    'signature',
+  ].join('.');
 }
+
+function fakeAuthJson(user, options) {
+  return JSON.stringify({
+    tokens: {
+      id_token: 'id',
+      access_token: fakeAccessToken(user, options),
+      refresh_token: `refresh-${user}`,
+      account_id: options?.workspace ?? 'workspace',
+    },
+  });
+}
+
+async function withSharedAuthFixture(prefix, run) {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+  const sharedAuthPath = path.join(temporaryRoot, 'dot-codex', 'auth.json');
+  const codexHome = path.join(temporaryRoot, 'codex-home');
+  await fs.mkdir(path.dirname(sharedAuthPath), { recursive: true });
+  const options = {
+    binaryPath: FAKE_CODEX_SERVER,
+    codexHome,
+    workspaceRoot: path.join(temporaryRoot, 'workspace'),
+    openExternal: async () => {
+      throw new Error('Shared auth must never open a browser login.');
+    },
+    sharedAuthPath,
+  };
+  const writeSharedAuth = (user, authOptions) => fs.writeFile(sharedAuthPath, fakeAuthJson(user, authOptions));
+  try {
+    await run({ options, sharedAuthPath, codexHome, writeSharedAuth });
+  } finally {
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+async function withEnvironment(variables, run) {
+  const previous = Object.fromEntries(Object.keys(variables).map(key => [key, process.env[key]]));
+  Object.assign(process.env, variables);
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+const streamOptions = executions => ({
+  conversationId: 'conversation-shared',
+  tools: CHAT_TOOLS,
+  executeTool: async () => {
+    executions.count += 1;
+    return { success: true, content: 'opened' };
+  },
+});
 
 test('follows Codex Switcher only when it is installed and not opted out', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-switcher-home-'));
   try {
     assert.equal(resolveCodexSwitcherAuthPath(home, {}), undefined);
-    await writeAuth(path.join(home, '.codex-switcher', 'accounts.json'), 'unused');
+    await fs.mkdir(path.join(home, '.codex-switcher'));
+    await fs.writeFile(path.join(home, '.codex-switcher', 'accounts.json'), '{}');
     assert.equal(resolveCodexSwitcherAuthPath(home, {}), path.join(home, '.codex', 'auth.json'));
     assert.equal(resolveCodexSwitcherAuthPath(home, { JARVIS_CODEX_PRIVATE_AUTH: '1' }), undefined);
   } finally {
@@ -384,86 +458,180 @@ test('follows Codex Switcher only when it is installed and not opted out', async
   }
 });
 
-test('links the private runtime auth to the shared file and keeps the old login', async () => {
-  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-link-'));
-  const codexHome = path.join(temporaryRoot, 'codex-home');
-  const sharedAuthPath = path.join(temporaryRoot, 'shared', 'auth.json');
-  try {
-    await writeAuth(path.join(codexHome, 'auth.json'), 'private-account');
-    await writeAuth(sharedAuthPath, 'shared-account');
+test('identifies shared accounts by workspace and user, not by token', async () => {
+  await withSharedAuthFixture('jarvis-shared-identity-', async ({ sharedAuthPath, writeSharedAuth }) => {
+    assert.equal(await readSharedCodexCredential(sharedAuthPath), null);
+    await fs.writeFile(sharedAuthPath, '{"tokens":');
+    assert.equal(await readSharedCodexCredential(sharedAuthPath), null);
 
-    await linkSharedCodexAuth(codexHome, sharedAuthPath);
-    await linkSharedCodexAuth(codexHome, sharedAuthPath);
+    await writeSharedAuth('alice');
+    const alice = await readSharedCodexCredential(sharedAuthPath);
+    assert.equal(alice.accountId, 'workspace');
+    assert.equal(alice.userId, 'alice');
+    assert.equal(alice.planType, 'plus');
+    assert.ok(alice.expiresAt > Date.now());
 
-    assert.equal(await fs.readlink(path.join(codexHome, 'auth.json')), sharedAuthPath);
-    const backup = JSON.parse(await fs.readFile(path.join(codexHome, 'auth.json.jarvis-private'), 'utf8'));
-    assert.equal(backup.tokens.account_id, 'private-account');
-  } finally {
-    await fs.rm(temporaryRoot, { recursive: true, force: true });
-  }
+    await writeSharedAuth('alice', { expiresInSeconds: 7200 });
+    const refreshedAlice = await readSharedCodexCredential(sharedAuthPath);
+    assert.notEqual(refreshedAlice.accessToken, alice.accessToken);
+    assert.equal(sharedCredentialIdentity(refreshedAlice), sharedCredentialIdentity(alice));
+
+    await writeSharedAuth('bob');
+    const bobSameWorkspace = await readSharedCodexCredential(sharedAuthPath);
+    assert.notEqual(sharedCredentialIdentity(bobSameWorkspace), sharedCredentialIdentity(alice));
+  });
 });
 
-test('restarts the app-server when Codex Switcher changes the active account', async () => {
-  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-switch-'));
-  const sharedAuthPath = path.join(temporaryRoot, 'shared', 'auth.json');
-  const client = new CodexAppServerClient({
-    binaryPath: path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js'),
-    codexHome: path.join(temporaryRoot, 'codex-home'),
-    workspaceRoot: path.join(temporaryRoot, 'workspace'),
-    openExternal: async () => undefined,
-    sharedAuthPath,
+test('switches accounts with Codex Switcher without writing any auth file', async () => {
+  await withSharedAuthFixture('jarvis-shared-switch-', async ({ options, sharedAuthPath, codexHome, writeSharedAuth }) => {
+    const privateAuth = '{"tokens":{"access_token":"private-login"}}';
+    await fs.mkdir(codexHome, { recursive: true });
+    await fs.writeFile(path.join(codexHome, 'auth.json'), privateAuth);
+    const client = new CodexAppServerClient(options);
+    try {
+      await writeSharedAuth('first');
+      assert.equal((await client.getAccountStatus()).email, 'first@example.com');
+      assert.deepEqual((await client.listModels()).map(model => model.model), ['model-for-first']);
+
+      await writeSharedAuth('second');
+      const sharedBefore = await fs.readFile(sharedAuthPath, 'utf8');
+      assert.equal((await client.loginChatGpt()).email, 'second@example.com');
+      assert.deepEqual((await client.listModels()).map(model => model.model), ['model-for-second']);
+
+      await assert.rejects(client.logout(), /Codex Switcher/);
+      assert.equal(await fs.readFile(sharedAuthPath, 'utf8'), sharedBefore);
+      assert.equal(await fs.readFile(path.join(codexHome, 'auth.json'), 'utf8'), privateAuth);
+    } finally {
+      await client.stop();
+    }
   });
-
-  try {
-    await writeAuth(sharedAuthPath, 'first-account');
-    assert.equal((await client.getAccountStatus()).email, 'first-account@example.com');
-
-    await writeAuth(sharedAuthPath, 'second-account');
-    assert.equal((await client.getAccountStatus()).email, 'second-account@example.com');
-
-    await assert.rejects(client.logout(), /Codex Switcher/);
-  } finally {
-    await client.stop();
-    await fs.rm(temporaryRoot, { recursive: true, force: true });
-  }
 });
 
-test('retries a usage-limited turn on the account Codex Switcher moved to', async () => {
-  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-limit-'));
-  const sharedAuthPath = path.join(temporaryRoot, 'shared', 'auth.json');
-  const provider = new CodexProvider({
-    binaryPath: path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js'),
-    codexHome: path.join(temporaryRoot, 'codex-home'),
-    workspaceRoot: path.join(temporaryRoot, 'workspace'),
-    openExternal: async () => undefined,
-    sharedAuthPath,
+test('reports a missing or expired Codex Switcher login instead of signing in', async () => {
+  await withSharedAuthFixture('jarvis-shared-missing-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const messages = [{ role: 'user', content: 'Question' }];
+    try {
+      assert.deepEqual(await provider.getAccountStatus(), { connected: false, type: null });
+      await assert.rejects(
+        provider.streamChat('codex:gpt-test', messages, new AbortController(), () => undefined),
+        /no ChatGPT account is active/,
+      );
+
+      await writeSharedAuth('stale', { expiresInSeconds: -60 });
+      await assert.rejects(provider.connectAccount(), /has expired/);
+    } finally {
+      await provider.shutdown();
+    }
   });
-  const options = {
-    conversationId: 'conversation-limit',
-    tools: CHAT_TOOLS,
-    executeTool: async () => ({ success: true, content: 'opened' }),
-  };
-  const messages = [{ role: 'user', content: 'Question' }];
-  const streamOnce = () => provider.streamChat(
-    'codex:gpt-test',
-    messages,
-    new AbortController(),
-    () => undefined,
-    options,
-  );
+});
 
-  try {
-    await writeAuth(sharedAuthPath, 'exhausted-account');
-    await assert.rejects(streamOnce(), /usage limit[\s\S]*Switch to another account in Codex Switcher/);
+test('answers app-server token refreshes from the Codex Switcher file', async () => {
+  await withSharedAuthFixture('jarvis-shared-refresh-', async ({ options, writeSharedAuth }) => {
+    const client = new CodexAppServerClient(options);
+    const runRefreshingTurn = async () => {
+      await writeSharedAuth('expiring');
+      await client.syncSharedAuth();
+      const threadId = await client.startThread({
+        model: 'gpt-test',
+        developerInstructions: 'test',
+        ephemeral: true,
+        dynamicTools: toCodexDynamicTools(CHAT_TOOLS),
+      });
+      return () => client.runTurn({
+        threadId,
+        model: 'gpt-test',
+        input: [{ type: 'text', text: 'Open the page.', text_elements: [] }],
+        onDelta: () => undefined,
+        onToolCall: async () => ({ success: true, content: 'opened' }),
+      });
+    };
+    try {
+      // Nobody refreshed the file, so Jarvis cannot supply a newer token.
+      const unrefreshedTurn = await runRefreshingTurn();
+      await assert.rejects(unrefreshedTurn(), /has expired/);
 
-    await provider.shutdown();
-    process.env.FAKE_CODEX_SWITCH_ACCOUNT_ON_LIMIT = 'fresh-account';
-    const result = await streamOnce();
-    assert.equal(result.assistantMessage.content, 'Tool completed.');
-    assert.equal((await provider.getAccountStatus()).email, 'fresh-account@example.com');
-  } finally {
-    delete process.env.FAKE_CODEX_SWITCH_ACCOUNT_ON_LIMIT;
-    await provider.shutdown();
-    await fs.rm(temporaryRoot, { recursive: true, force: true });
-  }
+      const refreshedTurn = await runRefreshingTurn();
+      await writeSharedAuth('refreshed');
+      assert.equal(await refreshedTurn(), 'Tool completed.');
+      assert.equal((await client.getAccountStatus()).email, 'refreshed@example.com');
+    } finally {
+      await client.stop();
+    }
+  });
+});
+
+test('retries a usage-limited turn once Codex Switcher selects another account', async () => {
+  await withSharedAuthFixture('jarvis-shared-limit-', async ({ options, sharedAuthPath, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const executions = { count: 0 };
+    const messages = [{ role: 'user', content: 'Question' }];
+    try {
+      await writeSharedAuth('exhausted');
+      const result = await withEnvironment({
+        FAKE_CODEX_SWITCH_ON_LIMIT: JSON.stringify({ authPath: sharedAuthPath, auth: fakeAuthJson('fresh') }),
+      }, () => provider.streamChat(
+        'codex:gpt-test',
+        messages,
+        new AbortController(),
+        () => undefined,
+        streamOptions(executions),
+      ));
+      assert.equal(result.assistantMessage.content, 'Tool completed.');
+      assert.equal(executions.count, 1);
+      assert.equal((await provider.getAccountStatus()).email, 'fresh@example.com');
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('does not retry a usage-limited turn that already produced output', async () => {
+  await withSharedAuthFixture('jarvis-shared-partial-', async ({ options, sharedAuthPath, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const executions = { count: 0 };
+    const chunks = [];
+    try {
+      await writeSharedAuth('exhausted');
+      await withEnvironment({
+        FAKE_CODEX_DELTA_BEFORE_LIMIT: '1',
+        FAKE_CODEX_SWITCH_ON_LIMIT: JSON.stringify({ authPath: sharedAuthPath, auth: fakeAuthJson('fresh') }),
+      }, () => assert.rejects(
+        provider.streamChat(
+          'codex:gpt-test',
+          [{ role: 'user', content: 'Question' }],
+          new AbortController(),
+          chunk => chunks.push(chunk.content),
+          streamOptions(executions),
+        ),
+        /Workspace credits are depleted[\s\S]*Switch to another account in Codex Switcher/,
+      ));
+      assert.deepEqual(chunks, ['Partial answer']);
+      assert.equal(executions.count, 0);
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('explains how to switch when the selected account is out of usage', async () => {
+  await withSharedAuthFixture('jarvis-shared-exhausted-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    try {
+      await writeSharedAuth('exhausted');
+      await assert.rejects(
+        provider.sendChat('codex:gpt-test', [{ role: 'user', content: 'Title this' }]),
+        /Workspace credits are depleted[\s\S]*Switch to another account in Codex Switcher/,
+      );
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('classifies usage limits from the structured Codex error first', () => {
+  assert.equal(isCodexUsageLimitError(new CodexTurnError('Workspace credits are depleted.', 'usageLimitExceeded')), true);
+  assert.equal(isCodexUsageLimitError(new CodexTurnError('You hit a rate limit.', 'serverOverloaded')), false);
+  assert.equal(isCodexUsageLimitError(new Error("You've hit your usage limit.")), true);
+  assert.equal(isCodexUsageLimitError(new Error('Rate limit exceeded, retrying.')), false);
 });
