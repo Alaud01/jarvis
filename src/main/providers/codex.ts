@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   CodexAppServerClient,
+  CodexTurnError,
   isMissingThreadError,
   type CodexAccountStatus,
   type CodexAppServerOptions,
@@ -8,6 +9,7 @@ import {
   type CodexDynamicTool,
   type CodexTokenUsageBreakdown,
   type CodexUserInput,
+  type SharedAccountSnapshot,
 } from '../codexAppServer';
 import type {
   ChatMessage,
@@ -35,9 +37,60 @@ export interface BuiltCodexTurnInput {
   conversationMessageCount: number;
 }
 
+/** Lets a request attempt report what the retry policy needs to know. */
+interface AccountAttempt {
+  /** The attempt streamed output or ran a tool, so retrying would duplicate it. */
+  markObserved(): void;
+  /**
+   * Holds the selected account fixed for the turn that follows. The hold is
+   * released when the attempt ends.
+   */
+  reserveTurnAccount(): Promise<SharedAccountSnapshot>;
+}
+
+const MAX_ACCOUNT_PREPARATIONS = 3;
+
+function accountFingerprintSuffix(identity: string | null): string {
+  return identity
+    ? `:account:${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`
+    : '';
+}
+
+function withLoginRefreshGuidance(error: unknown): Error {
+  const message = error instanceof Error ? error.message : 'Codex rejected the login.';
+  const guided = new Error(
+    `${message}\n\nThe login selected in Codex Switcher was rejected. Open Codex Switcher or the Codex app so it can refresh the login, then try again.`,
+  );
+  (guided as Error & { cause?: unknown }).cause = error;
+  return guided;
+}
+
+function isCodexAuthenticationError(error: unknown): boolean {
+  if (error instanceof CodexTurnError && error.codexErrorInfo !== null) {
+    return error.codexErrorInfo === 'unauthorized';
+  }
+  return error instanceof Error && /\b401 Unauthorized\b/.test(error.message);
+}
+
 interface PersistentThreadSelection {
   record: CodexConversationThreadRecord;
   replayRequired: boolean;
+}
+
+export function isCodexUsageLimitError(error: unknown): boolean {
+  if (error instanceof CodexTurnError && error.codexErrorInfo !== null) {
+    return error.codexErrorInfo === 'usageLimitExceeded';
+  }
+  return error instanceof Error && /usage limit|usage_limit_reached/i.test(error.message);
+}
+
+function withSwitcherGuidance(error: unknown): Error {
+  const message = error instanceof Error ? error.message : 'Codex usage limit reached.';
+  const guided = new Error(
+    `${message}\n\nSwitch to another account in Codex Switcher and resend; Jarvis uses the newly selected account automatically.`,
+  );
+  (guided as Error & { cause?: unknown }).cause = error;
+  return guided;
 }
 
 export function toCodexModelId(model: string): string {
@@ -199,6 +252,10 @@ export class CodexProvider implements Provider {
     this.client = new CodexAppServerClient(options);
   }
 
+  get followsCodexSwitcher(): boolean {
+    return this.client.followsSharedAuth;
+  }
+
   getApiKey(): string | null {
     return null;
   }
@@ -303,7 +360,113 @@ export class CodexProvider implements Provider {
     }
   }
 
+  /**
+   * Runs a request on the account selected in Codex Switcher. When the turn
+   * hits its usage limit and Switcher has since selected a different account,
+   * the request is retried once, but only if the failed attempt streamed no
+   * output and ran no tools, so nothing is duplicated.
+   */
+  private async runOnActiveAccount<T>(
+    run: (attempt: AccountAttempt) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    let observed = false;
+    let turnIdentity: string | null = null;
+    const attemptOnce = async (onObserved: () => void): Promise<T> => {
+      let release: () => void = () => undefined;
+      try {
+        return await run({
+          markObserved: onObserved,
+          reserveTurnAccount: async () => {
+            release();
+            const reservation = await this.client.reserveSharedAccountForTurn();
+            release = reservation.release;
+            turnIdentity = reservation.identity;
+            return reservation;
+          },
+        });
+      } finally {
+        release();
+      }
+    };
+
+    if (!this.client.followsSharedAuth) return attemptOnce(() => undefined);
+
+    try {
+      return await attemptOnce(() => {
+        observed = true;
+      });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (isCodexAuthenticationError(error)) throw withLoginRefreshGuidance(error);
+      if (!isCodexUsageLimitError(error)) throw error;
+      const currentIdentity = await this.client.readSharedAccountIdentity().catch(() => null);
+      if (observed || !turnIdentity || !currentIdentity || currentIdentity === turnIdentity) {
+        throw withSwitcherGuidance(error);
+      }
+    }
+
+    try {
+      return await attemptOnce(() => undefined);
+    } catch (error) {
+      if (isCodexAuthenticationError(error)) throw withLoginRefreshGuidance(error);
+      throw isCodexUsageLimitError(error) ? withSwitcherGuidance(error) : error;
+    }
+  }
+
+  /**
+   * Prepares a thread for the selected account, then reserves that account
+   * for the turn. Codex opens a thread's model connection when the thread is
+   * created or resumed, as whichever account is supplied at that moment. If
+   * the supplied account changed at all during preparation, even if it then
+   * changed back, the prepared thread may hold another account's connection,
+   * so it is discarded and the thread is prepared again.
+   */
+  private async prepareOnReservedAccount<T>(
+    attempt: AccountAttempt,
+    prepare: (accountIdentity: string | null) => Promise<T>,
+    discard: (result: T) => Promise<void>,
+  ): Promise<T> {
+    for (let preparation = 1; ; preparation += 1) {
+      const prepared = await this.client.syncSharedAccount();
+      const result = await prepare(prepared.identity);
+      if ((await attempt.reserveTurnAccount()).generation === prepared.generation) return result;
+      await discard(result);
+      if (preparation >= MAX_ACCOUNT_PREPARATIONS) {
+        throw new Error('The Codex Switcher account kept changing while Jarvis prepared this request. Try again.');
+      }
+    }
+  }
+
   async streamChat(
+    modelId: string,
+    messages: ChatMessage[],
+    abortController: AbortController,
+    onChunk: (chunk: StreamChunk) => void,
+    options?: StreamChatTurnOptions,
+  ): Promise<StreamTurnResult> {
+    const executeTool = options?.executeTool;
+    return this.runOnActiveAccount(attempt => this.streamChatOnActiveAccount(
+      attempt,
+      modelId,
+      messages,
+      abortController,
+      chunk => {
+        attempt.markObserved();
+        onChunk(chunk);
+      },
+      options && {
+        ...options,
+        executeTool: executeTool && ((tool, argumentsValue) => {
+          attempt.markObserved();
+          return executeTool(tool, argumentsValue);
+        }),
+      },
+    ), abortController.signal);
+  }
+
+  private async streamChatOnActiveAccount(
+    attempt: AccountAttempt,
     modelId: string,
     messages: ChatMessage[],
     abortController: AbortController,
@@ -321,7 +484,7 @@ export class CodexProvider implements Provider {
     const dynamicTools = executeTool
       ? toCodexDynamicTools(options.tools ?? [])
       : [];
-    const toolSchemaFingerprint = fingerprintCodexDynamicTools(dynamicTools)
+    const toolAndBranchFingerprint = fingerprintCodexDynamicTools(dynamicTools)
       + (options?.contextKey ? `:branch:${options.contextKey}` : '');
     const onToolCall = executeTool
       ? (tool: string, argumentsValue: Record<string, unknown>) => (
@@ -344,12 +507,12 @@ export class CodexProvider implements Provider {
 
     if (!conversationId) {
       const builtInput = buildCodexTurnInput(messages, 0);
-      const threadId = await this.client.startThread({
+      const threadId = await this.prepareOnReservedAccount(attempt, () => this.client.startThread({
         model,
         developerInstructions,
         ephemeral: true,
         dynamicTools,
-      });
+      }), async () => undefined);
       const content = await this.client.runTurn({
         threadId,
         model,
@@ -367,20 +530,31 @@ export class CodexProvider implements Provider {
     }
 
     const sourceConversationMessages = getConversationMessages(messages);
-    const selection = await this.getOrStartPersistentThread(
-      conversationId,
-      model,
-      developerInstructions,
-      messages,
-      dynamicTools,
-      toolSchemaFingerprint,
-    );
-    const turnMessages = selection.replayRequired
-      ? await options?.prepareReplayMessages?.(messages) ?? messages
-      : messages;
-    const builtInput = buildCodexTurnInput(
-      turnMessages,
-      selection.replayRequired ? 0 : selection.record.syncedMessageCount,
+    const { selection, builtInput, toolSchemaFingerprint } = await this.prepareOnReservedAccount(
+      attempt,
+      async accountIdentity => {
+        // Codex keeps a thread's model connection open across turns, so a
+        // thread must not outlive an account switch. Binding the account into
+        // the fingerprint replays the conversation into a fresh thread.
+        const toolSchemaFingerprint = toolAndBranchFingerprint + accountFingerprintSuffix(accountIdentity);
+        const selection = await this.getOrStartPersistentThread(
+          conversationId,
+          model,
+          developerInstructions,
+          messages,
+          dynamicTools,
+          toolSchemaFingerprint,
+        );
+        const turnMessages = selection.replayRequired
+          ? await options?.prepareReplayMessages?.(messages) ?? messages
+          : messages;
+        const builtInput = buildCodexTurnInput(
+          turnMessages,
+          selection.replayRequired ? 0 : selection.record.syncedMessageCount,
+        );
+        return { selection, builtInput, toolSchemaFingerprint };
+      },
+      () => this.client.deleteConversationThread(conversationId),
     );
 
     try {
@@ -427,6 +601,15 @@ export class CodexProvider implements Provider {
     messages: ChatMessage[],
     _options?: SendChatOptions,
   ): Promise<string> {
+    // sendChat streams nothing and runs no tools, so a retry duplicates nothing.
+    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages));
+  }
+
+  private async sendChatOnActiveAccount(
+    attempt: AccountAttempt,
+    modelId: string,
+    messages: ChatMessage[],
+  ): Promise<string> {
     const account = await this.client.ensureChatGptAccount();
     if (account.type !== 'chatgpt') {
       throw new Error('Jarvis Codex requires ChatGPT subscription authentication; API-key billing is disabled.');
@@ -434,12 +617,12 @@ export class CodexProvider implements Provider {
     const model = fromCodexModelId(modelId);
     const developerInstructions = buildDeveloperInstructions(messages);
     const builtInput = buildCodexTurnInput(messages, 0);
-    const threadId = await this.client.startThread({
+    const threadId = await this.prepareOnReservedAccount(attempt, () => this.client.startThread({
       model,
       developerInstructions,
       ephemeral: true,
       dynamicTools: [],
-    });
+    }), async () => undefined);
     return this.client.runTurn({
       threadId,
       model,

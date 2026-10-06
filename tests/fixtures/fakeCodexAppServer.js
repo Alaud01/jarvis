@@ -1,10 +1,68 @@
 #!/usr/bin/env node
 
+const fs = require('node:fs');
 const readline = require('node:readline');
 
 const lines = readline.createInterface({ input: process.stdin });
 let activeTurn = null;
 let turnCount = 0;
+// Like the real app-server, external (chatgptAuthTokens) auth is memory-only.
+let externalAccount = null;
+let nextServerRequestId = 5000;
+const pendingServerRequests = new Map();
+let threadCount = 0;
+let exhaustedAttempts = 0;
+// Per thread: the declared dynamic tools, and the account whose model
+// connection the thread keeps open (real Codex reuses it across turns).
+const threads = new Map();
+
+function accountFromAccessToken(accessToken) {
+  const claims = JSON.parse(Buffer.from(accessToken.split('.')[1], 'base64url').toString('utf8'));
+  return claims['https://api.openai.com/auth'].chatgpt_user_id;
+}
+
+function failTurn(threadId, turnId, message, codexErrorInfo = null) {
+  send({
+    method: 'turn/completed',
+    params: { threadId, turn: { id: turnId, status: 'failed', error: { message, codexErrorInfo } } },
+  });
+}
+
+function finishWithText(threadId, turnId, text) {
+  send({
+    method: 'item/started',
+    params: { threadId, turnId, item: { type: 'agentMessage', id: 'message-text', phase: 'final_answer' } },
+  });
+  send({
+    method: 'item/agentMessage/delta',
+    params: { threadId, turnId, itemId: 'message-text', delta: text },
+  });
+  send({
+    method: 'turn/completed',
+    params: { threadId, turn: { id: turnId, status: 'completed', error: null } },
+  });
+}
+
+// Only threads that declared Jarvis tools receive tool calls.
+function respondToTurn(thread, threadId, turnId, requestId) {
+  if (thread.hasTools) startToolCall(threadId, turnId, requestId);
+  else finishWithText(threadId, turnId, thread.account ? `Answer by ${thread.account}.` : 'Answer.');
+}
+
+function startToolCall(threadId, turnId, requestId) {
+  send({
+    id: requestId,
+    method: 'item/tool/call',
+    params: {
+      threadId,
+      turnId,
+      callId: 'call-test',
+      namespace: 'jarvis',
+      tool: 'browser_open',
+      arguments: { url: 'https://example.com' },
+    },
+  });
+}
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -33,26 +91,59 @@ lines.on('line', line => {
     return;
   }
 
+  if (message.method === 'account/login/start' && message.params?.type === 'chatgptAuthTokens') {
+    externalAccount = accountFromAccessToken(message.params.accessToken);
+    send({ id: message.id, result: { type: 'chatgptAuthTokens' } });
+    send({ method: 'account/login/completed', params: { loginId: null, success: true, error: null } });
+    return;
+  }
+
   if (message.method === 'account/read') {
     send({
       id: message.id,
-      result: { account: { type: 'chatgpt', email: 'test@example.com', planType: 'test' } },
+      result: {
+        account: {
+          type: 'chatgpt',
+          email: externalAccount ? `${externalAccount}@example.com` : 'test@example.com',
+          planType: 'test',
+        },
+      },
     });
     return;
   }
 
+  if (message.method === 'model/list') {
+    send({ id: message.id, result: { data: [{ model: `model-for-${externalAccount ?? 'private'}` }] } });
+    return;
+  }
+
+  if (!message.method && pendingServerRequests.has(message.id)) {
+    const onResponse = pendingServerRequests.get(message.id);
+    pendingServerRequests.delete(message.id);
+    onResponse(message);
+    return;
+  }
+
   if (message.method === 'thread/resume') {
+    // Resuming an unloaded thread opens a new connection; a loaded one keeps its own.
+    if (!threads.has(message.params.threadId)) {
+      threads.set(message.params.threadId, { hasTools: true, account: externalAccount });
+    }
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
     return;
   }
 
   if (message.method === 'thread/start') {
-    const namespace = message.params?.dynamicTools?.[0];
-    if (namespace?.type !== 'namespace' || namespace?.name !== 'jarvis') {
+    const dynamicTools = message.params?.dynamicTools ?? [];
+    const namespace = dynamicTools[0];
+    if (dynamicTools.length > 0 && (namespace?.type !== 'namespace' || namespace?.name !== 'jarvis')) {
       fail(message.id, 'Jarvis dynamic tools were not provided');
       return;
     }
-    send({ id: message.id, result: { thread: { id: 'thread-test' } } });
+    threadCount += 1;
+    const threadId = `thread-test-${threadCount}`;
+    threads.set(threadId, { hasTools: dynamicTools.length > 0, account: externalAccount });
+    send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
 
@@ -60,20 +151,57 @@ lines.on('line', line => {
     turnCount += 1;
     activeTurn = { threadId: message.params.threadId, turnId: `turn-test-${turnCount}`, requestId: 9000 + turnCount };
     send({ id: message.id, result: { turn: { id: activeTurn.turnId } } });
-    setImmediate(() => {
-      send({
-        id: activeTurn.requestId,
-        method: 'item/tool/call',
-        params: {
-          threadId: activeTurn.threadId,
-          turnId: activeTurn.turnId,
-          callId: 'call-test',
-          namespace: 'jarvis',
-          tool: 'browser_open',
-          arguments: { url: 'https://example.com' },
-        },
+    const { threadId, turnId, requestId } = activeTurn;
+    const thread = threads.get(threadId);
+    activeTurn.account = thread.account;
+
+    if (thread.account === 'exhausted') {
+      setImmediate(() => {
+        if (process.env.FAKE_CODEX_DELTA_BEFORE_LIMIT === '1') {
+          send({
+            method: 'item/agentMessage/delta',
+            params: { threadId, turnId, itemId: 'partial', delta: 'Partial answer' },
+          });
+        }
+        // Simulates Codex Switcher selecting another account mid-turn.
+        if (process.env.FAKE_CODEX_SWITCH_ON_LIMIT) {
+          const { authPath, auth } = JSON.parse(process.env.FAKE_CODEX_SWITCH_ON_LIMIT);
+          fs.writeFileSync(authPath, auth);
+        }
+        // A real usage-limit message that does not say "usage limit".
+        exhaustedAttempts += 1;
+        failTurn(threadId, turnId, `Workspace credits are depleted (attempt ${exhaustedAttempts}).`, 'usageLimitExceeded');
       });
-    });
+      return;
+    }
+
+    if (thread.account === 'expiring') {
+      // The backend rejected the token; ask the client for a fresh one.
+      const refreshId = nextServerRequestId++;
+      pendingServerRequests.set(refreshId, response => {
+        if (response.error) {
+          failTurn(threadId, turnId, response.error.message, 'unauthorized');
+          return;
+        }
+        const refreshedAccount = accountFromAccessToken(response.result.accessToken);
+        if (refreshedAccount === 'expiring') {
+          failTurn(threadId, turnId, 'Your access token could not be refreshed.', 'unauthorized');
+          return;
+        }
+        externalAccount = refreshedAccount;
+        thread.account = refreshedAccount;
+        activeTurn.account = refreshedAccount;
+        respondToTurn(thread, threadId, turnId, requestId);
+      });
+      send({
+        id: refreshId,
+        method: 'account/chatgptAuthTokens/refresh',
+        params: { reason: 'unauthorized', previousAccountId: 'workspace' },
+      });
+      return;
+    }
+
+    setImmediate(() => respondToTurn(thread, threadId, turnId, requestId));
     return;
   }
 
@@ -116,7 +244,7 @@ lines.on('line', line => {
         threadId: activeTurn.threadId,
         turnId: activeTurn.turnId,
         itemId: 'message-test',
-        delta: 'Tool completed.',
+        delta: activeTurn.account ? `Tool completed by ${activeTurn.account}.` : 'Tool completed.',
       },
     });
     send({

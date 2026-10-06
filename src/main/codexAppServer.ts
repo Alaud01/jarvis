@@ -4,11 +4,22 @@ import * as fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
+import {
+  isSharedCredentialExpired,
+  readSharedCodexCredential,
+  SHARED_AUTH_EXPIRED_MESSAGE,
+  SHARED_AUTH_MANAGED_MESSAGE,
+  SHARED_AUTH_MISSING_MESSAGE,
+  SharedCodexAuthError,
+  sharedCredentialIdentity,
+  type SharedCodexCredential,
+} from './codexSharedAuth';
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 30_000;
 const CODEX_TURN_TIMEOUT_MS = 15 * 60_000;
 const CODEX_LOGIN_TIMEOUT_MS = 5 * 60_000;
 const STATE_VERSION = 1;
+const SHARED_AUTH_REREAD_DELAY_MS = 100;
 
 const PLATFORM_PACKAGE_BY_TARGET: Record<string, string> = {
   'x86_64-unknown-linux-musl': '@openai/codex-linux-x64',
@@ -40,7 +51,7 @@ interface TurnWaiter {
   resolve: (text: string) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
-  error?: string;
+  error?: TurnFailure;
 }
 
 export interface CodexDynamicToolFunction {
@@ -78,12 +89,17 @@ interface EarlyTurnEvents {
   deltas: Array<{ delta: string; phase?: CodexMessagePhase }>;
   tokenUsage?: CodexTokenUsageBreakdown[];
   completion?: TurnCompletion;
-  error?: string;
+  error?: TurnFailure;
+}
+
+interface TurnFailure {
+  message: string;
+  codexErrorInfo: unknown;
 }
 
 interface TurnCompletion {
   status: string;
-  error?: string;
+  error?: TurnFailure;
 }
 
 interface LoginCompletion {
@@ -164,6 +180,12 @@ export interface CodexAppServerOptions {
   workspaceRoot: string;
   openExternal: (url: string) => Promise<void>;
   binaryPath?: string;
+  /**
+   * auth.json managed by Codex Switcher. When set, Jarvis supplies that
+   * file's access token to the app-server as external auth instead of using
+   * its private login.
+   */
+  sharedAuthPath?: string;
 }
 
 export function buildChatGptLoginParams(): {
@@ -174,6 +196,28 @@ export function buildChatGptLoginParams(): {
     type: 'chatgpt',
     useHostedLoginSuccessPage: false,
   };
+}
+
+/** A failed Codex turn, carrying the app-server's structured error code. */
+export class CodexTurnError extends Error {
+  constructor(message: string, readonly codexErrorInfo: unknown) {
+    super(message);
+    this.name = 'CodexTurnError';
+  }
+}
+
+/**
+ * The Codex Switcher account supplied to the app-server. `generation`
+ * increases whenever the supplied account changes, so callers can detect a
+ * switch even if it later switched back to the same account.
+ */
+export interface SharedAccountSnapshot {
+  identity: string | null;
+  generation: number;
+}
+
+export interface SharedAccountReservation extends SharedAccountSnapshot {
+  release: () => void;
 }
 
 export class CodexAppServerError extends Error {
@@ -392,11 +436,15 @@ function abortError(): Error {
 
 function turnCompletionFromParams(params: Record<string, unknown>): TurnCompletion {
   const turn = isRecord(params.turn) ? params.turn : {};
-  const turnError = isRecord(turn.error) ? turn.error : {};
   return {
     status: typeof turn.status === 'string' ? turn.status : 'failed',
-    error: typeof turnError.message === 'string' ? turnError.message : undefined,
+    error: turnFailureFromValue(turn.error),
   };
+}
+
+function turnFailureFromValue(value: unknown): TurnFailure | undefined {
+  if (!isRecord(value) || typeof value.message !== 'string') return undefined;
+  return { message: value.message, codexErrorInfo: value.codexErrorInfo ?? null };
 }
 
 function accountStatusFromResponse(response: unknown): CodexAccountStatus {
@@ -459,6 +507,10 @@ export class CodexAppServerClient {
   private stateWritePromise: Promise<void> = Promise.resolve();
   private stopping = false;
   private stderrTail = '';
+  private suppliedSharedCredential: SharedCodexCredential | null = null;
+  private sharedAuthQueue: Promise<unknown> = Promise.resolve();
+  private sharedTurnReservations = 0;
+  private sharedAuthGeneration = 0;
 
   constructor(private readonly options: CodexAppServerOptions) {}
 
@@ -645,7 +697,9 @@ export class CodexAppServerClient {
       waiter.reject(abortError());
       return;
     }
-    waiter.reject(new Error(completionError ?? `Codex turn ended with status ${completion.status}.`));
+    waiter.reject(completionError
+      ? new CodexTurnError(completionError.message, completionError.codexErrorInfo)
+      : new Error(`Codex turn ended with status ${completion.status}.`));
   }
 
   private handleTurnCompletion(params: Record<string, unknown>): void {
@@ -657,14 +711,15 @@ export class CodexAppServerClient {
 
   private handleTurnError(params: Record<string, unknown>): void {
     const threadId = typeof params.threadId === 'string' ? params.threadId : null;
-    const error = isRecord(params.error) ? params.error : {};
-    const message = typeof error.message === 'string' ? error.message : 'Codex turn failed.';
-    if (!threadId) return;
+    // Codex retries transient stream errors itself; only terminal ones fail the turn.
+    if (!threadId || params.willRetry === true) return;
+    const failure = turnFailureFromValue(params.error)
+      ?? { message: 'Codex turn failed.', codexErrorInfo: null };
 
     const waiterEntry = [...this.turnWaiters.entries()].find(([, waiter]) => waiter.threadId === threadId);
     if (waiterEntry) {
       const [, waiter] = waiterEntry;
-      waiter.error = message;
+      waiter.error = failure;
     }
   }
 
@@ -713,6 +768,10 @@ export class CodexAppServerClient {
 
   private async handleServerRequest(message: Record<string, unknown>): Promise<void> {
     const id = message.id;
+    if (message.method === 'account/chatgptAuthTokens/refresh' && this.options.sharedAuthPath) {
+      await this.answerSharedAuthRefresh(id);
+      return;
+    }
     if (message.method !== 'item/tool/call') {
       this.send({
         id,
@@ -818,6 +877,9 @@ export class CodexAppServerClient {
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     const wasStopping = this.stopping;
     this.child = null;
+    // External auth lives only in the app-server's memory.
+    this.suppliedSharedCredential = null;
+    this.sharedAuthGeneration += 1;
     this.startPromise = null;
     this.stopping = false;
     const detail = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`;
@@ -895,7 +957,137 @@ export class CodexAppServerClient {
     await this.persistRuntimeState();
   }
 
+  get followsSharedAuth(): boolean {
+    return Boolean(this.options.sharedAuthPath);
+  }
+
+  /** Identity of the Codex Switcher account currently selected on disk. */
+  async readSharedAccountIdentity(): Promise<string | null> {
+    if (!this.options.sharedAuthPath) return null;
+    const credential = await readSharedCodexCredential(this.options.sharedAuthPath);
+    return credential ? sharedCredentialIdentity(credential) : null;
+  }
+
+  private async readUsableSharedCredential(): Promise<SharedCodexCredential> {
+    const authPath = this.options.sharedAuthPath as string;
+    let credential = await readSharedCodexCredential(authPath);
+    if (!credential) {
+      // Codex Switcher may be mid-rewrite; give it a moment before giving up.
+      await new Promise(resolve => setTimeout(resolve, SHARED_AUTH_REREAD_DELAY_MS));
+      credential = await readSharedCodexCredential(authPath);
+    }
+    if (!credential) throw new SharedCodexAuthError(SHARED_AUTH_MISSING_MESSAGE);
+    if (isSharedCredentialExpired(credential)) throw new SharedCodexAuthError(SHARED_AUTH_EXPIRED_MESSAGE);
+    return credential;
+  }
+
+  /**
+   * Supplies the Codex Switcher account to the app-server. Switching accounts
+   * takes effect for later requests without a restart. Returns the identity
+   * of the supplied account (null in private mode).
+   */
+  async syncSharedAuth(): Promise<string | null> {
+    return (await this.syncSharedAccount()).identity;
+  }
+
+  async syncSharedAccount(): Promise<SharedAccountSnapshot> {
+    if (!this.options.sharedAuthPath) return { identity: null, generation: 0 };
+    return this.syncSharedAuthStep(false);
+  }
+
+  /**
+   * Syncs, then holds the supplied account fixed until `release` so the turn
+   * opens its model connection as the account it reports.
+   */
+  async reserveSharedAccountForTurn(): Promise<SharedAccountReservation> {
+    if (!this.options.sharedAuthPath) return { identity: null, generation: 0, release: () => undefined };
+    const snapshot = await this.syncSharedAuthStep(true);
+    let released = false;
+    return {
+      ...snapshot,
+      release: () => {
+        if (released) return;
+        released = true;
+        this.sharedTurnReservations -= 1;
+      },
+    };
+  }
+
+  private supplySharedCredential(credential: SharedCodexCredential): void {
+    const previous = this.suppliedSharedCredential;
+    if (!previous || sharedCredentialIdentity(previous) !== sharedCredentialIdentity(credential)) {
+      this.sharedAuthGeneration += 1;
+    }
+    this.suppliedSharedCredential = credential;
+  }
+
+  private sharedAccountSnapshot(): SharedAccountSnapshot {
+    const supplied = this.suppliedSharedCredential;
+    return {
+      identity: supplied ? sharedCredentialIdentity(supplied) : null,
+      generation: this.sharedAuthGeneration,
+    };
+  }
+
+  private syncSharedAuthStep(reserve: boolean): Promise<SharedAccountSnapshot> {
+    // Serialized so reading, supplying, and reserving are one atomic step.
+    const sync = this.sharedAuthQueue.catch(() => undefined).then(async () => {
+      await this.ensureStarted();
+      const credential = await this.readUsableSharedCredential();
+      const supplied = this.suppliedSharedCredential;
+      const deferSwitch = supplied
+        && this.sharedTurnReservations > 0
+        && sharedCredentialIdentity(supplied) !== sharedCredentialIdentity(credential);
+      // A running turn's connection belongs to the supplied account. Defer the
+      // switch until no turn holds it rather than waiting, which could
+      // deadlock a request nested inside a turn.
+      if (!deferSwitch && credential.accessToken !== supplied?.accessToken) {
+        await this.requestStarted('account/login/start', {
+          type: 'chatgptAuthTokens',
+          accessToken: credential.accessToken,
+          chatgptAccountId: credential.accountId,
+          chatgptPlanType: credential.planType,
+        });
+        this.supplySharedCredential(credential);
+      }
+      if (reserve) this.sharedTurnReservations += 1;
+      return this.sharedAccountSnapshot();
+    });
+    this.sharedAuthQueue = sync;
+    return sync;
+  }
+
+  /**
+   * The app-server asks for a new token after a 401; Codex Switcher owns
+   * refreshing it, so answer with whatever the file holds now. The rejected
+   * token may be older than the last one Jarvis supplied, and Codex retries
+   * only once after a refresh, so this cannot loop.
+   */
+  private async answerSharedAuthRefresh(id: unknown): Promise<void> {
+    try {
+      const credential = await this.readUsableSharedCredential();
+      this.supplySharedCredential(credential);
+      this.send({
+        id,
+        result: {
+          accessToken: credential.accessToken,
+          chatgptAccountId: credential.accountId,
+          chatgptPlanType: credential.planType,
+        },
+      });
+    } catch (error) {
+      this.send({
+        id,
+        error: {
+          code: -32000,
+          message: error instanceof Error ? error.message : SHARED_AUTH_EXPIRED_MESSAGE,
+        },
+      });
+    }
+  }
+
   async listModels(): Promise<CodexModel[]> {
+    await this.syncSharedAuth();
     const result = await this.request<unknown>('model/list', { limit: 100, includeHidden: false });
     if (!isRecord(result) || !Array.isArray(result.data)) return [];
     return result.data.flatMap(rawModel => {
@@ -924,6 +1116,14 @@ export class CodexAppServerClient {
   }
 
   async getAccountStatus(refreshToken = false): Promise<CodexAccountStatus> {
+    if (this.options.sharedAuthPath) {
+      try {
+        await this.syncSharedAuth();
+      } catch (error) {
+        if (error instanceof SharedCodexAuthError) return { connected: false, type: null };
+        throw error;
+      }
+    }
     const response = await this.request<unknown>('account/read', { refreshToken });
     return accountStatusFromResponse(response);
   }
@@ -952,6 +1152,11 @@ export class CodexAppServerClient {
   }
 
   async loginChatGpt(): Promise<CodexAccountStatus> {
+    if (this.options.sharedAuthPath) {
+      // Never open a browser login: it would replace the Switcher's account.
+      await this.syncSharedAuth();
+      return this.getAccountStatus();
+    }
     if (this.loginPromise) return this.loginPromise;
     this.loginPromise = (async () => {
       const current = await this.getAccountStatus();
@@ -994,12 +1199,17 @@ export class CodexAppServerClient {
   }
 
   async ensureChatGptAccount(): Promise<CodexAccountStatus> {
+    if (this.options.sharedAuthPath) {
+      await this.syncSharedAuth();
+      return this.getAccountStatus();
+    }
     const account = await this.getAccountStatus();
     if (account.connected && account.type === 'chatgpt') return account;
     return this.loginChatGpt();
   }
 
   async logout(): Promise<void> {
+    if (this.options.sharedAuthPath) throw new Error(SHARED_AUTH_MANAGED_MESSAGE);
     await this.clearConversationThreads();
     await this.request('account/logout');
   }

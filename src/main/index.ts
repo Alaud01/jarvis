@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { app, BrowserWindow, dialog, Menu, ipcMain, shell } from 'electron';
 import { startPythonService } from './pythonService';
@@ -6,6 +7,7 @@ import { initializeVoiceFlow, registerVoiceFlowIPC } from './voiceFlow';
 import { setOverlayThemeBackground } from './overlayWindow';
 import { getCodexProvider, initializeProviders } from './providers/registry';
 import { deleteLegacyStoredProviderApiKeys } from './store';
+import { resolveCodexSwitcherAuthPath } from './codexSharedAuth';
 import {
   buildAppMenu,
   broadcastMenuAction,
@@ -73,6 +75,7 @@ app.whenReady().then(async () => {
       codexHome: path.join(app.getPath('userData'), 'codex-runtime'),
       workspaceRoot: path.join(app.getPath('userData'), 'codex-workspace'),
       openExternal: url => shell.openExternal(url),
+      sharedAuthPath: resolveCodexSwitcherAuthPath(os.homedir(), process.env),
     },
   );
   await initializeNotionMcp();
@@ -90,9 +93,13 @@ app.whenReady().then(async () => {
           await dialog.showMessageBox({
             type: 'info',
             title: 'Codex connected',
-            message: 'Jarvis is connected to your ChatGPT account.',
+            message: provider.followsCodexSwitcher
+              ? 'Jarvis is using the account selected in Codex Switcher.'
+              : 'Jarvis is connected to your ChatGPT account.',
             detail: [
-              accountLabel || 'The account is stored only in Jarvis’s private Codex runtime.',
+              accountLabel || (provider.followsCodexSwitcher
+                ? 'Switching accounts in Codex Switcher switches Jarvis too.'
+                : 'The account is stored only in Jarvis’s private Codex runtime.'),
               models.length > 0
                 ? `${models.length} Codex models are available. Choose one with the model button at the lower-left of the chat composer.`
                 : 'Codex returned no picker-visible models. Use Codex → Refresh Models after checking the account.',
@@ -109,6 +116,15 @@ app.whenReady().then(async () => {
     },
     onDisconnectCodex: () => {
       void (async () => {
+        if (getCodexProvider()?.followsCodexSwitcher) {
+          await dialog.showMessageBox({
+            type: 'info',
+            title: 'Managed by Codex Switcher',
+            message: 'Jarvis uses the account selected in Codex Switcher.',
+            detail: 'Switch or sign out in Codex Switcher; Jarvis follows it automatically.',
+          });
+          return;
+        }
         const confirmation = await dialog.showMessageBox({
           type: 'warning',
           buttons: ['Cancel', 'Disconnect'],
