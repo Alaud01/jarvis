@@ -40,6 +40,11 @@ interface PersistentThreadSelection {
   replayRequired: boolean;
 }
 
+export function isCodexUsageLimitError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return /usage limit|usage_limit|usageLimitExceeded|rate limit|token limit|quota/i.test(error.message);
+}
+
 export function toCodexModelId(model: string): string {
   return `${CODEX_MODEL_PREFIX}${model}`;
 }
@@ -199,6 +204,10 @@ export class CodexProvider implements Provider {
     this.client = new CodexAppServerClient(options);
   }
 
+  get followsCodexSwitcher(): boolean {
+    return this.client.followsSharedAuth;
+  }
+
   getApiKey(): string | null {
     return null;
   }
@@ -303,7 +312,47 @@ export class CodexProvider implements Provider {
     }
   }
 
+  /**
+   * Runs an operation against the account currently active in Codex Switcher.
+   * If the account hits its limit and the user (or Switcher) has since moved
+   * to another account, the operation is retried once on the new account.
+   */
+  private async runOnActiveAccount<T>(
+    operation: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    try {
+      return await this.client.withAccountSync(operation);
+    } catch (error) {
+      if (!this.client.followsSharedAuth || !isCodexUsageLimitError(error) || signal?.aborted) {
+        throw error;
+      }
+      if (await this.client.hasSharedAccountChanged()) {
+        return this.client.withAccountSync(operation);
+      }
+      const limitError = new Error(
+        `${error instanceof Error ? error.message : 'Codex usage limit reached.'}\n\n`
+        + 'Switch to another account in Codex Switcher and resend; Jarvis uses the newly active account automatically.',
+      );
+      (limitError as Error & { cause?: unknown }).cause = error;
+      throw limitError;
+    }
+  }
+
   async streamChat(
+    modelId: string,
+    messages: ChatMessage[],
+    abortController: AbortController,
+    onChunk: (chunk: StreamChunk) => void,
+    options?: StreamChatTurnOptions,
+  ): Promise<StreamTurnResult> {
+    return this.runOnActiveAccount(
+      () => this.streamChatOnActiveAccount(modelId, messages, abortController, onChunk, options),
+      abortController.signal,
+    );
+  }
+
+  private async streamChatOnActiveAccount(
     modelId: string,
     messages: ChatMessage[],
     abortController: AbortController,
@@ -426,6 +475,13 @@ export class CodexProvider implements Provider {
     modelId: string,
     messages: ChatMessage[],
     _options?: SendChatOptions,
+  ): Promise<string> {
+    return this.runOnActiveAccount(() => this.sendChatOnActiveAccount(modelId, messages));
+  }
+
+  private async sendChatOnActiveAccount(
+    modelId: string,
+    messages: ChatMessage[],
   ): Promise<string> {
     const account = await this.client.ensureChatGptAccount();
     if (account.type !== 'chatgpt') {

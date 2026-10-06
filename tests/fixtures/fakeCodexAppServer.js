@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 
+const fs = require('node:fs');
+const path = require('node:path');
 const readline = require('node:readline');
+
+// Like the real app-server, auth is read once at startup and cached.
+const startupAccountId = (() => {
+  try {
+    const auth = JSON.parse(fs.readFileSync(path.join(process.env.CODEX_HOME, 'auth.json'), 'utf8'));
+    return auth.tokens?.account_id ?? null;
+  } catch {
+    return null;
+  }
+})();
 
 const lines = readline.createInterface({ input: process.stdin });
 let activeTurn = null;
@@ -36,7 +48,13 @@ lines.on('line', line => {
   if (message.method === 'account/read') {
     send({
       id: message.id,
-      result: { account: { type: 'chatgpt', email: 'test@example.com', planType: 'test' } },
+      result: {
+        account: {
+          type: 'chatgpt',
+          email: startupAccountId ? `${startupAccountId}@example.com` : 'test@example.com',
+          planType: 'test',
+        },
+      },
     });
     return;
   }
@@ -60,6 +78,25 @@ lines.on('line', line => {
     turnCount += 1;
     activeTurn = { threadId: message.params.threadId, turnId: `turn-test-${turnCount}`, requestId: 9000 + turnCount };
     send({ id: message.id, result: { turn: { id: activeTurn.turnId } } });
+    if (startupAccountId === 'exhausted-account') {
+      const { threadId, turnId } = activeTurn;
+      const switchTo = process.env.FAKE_CODEX_SWITCH_ACCOUNT_ON_LIMIT;
+      if (switchTo) {
+        // Simulates Codex Switcher moving to another account mid-turn.
+        fs.writeFileSync(
+          path.join(process.env.CODEX_HOME, 'auth.json'),
+          JSON.stringify({ tokens: { account_id: switchTo } }),
+        );
+      }
+      setImmediate(() => send({
+        method: 'turn/completed',
+        params: {
+          threadId,
+          turn: { id: turnId, status: 'failed', error: { message: "You've hit your usage limit." } },
+        },
+      }));
+      return;
+    }
     setImmediate(() => {
       send({
         id: activeTurn.requestId,
