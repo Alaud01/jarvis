@@ -594,6 +594,94 @@ test('moves an ongoing conversation to the newly selected account', async () => 
   });
 });
 
+test('prepares the turn again when Switcher changes accounts during replay compaction', async () => {
+  await withSharedAuthFixture('jarvis-shared-replay-switch-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const executions = { count: 0 };
+    let replayPreparations = 0;
+    const send = conversation => provider.streamChat(
+      'codex:gpt-test',
+      conversation,
+      new AbortController(),
+      () => undefined,
+      {
+        ...streamOptions(executions),
+        prepareReplayMessages: async replayMessages => {
+          replayPreparations += 1;
+          if (replayPreparations === 1) {
+            // Compaction summarizes on Alice, then Switcher selects Bob.
+            assert.equal(await provider.sendChat('codex:gpt-test', [{ role: 'user', content: 'Summarize' }]), 'Answer by alice.');
+            await writeSharedAuth('bob');
+          }
+          return replayMessages;
+        },
+      },
+    );
+    try {
+      await writeSharedAuth('alice');
+      const first = await send([{ role: 'user', content: 'First question' }]);
+      assert.equal(first.assistantMessage.content, 'Tool completed by bob.');
+      assert.equal(replayPreparations, 2);
+
+      // The saved thread is bound to Bob, so Bob's follow-up needs no replay.
+      const followUp = await send([
+        { role: 'user', content: 'First question' },
+        first.assistantMessage,
+        { role: 'user', content: 'Follow-up' },
+      ]);
+      assert.equal(followUp.assistantMessage.content, 'Tool completed by bob.');
+      assert.equal(replayPreparations, 2);
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('defers an account switch until running turns finish', async () => {
+  await withSharedAuthFixture('jarvis-shared-defer-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const accountsSeenDuringTurn = [];
+    try {
+      await writeSharedAuth('alice');
+      const result = await provider.streamChat(
+        'codex:gpt-test',
+        [{ role: 'user', content: 'Question' }],
+        new AbortController(),
+        () => undefined,
+        {
+          conversationId: 'conversation-defer',
+          tools: CHAT_TOOLS,
+          executeTool: async () => {
+            await writeSharedAuth('bob');
+            accountsSeenDuringTurn.push((await provider.getAccountStatus()).email);
+            return { success: true, content: 'opened' };
+          },
+        },
+      );
+      assert.equal(result.assistantMessage.content, 'Tool completed by alice.');
+      assert.deepEqual(accountsSeenDuringTurn, ['alice@example.com']);
+      assert.equal((await provider.getAccountStatus()).email, 'bob@example.com');
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('explains where to refresh a login the backend keeps rejecting', async () => {
+  await withSharedAuthFixture('jarvis-shared-rejected-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    try {
+      await writeSharedAuth('expiring');
+      await assert.rejects(
+        provider.sendChat('codex:gpt-test', [{ role: 'user', content: 'Title this' }]),
+        /could not be refreshed[\s\S]*Open Codex Switcher or the Codex app so it can refresh the login/,
+      );
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
 test('answers tool-free requests without invoking Jarvis tools', async () => {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-plain-'));
   const provider = new CodexProvider({
