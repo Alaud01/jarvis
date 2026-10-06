@@ -129,11 +129,12 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
     'status updates must not compete with the surface entrance or pulse on startup');
 
   // Execute the actual renderer lifecycle, including a canceled dismissal.
+  let now = 0;
   const timers = new Map();
   const frames = new Map();
   let timerId = 0;
   const node = (className = '') => {
-    const value = { className, textContent: '', style: { setProperty() {} } };
+    const value = { className, textContent: '', style: { setProperty(key, value) { this[key] = value; } }, offsetWidth: 80, getBoundingClientRect: () => ({ width: 80.4 }) };
     value.classList = {
       add: (...names) => { value.className = [...new Set([...value.className.split(' '), ...names])].join(' ').trim(); },
       remove: (...names) => { value.className = value.className.split(' ').filter(name => !names.includes(name)).join(' '); },
@@ -144,6 +145,9 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   const body = node('idle');
   const pill = node('overlay');
   const spinner = node('pixel-spinner');
+  spinner.children = Array.from({ length: 16 }, () => node('cell'));
+  const labelMeasure = node('label-measure');
+  const motionPreference = { matches: false, addEventListener(name, handler) { this.onChange = handler; } };
   const initialLabel = node('label');
   const labels = [initialLabel];
   const stack = {
@@ -153,10 +157,11 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   };
   initialLabel.parentNode = stack;
   const renderer = vm.createContext({
-    window: {},
+    window: { matchMedia: () => motionPreference },
+    performance: { now: () => now },
     document: {
       body, querySelector: () => pill, createElement: () => node(),
-      getElementById: id => ({ spinner, 'label-stack': stack, label: initialLabel })[id],
+      getElementById: id => ({ spinner, 'label-stack': stack, label: initialLabel, 'label-measure': labelMeasure })[id],
     },
     setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
     clearTimeout: id => timers.delete(id),
@@ -168,7 +173,7 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   const flushFrames = () => {
     const pending = [...frames.values()];
     frames.clear();
-    for (const callback of pending) callback();
+    for (const callback of pending) callback(now);
   };
   const flushTimers = () => {
     const pending = [...timers.values()];
@@ -179,9 +184,10 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   assert.equal(body.classList.contains('idle'), false);
   assert.equal(body.classList.contains('preparing'), true, 'stage the initial reveal before its frame');
   assert.equal(initialLabel.textContent, 'Listening...');
+  assert.equal(body.style['--content-width'], '113px', 'fractional text widths round up to avoid accidental ellipsis');
   renderer.window.updateOverlayState({ state: 'processing', label: 'Processing...', stage: 'processing', width: 300 });
   assert.equal(pill.classList.contains('is-changing'), false, 'an early status update cannot override entrance motion');
-  assert.equal(frames.size, 1, 'status changes leave the scheduled entrance intact');
+  assert.equal(frames.size, 2, 'one shared pixel loop and the entrance frame remain scheduled');
   flushFrames();
   assert.equal(body.classList.contains('preparing'), false);
   flushTimers();
@@ -192,7 +198,7 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   renderer.window.dismissOverlay();
   renderer.window.revealOverlay(recording);
   assert.equal(body.classList.contains('preparing'), false, 'reverse an exit without restarting the entrance');
-  assert.equal(frames.size, 0);
+  assert.equal(frames.size, 1, 'an interrupted exit keeps the existing pixel loop');
   flushTimers();
   assert.equal(body.classList.contains('idle'), false, 'an old dismissal cannot hide a new recording');
   assert.equal(body.classList.contains('exiting'), false);
@@ -202,14 +208,62 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   assert.equal(body.classList.contains('idle'), true, 'dismissed content stops painting');
 
   renderer.window.revealOverlay(recording);
-  assert.equal(frames.size, 1);
+  assert.equal(frames.size, 2);
   renderer.window.dismissOverlay();
-  assert.equal(frames.size, 0, 'a dismissal cancels an entrance that has not painted yet');
+  assert.equal(frames.size, 1, 'a dismissal cancels its entrance but continues pixels through the exit');
   flushFrames();
   assert.equal(body.classList.contains('exiting'), true);
   assert.equal(body.classList.contains('preparing'), false);
   flushTimers();
   assert.equal(body.classList.contains('idle'), true);
+
+  assert.equal(frames.size, 0, 'idle content does not keep scheduling pixel frames');
+  renderer.window.revealOverlay(recording);
+  flushFrames();
+  now = 125;
+  flushFrames();
+  const pixels = () => spinner.children.map(cell => Number(cell.style.opacity));
+  const beforeMorph = pixels();
+  const beforeColor = spinner.style['--pixel-from'];
+  const processing = { state: 'processing', label: 'Processing...', stage: 'processing', width: 300 };
+  renderer.window.updateOverlayState(processing);
+  assert.deepEqual(pixels(), beforeMorph, 'changing state cannot snap pixel opacity');
+  assert.equal(spinner.style['--pixel-from'], beforeColor, 'changing state cannot snap its colour');
+  now += 16;
+  flushFrames();
+  assert.ok(Math.max(...pixels().map((value, i) => Math.abs(value - beforeMorph[i]))) < 0.1,
+    'the first morph frame keeps the running pattern continuous');
+  now += 64;
+  flushFrames();
+  const interruptedPixels = pixels();
+  renderer.window.updateOverlayState({ state: 'complete', label: 'Transcribed', stage: 'complete', width: 300 });
+  assert.deepEqual(pixels(), interruptedPixels, 'rapid state changes start from the current blend');
+  assert.equal(frames.size, 1, 'all states share one frame callback');
+  now += 16;
+  flushFrames();
+  assert.ok(Math.max(...pixels().map((value, i) => Math.abs(value - interruptedPixels[i]))) < 0.1);
+  now += 300;
+  flushFrames();
+  const settledPixels = pixels();
+  renderer.window.updateOverlayState({ state: 'complete', label: 'Transcribed', stage: 'complete', width: 300 });
+  flushFrames();
+  assert.deepEqual(pixels(), settledPixels, 'a duplicate status does not restart its animation phase');
+  motionPreference.matches = true;
+  motionPreference.onChange();
+  assert.equal(frames.size, 0, 'reduced motion renders a static grid');
+  const stillPixels = pixels();
+  now += 1000;
+  flushFrames();
+  assert.deepEqual(pixels(), stillPixels);
+  renderer.window.updateOverlayState(processing);
+  assert.equal(frames.size, 0);
+  assert.notEqual(spinner.style['--pixel-from'], beforeColor, 'reduced motion still changes status colour');
+  motionPreference.matches = false;
+  motionPreference.onChange();
+  assert.equal(frames.size, 1, 'normal animation resumes if reduced motion is turned off');
+  renderer.window.dismissOverlay();
+  flushTimers();
+  assert.equal(frames.size, 0);
 
   firstWindow.emit('ready-to-show');
   await waitForAsyncWork();

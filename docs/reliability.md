@@ -132,7 +132,10 @@ reveals the same renderer. A window hidden externally or a failed renderer is re
 The overlay stays off Mission Control and reveals Listening only after microphone setup
 and target detection finish. Its surface has a single entrance/exit transition, with
 status changes confined to the label and pixels. Interrupted dismissals reverse from
-the current position. The existing notch styling and reduced-motion behavior remain.
+the current position. All grid states use one frame loop and animation phase, blending
+pixel opacity and colour from the current mix without temporary fill states. The centred
+content row animates its measured width so removing outgoing labels cannot move the grid
+abruptly. Idle overlays stop the frame loop; reduced motion uses a static status grid.
 
 ## Tool turns
 
