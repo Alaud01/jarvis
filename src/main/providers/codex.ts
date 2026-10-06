@@ -9,6 +9,7 @@ import {
   type CodexDynamicTool,
   type CodexTokenUsageBreakdown,
   type CodexUserInput,
+  type SharedAccountSnapshot,
 } from '../codexAppServer';
 import type {
   ChatMessage,
@@ -41,10 +42,10 @@ interface AccountAttempt {
   /** The attempt streamed output or ran a tool, so retrying would duplicate it. */
   markObserved(): void;
   /**
-   * Holds the selected account fixed for the turn that follows and returns
-   * its identity. The hold is released when the attempt ends.
+   * Holds the selected account fixed for the turn that follows. The hold is
+   * released when the attempt ends.
    */
-  reserveTurnAccount(): Promise<string | null>;
+  reserveTurnAccount(): Promise<SharedAccountSnapshot>;
 }
 
 const MAX_ACCOUNT_PREPARATIONS = 3;
@@ -381,7 +382,7 @@ export class CodexProvider implements Provider {
             const reservation = await this.client.reserveSharedAccountForTurn();
             release = reservation.release;
             turnIdentity = reservation.identity;
-            return reservation.identity;
+            return reservation;
           },
         });
       } finally {
@@ -415,18 +416,22 @@ export class CodexProvider implements Provider {
 
   /**
    * Prepares a thread for the selected account, then reserves that account
-   * for the turn. Codex binds a thread's model connection to the account
-   * active when it opens, so if Switcher changed accounts while the thread
-   * was being prepared, the thread is prepared again for the new account.
+   * for the turn. Codex opens a thread's model connection when the thread is
+   * created or resumed, as whichever account is supplied at that moment. If
+   * the supplied account changed at all during preparation, even if it then
+   * changed back, the prepared thread may hold another account's connection,
+   * so it is discarded and the thread is prepared again.
    */
   private async prepareOnReservedAccount<T>(
     attempt: AccountAttempt,
     prepare: (accountIdentity: string | null) => Promise<T>,
+    discard: (result: T) => Promise<void>,
   ): Promise<T> {
     for (let preparation = 1; ; preparation += 1) {
-      const accountIdentity = await this.client.syncSharedAuth();
-      const prepared = await prepare(accountIdentity);
-      if (await attempt.reserveTurnAccount() === accountIdentity) return prepared;
+      const prepared = await this.client.syncSharedAccount();
+      const result = await prepare(prepared.identity);
+      if ((await attempt.reserveTurnAccount()).generation === prepared.generation) return result;
+      await discard(result);
       if (preparation >= MAX_ACCOUNT_PREPARATIONS) {
         throw new Error('The Codex Switcher account kept changing while Jarvis prepared this request. Try again.');
       }
@@ -507,7 +512,7 @@ export class CodexProvider implements Provider {
         developerInstructions,
         ephemeral: true,
         dynamicTools,
-      }));
+      }), async () => undefined);
       const content = await this.client.runTurn({
         threadId,
         model,
@@ -549,6 +554,7 @@ export class CodexProvider implements Provider {
         );
         return { selection, builtInput, toolSchemaFingerprint };
       },
+      () => this.client.deleteConversationThread(conversationId),
     );
 
     try {
@@ -596,13 +602,14 @@ export class CodexProvider implements Provider {
     options?: SendChatOptions,
   ): Promise<string> {
     // sendChat streams nothing and runs no tools, so a retry duplicates nothing.
-    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages));
+    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages, options));
   }
 
   private async sendChatOnActiveAccount(
     attempt: AccountAttempt,
     modelId: string,
     messages: ChatMessage[],
+    options?: SendChatOptions,
   ): Promise<string> {
     const account = await this.client.ensureChatGptAccount();
     if (account.type !== 'chatgpt') {
@@ -616,7 +623,7 @@ export class CodexProvider implements Provider {
       developerInstructions,
       ephemeral: true,
       dynamicTools: [],
-    }));
+    }), async () => undefined);
     return this.client.runTurn({
       threadId,
       model,
