@@ -40,14 +40,36 @@ export interface BuiltCodexTurnInput {
 interface AccountAttempt {
   /** The attempt streamed output or ran a tool, so retrying would duplicate it. */
   markObserved(): void;
-  /** Supplies the currently selected account right before turn/start. */
-  startTurnOnActiveAccount(): Promise<void>;
+  /**
+   * Holds the selected account fixed for the turn that follows and returns
+   * its identity. The hold is released when the attempt ends.
+   */
+  reserveTurnAccount(): Promise<string | null>;
 }
 
-const PRIVATE_ACCOUNT_ATTEMPT: AccountAttempt = {
-  markObserved: () => undefined,
-  startTurnOnActiveAccount: async () => undefined,
-};
+const MAX_ACCOUNT_PREPARATIONS = 3;
+
+function accountFingerprintSuffix(identity: string | null): string {
+  return identity
+    ? `:account:${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`
+    : '';
+}
+
+function withLoginRefreshGuidance(error: unknown): Error {
+  const message = error instanceof Error ? error.message : 'Codex rejected the login.';
+  const guided = new Error(
+    `${message}\n\nThe login selected in Codex Switcher was rejected. Open Codex Switcher or the Codex app so it can refresh the login, then try again.`,
+  );
+  (guided as Error & { cause?: unknown }).cause = error;
+  return guided;
+}
+
+function isCodexAuthenticationError(error: unknown): boolean {
+  if (error instanceof CodexTurnError && error.codexErrorInfo !== null) {
+    return error.codexErrorInfo === 'unauthorized';
+  }
+  return error instanceof Error && /\b401 Unauthorized\b/.test(error.message);
+}
 
 interface PersistentThreadSelection {
   record: CodexConversationThreadRecord;
@@ -347,24 +369,36 @@ export class CodexProvider implements Provider {
     run: (attempt: AccountAttempt) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (!this.client.followsSharedAuth) return run(PRIVATE_ACCOUNT_ATTEMPT);
-
     let observed = false;
     let turnIdentity: string | null = null;
+    const attemptOnce = async (onObserved: () => void): Promise<T> => {
+      let release: () => void = () => undefined;
+      try {
+        return await run({
+          markObserved: onObserved,
+          reserveTurnAccount: async () => {
+            release();
+            const reservation = await this.client.reserveSharedAccountForTurn();
+            release = reservation.release;
+            turnIdentity = reservation.identity;
+            return reservation.identity;
+          },
+        });
+      } finally {
+        release();
+      }
+    };
+
+    if (!this.client.followsSharedAuth) return attemptOnce(() => undefined);
+
     try {
-      return await run({
-        markObserved: () => {
-          observed = true;
-        },
-        // Sync immediately before turn/start so the recorded identity is the
-        // account the turn actually runs on, even if Switcher changed during
-        // thread setup or replay compaction.
-        startTurnOnActiveAccount: async () => {
-          turnIdentity = await this.client.syncSharedAuth();
-        },
+      return await attemptOnce(() => {
+        observed = true;
       });
     } catch (error) {
-      if (!isCodexUsageLimitError(error) || signal?.aborted) throw error;
+      if (signal?.aborted) throw error;
+      if (isCodexAuthenticationError(error)) throw withLoginRefreshGuidance(error);
+      if (!isCodexUsageLimitError(error)) throw error;
       const currentIdentity = await this.client.readSharedAccountIdentity().catch(() => null);
       if (observed || !turnIdentity || !currentIdentity || currentIdentity === turnIdentity) {
         throw withSwitcherGuidance(error);
@@ -372,14 +406,30 @@ export class CodexProvider implements Provider {
     }
 
     try {
-      return await run({
-        markObserved: () => undefined,
-        startTurnOnActiveAccount: async () => {
-          await this.client.syncSharedAuth();
-        },
-      });
+      return await attemptOnce(() => undefined);
     } catch (error) {
+      if (isCodexAuthenticationError(error)) throw withLoginRefreshGuidance(error);
       throw isCodexUsageLimitError(error) ? withSwitcherGuidance(error) : error;
+    }
+  }
+
+  /**
+   * Prepares a thread for the selected account, then reserves that account
+   * for the turn. Codex binds a thread's model connection to the account
+   * active when it opens, so if Switcher changed accounts while the thread
+   * was being prepared, the thread is prepared again for the new account.
+   */
+  private async prepareOnReservedAccount<T>(
+    attempt: AccountAttempt,
+    prepare: (accountIdentity: string | null) => Promise<T>,
+  ): Promise<T> {
+    for (let preparation = 1; ; preparation += 1) {
+      const accountIdentity = await this.client.syncSharedAuth();
+      const prepared = await prepare(accountIdentity);
+      if (await attempt.reserveTurnAccount() === accountIdentity) return prepared;
+      if (preparation >= MAX_ACCOUNT_PREPARATIONS) {
+        throw new Error('The Codex Switcher account kept changing while Jarvis prepared this request. Try again.');
+      }
     }
   }
 
@@ -429,16 +479,8 @@ export class CodexProvider implements Provider {
     const dynamicTools = executeTool
       ? toCodexDynamicTools(options.tools ?? [])
       : [];
-    // Codex keeps a thread's model connection open across turns, authenticated
-    // as whichever account opened it, so a thread must not outlive an account
-    // switch. Binding the account into the fingerprint replays the
-    // conversation into a fresh thread after a switch.
-    const sharedIdentity = this.client.suppliedSharedIdentity;
-    const toolSchemaFingerprint = fingerprintCodexDynamicTools(dynamicTools)
-      + (options?.contextKey ? `:branch:${options.contextKey}` : '')
-      + (sharedIdentity
-        ? `:account:${createHash('sha256').update(sharedIdentity).digest('hex').slice(0, 16)}`
-        : '');
+    const toolAndBranchFingerprint = fingerprintCodexDynamicTools(dynamicTools)
+      + (options?.contextKey ? `:branch:${options.contextKey}` : '');
     const onToolCall = executeTool
       ? (tool: string, argumentsValue: Record<string, unknown>) => (
           executeTool(tool, argumentsValue)
@@ -460,13 +502,12 @@ export class CodexProvider implements Provider {
 
     if (!conversationId) {
       const builtInput = buildCodexTurnInput(messages, 0);
-      const threadId = await this.client.startThread({
+      const threadId = await this.prepareOnReservedAccount(attempt, () => this.client.startThread({
         model,
         developerInstructions,
         ephemeral: true,
         dynamicTools,
-      });
-      await attempt.startTurnOnActiveAccount();
+      }));
       const content = await this.client.runTurn({
         threadId,
         model,
@@ -484,23 +525,32 @@ export class CodexProvider implements Provider {
     }
 
     const sourceConversationMessages = getConversationMessages(messages);
-    const selection = await this.getOrStartPersistentThread(
-      conversationId,
-      model,
-      developerInstructions,
-      messages,
-      dynamicTools,
-      toolSchemaFingerprint,
-    );
-    const turnMessages = selection.replayRequired
-      ? await options?.prepareReplayMessages?.(messages) ?? messages
-      : messages;
-    const builtInput = buildCodexTurnInput(
-      turnMessages,
-      selection.replayRequired ? 0 : selection.record.syncedMessageCount,
+    const { selection, builtInput, toolSchemaFingerprint } = await this.prepareOnReservedAccount(
+      attempt,
+      async accountIdentity => {
+        // Codex keeps a thread's model connection open across turns, so a
+        // thread must not outlive an account switch. Binding the account into
+        // the fingerprint replays the conversation into a fresh thread.
+        const toolSchemaFingerprint = toolAndBranchFingerprint + accountFingerprintSuffix(accountIdentity);
+        const selection = await this.getOrStartPersistentThread(
+          conversationId,
+          model,
+          developerInstructions,
+          messages,
+          dynamicTools,
+          toolSchemaFingerprint,
+        );
+        const turnMessages = selection.replayRequired
+          ? await options?.prepareReplayMessages?.(messages) ?? messages
+          : messages;
+        const builtInput = buildCodexTurnInput(
+          turnMessages,
+          selection.replayRequired ? 0 : selection.record.syncedMessageCount,
+        );
+        return { selection, builtInput, toolSchemaFingerprint };
+      },
     );
 
-    await attempt.startTurnOnActiveAccount();
     try {
       const content = await this.client.runTurn({
         threadId: selection.record.threadId,
@@ -561,13 +611,12 @@ export class CodexProvider implements Provider {
     const model = fromCodexModelId(modelId);
     const developerInstructions = buildDeveloperInstructions(messages);
     const builtInput = buildCodexTurnInput(messages, 0);
-    const threadId = await this.client.startThread({
+    const threadId = await this.prepareOnReservedAccount(attempt, () => this.client.startThread({
       model,
       developerInstructions,
       ephemeral: true,
       dynamicTools: [],
-    });
-    await attempt.startTurnOnActiveAccount();
+    }));
     return this.client.runTurn({
       threadId,
       model,

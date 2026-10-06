@@ -43,6 +43,12 @@ function finishWithText(threadId, turnId, text) {
   });
 }
 
+// Only threads that declared Jarvis tools receive tool calls.
+function respondToTurn(thread, threadId, turnId, requestId) {
+  if (thread.hasTools) startToolCall(threadId, turnId, requestId);
+  else finishWithText(threadId, turnId, thread.account ? `Answer by ${thread.account}.` : 'Answer.');
+}
+
 function startToolCall(threadId, turnId, requestId) {
   send({
     id: requestId,
@@ -185,7 +191,7 @@ lines.on('line', line => {
         externalAccount = refreshedAccount;
         thread.account = refreshedAccount;
         activeTurn.account = refreshedAccount;
-        startToolCall(threadId, turnId, requestId);
+        respondToTurn(thread, threadId, turnId, requestId);
       });
       send({
         id: refreshId,
@@ -195,11 +201,7 @@ lines.on('line', line => {
       return;
     }
 
-    if (!thread.hasTools) {
-      setImmediate(() => finishWithText(threadId, turnId, 'Answer.'));
-      return;
-    }
-    setImmediate(() => startToolCall(threadId, turnId, requestId));
+    setImmediate(() => respondToTurn(thread, threadId, turnId, requestId));
     return;
   }
 
