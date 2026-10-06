@@ -9,7 +9,9 @@ const {
   buildIsolatedCodexEnvironment,
   CodexAppServerClient,
   isMissingThreadError,
+  linkSharedCodexAuth,
   resolveBundledCodexBinary,
+  resolveCodexSwitcherAuthPath,
 } = require('../dist/main/codexAppServer');
 const {
   buildCodexTurnInput,
@@ -361,6 +363,107 @@ test('round-trips a Codex dynamic tool call through the Jarvis handler', async (
     }]);
   } finally {
     await client.stop();
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+async function writeAuth(authPath, accountId) {
+  await fs.mkdir(path.dirname(authPath), { recursive: true });
+  await fs.writeFile(authPath, JSON.stringify({ tokens: { account_id: accountId } }));
+}
+
+test('follows Codex Switcher only when it is installed and not opted out', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-switcher-home-'));
+  try {
+    assert.equal(resolveCodexSwitcherAuthPath(home, {}), undefined);
+    await writeAuth(path.join(home, '.codex-switcher', 'accounts.json'), 'unused');
+    assert.equal(resolveCodexSwitcherAuthPath(home, {}), path.join(home, '.codex', 'auth.json'));
+    assert.equal(resolveCodexSwitcherAuthPath(home, { JARVIS_CODEX_PRIVATE_AUTH: '1' }), undefined);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('links the private runtime auth to the shared file and keeps the old login', async () => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-link-'));
+  const codexHome = path.join(temporaryRoot, 'codex-home');
+  const sharedAuthPath = path.join(temporaryRoot, 'shared', 'auth.json');
+  try {
+    await writeAuth(path.join(codexHome, 'auth.json'), 'private-account');
+    await writeAuth(sharedAuthPath, 'shared-account');
+
+    await linkSharedCodexAuth(codexHome, sharedAuthPath);
+    await linkSharedCodexAuth(codexHome, sharedAuthPath);
+
+    assert.equal(await fs.readlink(path.join(codexHome, 'auth.json')), sharedAuthPath);
+    const backup = JSON.parse(await fs.readFile(path.join(codexHome, 'auth.json.jarvis-private'), 'utf8'));
+    assert.equal(backup.tokens.account_id, 'private-account');
+  } finally {
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('restarts the app-server when Codex Switcher changes the active account', async () => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-switch-'));
+  const sharedAuthPath = path.join(temporaryRoot, 'shared', 'auth.json');
+  const client = new CodexAppServerClient({
+    binaryPath: path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js'),
+    codexHome: path.join(temporaryRoot, 'codex-home'),
+    workspaceRoot: path.join(temporaryRoot, 'workspace'),
+    openExternal: async () => undefined,
+    sharedAuthPath,
+  });
+
+  try {
+    await writeAuth(sharedAuthPath, 'first-account');
+    assert.equal((await client.getAccountStatus()).email, 'first-account@example.com');
+
+    await writeAuth(sharedAuthPath, 'second-account');
+    assert.equal((await client.getAccountStatus()).email, 'second-account@example.com');
+
+    await assert.rejects(client.logout(), /Codex Switcher/);
+  } finally {
+    await client.stop();
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('retries a usage-limited turn on the account Codex Switcher moved to', async () => {
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-limit-'));
+  const sharedAuthPath = path.join(temporaryRoot, 'shared', 'auth.json');
+  const provider = new CodexProvider({
+    binaryPath: path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js'),
+    codexHome: path.join(temporaryRoot, 'codex-home'),
+    workspaceRoot: path.join(temporaryRoot, 'workspace'),
+    openExternal: async () => undefined,
+    sharedAuthPath,
+  });
+  const options = {
+    conversationId: 'conversation-limit',
+    tools: CHAT_TOOLS,
+    executeTool: async () => ({ success: true, content: 'opened' }),
+  };
+  const messages = [{ role: 'user', content: 'Question' }];
+  const streamOnce = () => provider.streamChat(
+    'codex:gpt-test',
+    messages,
+    new AbortController(),
+    () => undefined,
+    options,
+  );
+
+  try {
+    await writeAuth(sharedAuthPath, 'exhausted-account');
+    await assert.rejects(streamOnce(), /usage limit[\s\S]*Switch to another account in Codex Switcher/);
+
+    await provider.shutdown();
+    process.env.FAKE_CODEX_SWITCH_ACCOUNT_ON_LIMIT = 'fresh-account';
+    const result = await streamOnce();
+    assert.equal(result.assistantMessage.content, 'Tool completed.');
+    assert.equal((await provider.getAccountStatus()).email, 'fresh-account@example.com');
+  } finally {
+    delete process.env.FAKE_CODEX_SWITCH_ACCOUNT_ON_LIMIT;
+    await provider.shutdown();
     await fs.rm(temporaryRoot, { recursive: true, force: true });
   }
 });
