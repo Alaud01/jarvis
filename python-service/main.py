@@ -37,6 +37,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("VoiceService")
 
+LOG_PREVIEW_CHARS = max(0, int(os.environ.get("JARVIS_LOG_PREVIEW_CHARS", "500")))
+
+
+def truncate_for_log(value: Any, limit: int | None = None) -> str:
+    """Truncate long text for logs, showing the head with a truncation suffix."""
+    text = value if isinstance(value, str) else str(value)
+    max_chars = LOG_PREVIEW_CHARS if limit is None else limit
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}... [truncated {len(text) - max_chars} chars]"
+
 
 def elapsed_ms(started_at: float) -> int:
     return round((time.perf_counter() - started_at) * 1000)
@@ -1663,10 +1674,30 @@ def refine_transcript(raw_text: str, context: VoiceContext) -> RefinementResult:
 
         correction_ms = round((time.perf_counter() - started_at) * 1000)
         message = response_data.get("choices", [{}])[0].get("message", {})
+        content = message.get("content", "")
+        tool_calls = message.get("tool_calls", []) or []
+        if tool_calls:
+            tool_call_heads = []
+            for tool_call in tool_calls:
+                function = tool_call.get("function", {})
+                arguments = function.get("arguments", "")
+                arguments_text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+                tool_call_heads.append(
+                    f"{function.get('name', '')}({truncate_for_log(arguments_text)})"
+                )
+            logger.warning(
+                "[VoiceService] %s refinement tool calls: %s",
+                OPENROUTER_REFINEMENT_MODEL,
+                truncate_for_log("; ".join(tool_call_heads)),
+            )
+        logger.warning(
+            "[VoiceService] %s refinement model output: %s",
+            OPENROUTER_REFINEMENT_MODEL,
+            truncate_for_log(content),
+        )
         logger.warning("[VoiceService] %s refinement completed in %sms", OPENROUTER_REFINEMENT_MODEL, correction_ms)
 
-        content = message.get("content", "")
-        for tool_call in message.get("tool_calls", []):
+        for tool_call in tool_calls:
             function = tool_call.get("function", {})
             if function.get("name") != REFINEMENT_TOOL_NAME:
                 continue

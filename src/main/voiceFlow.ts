@@ -228,7 +228,7 @@ async function stopAndProcess(): Promise<void> {
     const dictationId = randomUUID();
 
     if (result.success && result.text) {
-      console.warn('[VoiceFlow] Temporary transcription log:', {
+      console.warn('[VoiceFlow] Transcription:', {
         raw: result.raw_text ?? '',
         refined: result.text,
         refinementMode: result.refinement_mode,

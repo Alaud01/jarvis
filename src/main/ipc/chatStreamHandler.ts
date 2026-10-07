@@ -34,6 +34,15 @@ import { fetchUrlContent } from '../fetchService';
 import { logMainProcess, CHAT_MODEL_KEEP_ALIVE } from '../app/lifecycle';
 import { recordResolvedTurnUsage } from '../usageService';
 
+// Truncated previews keep model output and tool calls readable in Jarvis logs.
+const LOG_PREVIEW_CHARS = 500;
+
+function truncateForLog(value: unknown, limit: number = LOG_PREVIEW_CHARS): string {
+  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+  if (limit <= 0 || text.length <= limit) return text;
+  return `${text.slice(0, limit)}... [truncated ${text.length - limit} chars]`;
+}
+
 interface SendMessageStreamRequest {
   conversationId: string;
   assistantMessageId: string;
@@ -180,6 +189,10 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         toolName: string,
         rawArguments: Record<string, unknown> | string,
       ): Promise<ToolExecutionResult> => {
+        console.warn('[LLM] Tool call:', {
+          tool: toolName,
+          argumentsHead: truncateForLog(rawArguments),
+        });
         if (toolName === 'tavily_search') {
           if (tavilySearchCallsThisTurn >= MAX_TAVILY_SEARCH_CALLS_PER_TURN) {
             return {
@@ -386,6 +399,11 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         );
         const turnEndedAtMs = Date.now();
         const assistantMessage = turnResult.assistantMessage;
+        console.warn('[LLM] Model output:', {
+          model: request.model,
+          contentHead: truncateForLog(assistantMessage?.content ?? ''),
+          toolCallCount: assistantMessage?.tool_calls?.length ?? 0,
+        });
         recordResolvedTurnUsage({
           model: request.model,
           provider: request.provider,
@@ -464,6 +482,10 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
             assistantThinking: synthesisResult.assistantMessage?.thinking,
             startedAtMs: synthesisStartedAtMs,
             endedAtMs: Date.now(),
+          });
+          console.warn('[LLM] Model output (synthesis):', {
+            model: request.model,
+            contentHead: truncateForLog(synthesisResult.assistantMessage?.content ?? ''),
           });
 
           if (synthesisResult.assistantMessage?.tool_calls?.length) {
