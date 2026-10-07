@@ -514,6 +514,10 @@ const App: React.FC = () => {
       )
     );
 
+    // A new turn always starts pinned to the bottom: re-enable auto-scroll for
+    // the message container (fresh thinking sections follow on mount by default).
+    messageListRef.current?.scrollToBottom();
+
     clearConversationDraftForSend(draftKey);
 
     registerStreamSession(conversationId!, assistantMessageId);

@@ -909,10 +909,6 @@ select option {
   padding-bottom: calc(var(--composer-height, 120px) - 8px);
 }
 
-.conversation-body[data-generating='true'] {
-  padding-bottom: calc(var(--composer-height, 120px) + 48px);
-}
-
 .conversation-column {
   max-width: calc(var(--conversation-width) + var(--conversation-right-gutter));
   padding-right: var(--conversation-right-gutter);

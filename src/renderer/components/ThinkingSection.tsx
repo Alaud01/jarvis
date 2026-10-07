@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
+import { useAutoScroll } from '../hooks/useAutoScroll';
 
 interface ThinkingSectionProps {
   content: string;
@@ -11,19 +12,9 @@ interface ThinkingSectionProps {
   onAutoScrollReactivate?: () => void;
 }
 
-const AUTO_SCROLL_BOTTOM_THRESHOLD = 8;
-const STREAMING_STICKY_BOTTOM_THRESHOLD = 50;
-
-const isNearBottom = (
-  container: HTMLElement,
-  threshold = AUTO_SCROLL_BOTTOM_THRESHOLD
-) => (
-  container.scrollHeight - container.scrollTop - container.clientHeight < threshold
-);
-
-interface ScrollSnapshot {
-  shouldMaintain: boolean;
-}
+// Small viewport (max 300px while streaming): ~1-2 lines of slack keeps the
+// follow through per-chunk height jitter without grabbing back real scroll-ups.
+const THINKING_STICKY_THRESHOLD = 24;
 
 const ThinkingSection: React.FC<ThinkingSectionProps> = ({
   content,
@@ -36,63 +27,24 @@ const ThinkingSection: React.FC<ThinkingSectionProps> = ({
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const contentRef = useRef<HTMLDivElement>(null);
-  const autoScrollEnabledRef = useRef(true);
 
-  const setAutoScrollEnabled = useCallback((enabled: boolean) => {
-    if (autoScrollEnabledRef.current === enabled) return;
-    autoScrollEnabledRef.current = enabled;
-    if (enabled) {
-      onAutoScrollReactivate?.();
-    } else {
-      onAutoScrollCancel?.();
-    }
-  }, [onAutoScrollCancel, onAutoScrollReactivate]);
+  useAutoScroll(contentRef, {
+    active: isStreaming && isExpanded,
+    threshold: THINKING_STICKY_THRESHOLD,
+    onFollowingChange: (following) => {
+      if (following) {
+        onAutoScrollReactivate?.();
+      } else {
+        onAutoScrollCancel?.();
+      }
+    },
+  });
 
   useEffect(() => {
     if (!isStreaming && content) {
       setIsExpanded(false);
     }
   }, [isStreaming, content]);
-
-  const maintainScrollAtEnd = useCallback((snapshot: ScrollSnapshot) => {
-    if (!snapshot.shouldMaintain) {
-      setAutoScrollEnabled(false);
-      return;
-    }
-
-    const container = contentRef.current;
-    if (!container) return;
-
-    container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
-    setAutoScrollEnabled(true);
-  }, [setAutoScrollEnabled]);
-
-  useLayoutEffect(() => {
-    if (!isStreaming || !isExpanded) return;
-    const container = contentRef.current;
-    const scrollSnapshot: ScrollSnapshot = {
-      shouldMaintain: autoScrollEnabledRef.current
-        && (container ? isNearBottom(container, STREAMING_STICKY_BOTTOM_THRESHOLD) : true),
-    };
-    maintainScrollAtEnd(scrollSnapshot);
-  }, [content, isStreaming, isExpanded, maintainScrollAtEnd]);
-
-  useLayoutEffect(() => {
-    const container = contentRef.current;
-    if (!container || !isExpanded) return;
-
-    setAutoScrollEnabled(isNearBottom(container));
-
-    const handleScroll = () => {
-      setAutoScrollEnabled(isNearBottom(container));
-    };
-
-    container.addEventListener('scroll', handleScroll, { passive: true });
-
-    return () => {
-      container.removeEventListener('scroll', handleScroll);
-    };
-  }, [isExpanded, setAutoScrollEnabled]);
 
   return (
     <div className="my-2 border bg-transparent border-border-secondary rounded bg-bg-secondary">

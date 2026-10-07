@@ -6,6 +6,7 @@ import NewChatEmptyState from './NewChatEmptyState';
 import type { SearchSource, SearchSourceGroup } from '../../shared/search';
 import type { FileAttachment } from '../../shared/attachments';
 import { renderCodexCitations } from '../../shared/citations';
+import { isNearBottom } from '../hooks/useAutoScroll';
 import { shouldVirtualizeMessages } from '../../shared/messageVirtualization';
 import type { Message, PendingVoiceTranscript } from '../types';
 import {
@@ -956,7 +957,7 @@ const MessageRow = React.memo(({
   );
 });
 
-const AUTO_SCROLL_BOTTOM_THRESHOLD = 50;
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 60;
 const SMOOTH_AUTO_SCROLL_TRACKING_MS = 500;
 const USER_SCROLL_INTENT_GRACE_MS = 160;
 const VIRTUALIZATION_OVERSCAN = 8;
@@ -976,13 +977,6 @@ interface PendingVirtualNavigation {
 }
 
 const NO_CONVERSATION_SEARCH_MATCHES: ConversationSearchMatch[] = [];
-
-const isNearBottom = (
-  container: HTMLElement,
-  threshold = AUTO_SCROLL_BOTTOM_THRESHOLD
-) => (
-  container.scrollHeight - container.scrollTop - container.clientHeight <= threshold
-);
 
 const estimateMessageHeight = (message: Message): number => {
   const lineEstimate = Math.ceil(message.text.length / 88);
@@ -1777,7 +1771,6 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
   return (
     <div
       className="conversation-body flex-1 min-w-0"
-      data-generating={isLoading || streamingActive ? 'true' : undefined}
     >
       {isSearchOpen && (
         <div className="fixed right-[40px] top-[49px] z-50 w-[min(360px,calc(100vw-2rem))]">
