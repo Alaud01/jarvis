@@ -392,11 +392,6 @@ const ReasoningSelector: React.FC<{
                     </span>
                   )}
                 </span>
-                {option.description && (
-                  <span className="text-text-tertiary text-[0.55rem] leading-snug">
-                    {option.description}
-                  </span>
-                )}
               </button>
             ))}
           </div>
