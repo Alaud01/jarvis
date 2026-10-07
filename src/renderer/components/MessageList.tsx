@@ -1667,14 +1667,17 @@ const MessageList = forwardRef<MessageListHandle, MessageListProps>(({
       const movedUp = currentScrollTop < lastScrollTopRef.current - 0.5;
       lastScrollTopRef.current = currentScrollTop;
 
-      if (movedUp) {
-        clearSmoothAutoScrollTracking();
-        cancelAutoScroll();
+      // A shrink (measured heights settling, thinking collapse, virtualization
+      // spacers) clamps scrollTop down with no user intent. Still near the
+      // bottom means still following; only a real move away detaches.
+      if (isNearBottom(container)) {
+        reactivateAutoScroll();
         return;
       }
 
-      if (isNearBottom(container)) {
-        reactivateAutoScroll();
+      if (movedUp) {
+        clearSmoothAutoScrollTracking();
+        cancelAutoScroll();
         return;
       }
 
