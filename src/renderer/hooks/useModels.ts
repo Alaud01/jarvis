@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ModelInfo, ProviderInfo } from '../types';
+import type { ModelCatalogSnapshot } from '../../shared/modelCatalog';
 
-/** How long to keep retrying for the previously saved model before falling back. */
 const MODEL_RESTORE_TIMEOUT_MS = 30_000;
-const MODEL_RESTORE_RETRY_MS = 1_500;
 
 export interface UseModelsResult {
   models: ModelInfo[];
@@ -16,229 +15,118 @@ export interface UseModelsResult {
   hasHydratedStore: boolean;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function modelIsAvailable(models: ModelInfo[], modelId: string | null | undefined): modelId is string {
-  return Boolean(modelId) && models.some(model => model.id === modelId);
-}
-
-function getDefaultModel(models: ModelInfo[]): string | null {
-  // Never silently switch a user to a remote OpenRouter model. Ollama returns
-  // its models in picker order, so the first Ollama entry is its top choice.
-  return models.find(model => model.provider === 'ollama')?.id ?? null;
-}
-
-async function fetchProvidersAndModels(): Promise<{
-  providers: ProviderInfo[];
-  models: ModelInfo[];
-}> {
-  const [providers, models] = await Promise.all([
-    window.assistant.getProviders(),
-    window.assistant.getModels(),
-  ]);
-  return { providers, models };
-}
-
-/**
- * Keep fetching until the preferred model appears, the catalog is empty after
- * the deadline, or the timeout elapses. Most of the time the saved model is
- * only briefly missing while OpenRouter/Ollama finish loading.
- */
-async function fetchUntilPreferredAvailable(
-  preferredModel: string | null,
-  timeoutMs: number,
-  retryMs: number,
-  shouldContinue: () => boolean,
-): Promise<{ providers: ProviderInfo[]; models: ModelInfo[] }> {
-  const deadline = Date.now() + timeoutMs;
-  let latest = await fetchProvidersAndModels();
-
-  while (
-    shouldContinue()
-    && preferredModel
-    && !modelIsAvailable(latest.models, preferredModel)
-    && Date.now() < deadline
-  ) {
-    await sleep(retryMs);
-    if (!shouldContinue()) {
-      break;
-    }
-    latest = await fetchProvidersAndModels();
-  }
-
-  return latest;
-}
-
 export function useModels(hasHydratedStore: boolean): UseModelsResult {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedModel, setSelectedModelState] = useState<string | null>(null);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [selectionSettled, setSelectionSettled] = useState(false);
-
   const preferredModelRef = useRef<string | null>(null);
-  const selectedModelRef = useRef<string | null>(null);
-  const refreshGenerationRef = useRef(0);
-  const mountedRef = useRef(true);
+  const snapshotRef = useRef<ModelCatalogSnapshot | null>(null);
+  const readyRef = useRef(false);
+  const mountedRef = useRef(false);
+  const restoreDeadlineRef = useRef(0);
+  const restoreTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      refreshGenerationRef.current += 1;
-    };
+  const applyCatalog = useCallback((snapshot: ModelCatalogSnapshot) => {
+    if (!mountedRef.current || snapshot.revision < (snapshotRef.current?.revision ?? -1)) return;
+    snapshotRef.current = snapshot;
+    if (!readyRef.current) return;
+    setModels(snapshot.models);
+    // Models already discovered remain selectable while other sources load.
+    setIsLoadingModels(snapshot.loading && snapshot.models.length === 0);
+    const preferred = preferredModelRef.current;
+    if (preferred && snapshot.models.some(model => model.id === preferred)) {
+      setSelectedModelState(preferred);
+      setSelectionSettled(true);
+    } else if (preferred && Date.now() < restoreDeadlineRef.current) {
+      setSelectedModelState(preferred);
+      setSelectionSettled(false);
+    } else {
+      // Preserve the existing policy: automatic fallback is Ollama only.
+      const fallback = snapshot.models.find(model => model.provider === 'ollama')?.id ?? null;
+      preferredModelRef.current = fallback;
+      setSelectedModelState(fallback);
+      setSelectionSettled(true);
+    }
   }, []);
+
+  const startRestoreWindow = useCallback(() => {
+    clearTimeout(restoreTimerRef.current);
+    restoreDeadlineRef.current = Date.now() + MODEL_RESTORE_TIMEOUT_MS;
+    restoreTimerRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      // Permit fallback even if a refresh fails; ordinary reads respect backoff.
+      if (snapshotRef.current) applyCatalog(snapshotRef.current);
+      void window.assistant.getModelCatalog().then(applyCatalog).catch(error => {
+        console.error('Failed to refresh model catalog:', error);
+      });
+    }, MODEL_RESTORE_TIMEOUT_MS);
+  }, [applyCatalog]);
 
   const setSelectedModel = useCallback((model: string) => {
     preferredModelRef.current = model;
-    selectedModelRef.current = model;
     setSelectedModelState(model);
     setSelectionSettled(true);
   }, []);
 
-  const applyCatalog = useCallback((
-    fetchedProviders: ProviderInfo[],
-    fetchedModels: ModelInfo[],
-    preferredModel: string | null,
-    allowFallback: boolean,
-  ) => {
-    setProviders(fetchedProviders);
-    setModels(fetchedModels);
-
-    if (modelIsAvailable(fetchedModels, preferredModel)) {
-      preferredModelRef.current = preferredModel;
-      selectedModelRef.current = preferredModel;
-      setSelectedModelState(preferredModel);
-      setSelectionSettled(true);
-      return;
-    }
-
-    if (!allowFallback) {
-      // Keep showing the preferred model while we wait for the catalog.
-      if (preferredModel) {
-        preferredModelRef.current = preferredModel;
-        selectedModelRef.current = preferredModel;
-        setSelectedModelState(preferredModel);
-      }
-      setSelectionSettled(false);
-      return;
-    }
-
-    const fallback = getDefaultModel(fetchedModels);
-    preferredModelRef.current = fallback;
-    selectedModelRef.current = fallback;
-    setSelectedModelState(fallback);
-    setSelectionSettled(true);
-  }, []);
-
   const refreshModels = useCallback(async () => {
-    const generation = ++refreshGenerationRef.current;
-    const preferredModel = preferredModelRef.current ?? selectedModelRef.current;
-    setIsLoadingModels(true);
-
+    startRestoreWindow();
     try {
-      const latest = await fetchUntilPreferredAvailable(
-        preferredModel,
-        MODEL_RESTORE_TIMEOUT_MS,
-        MODEL_RESTORE_RETRY_MS,
-        () => mountedRef.current && refreshGenerationRef.current === generation,
-      );
-
-      if (!mountedRef.current || refreshGenerationRef.current !== generation) {
-        return;
-      }
-
-      applyCatalog(latest.providers, latest.models, preferredModel, true);
+      applyCatalog(await window.assistant.getModelCatalog(true));
     } catch (error) {
-      if (!mountedRef.current || refreshGenerationRef.current !== generation) {
-        return;
-      }
       console.error('Failed to refresh models:', error);
-      // Keep the preferred selection; don't wipe it on a transient refresh failure.
-    } finally {
-      if (mountedRef.current && refreshGenerationRef.current === generation) {
+      if (mountedRef.current) setIsLoadingModels(false);
+    }
+  }, [applyCatalog, startRestoreWindow]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    readyRef.current = false;
+    let canceled = false;
+    const unsubscribe = window.assistant.onModelCatalogChanged(applyCatalog);
+    void (async () => {
+      try {
+        const [storedModel, availableProviders, snapshot] = await Promise.all([
+          window.assistant.storeLoadModel().catch(() => ''),
+          window.assistant.getProviders(),
+          window.assistant.getModelCatalog(),
+        ]);
+        if (canceled) return;
+        preferredModelRef.current = storedModel || null;
+        setProviders(availableProviders);
+        readyRef.current = true;
+        startRestoreWindow();
+        // Events may have delivered newer results while the invoke was pending.
+        applyCatalog(snapshotRef.current && snapshotRef.current.revision > snapshot.revision
+          ? snapshotRef.current : snapshot);
+      } catch (error) {
+        if (canceled) return;
+        console.error('Failed to load providers/models:', error);
+        readyRef.current = true;
         setIsLoadingModels(false);
       }
-    }
-  }, [applyCatalog]);
-
-  useEffect(() => {
-    const generation = ++refreshGenerationRef.current;
-
-    const loadProvidersAndModels = async () => {
-      setIsLoadingModels(true);
-      try {
-        const storedModel = await window.assistant.storeLoadModel().catch((error) => {
-          console.error('Failed to load stored model:', error);
-          return '';
-        });
-
-        if (!mountedRef.current || refreshGenerationRef.current !== generation) {
-          return;
-        }
-
-        const preferredModel = storedModel || null;
-        preferredModelRef.current = preferredModel;
-        if (preferredModel) {
-          selectedModelRef.current = preferredModel;
-          setSelectedModelState(preferredModel);
-          setSelectionSettled(false);
-        }
-
-        const latest = await fetchUntilPreferredAvailable(
-          preferredModel,
-          MODEL_RESTORE_TIMEOUT_MS,
-          MODEL_RESTORE_RETRY_MS,
-          () => mountedRef.current && refreshGenerationRef.current === generation,
-        );
-
-        if (!mountedRef.current || refreshGenerationRef.current !== generation) {
-          return;
-        }
-
-        applyCatalog(latest.providers, latest.models, preferredModel, true);
-      } catch (error) {
-        if (!mountedRef.current || refreshGenerationRef.current !== generation) {
-          return;
-        }
-        console.error('Failed to load providers/models:', error);
-        setModels([]);
-        setSelectionSettled(true);
-      } finally {
-        if (mountedRef.current && refreshGenerationRef.current === generation) {
-          setIsLoadingModels(false);
-        }
-      }
+    })();
+    return () => {
+      canceled = true;
+      mountedRef.current = false;
+      unsubscribe();
+      clearTimeout(restoreTimerRef.current);
     };
+  }, [applyCatalog, startRestoreWindow]);
 
-    void loadProvidersAndModels();
-  }, [applyCatalog]);
-
-  const selectedProvider = models.find(m => m.id === selectedModel)?.provider || 'ollama';
-
+  const selectedProvider = models.find(model => model.id === selectedModel)?.provider || 'ollama';
   useEffect(() => {
-    if (!hasHydratedStore || !selectionSettled) return;
-    if (!selectedModel || !modelIsAvailable(models, selectedModel)) return;
-
-    window.assistant.storeSaveModel(selectedModel).catch(err => {
-      console.error('Failed to save selected model:', err);
+    if (!hasHydratedStore || !selectionSettled || !selectedModel) return;
+    if (!models.some(model => model.id === selectedModel)) return;
+    window.assistant.storeSaveModel(selectedModel).catch(error => {
+      console.error('Failed to save selected model:', error);
     });
-    const provider = models.find(m => m.id === selectedModel)?.provider || 'ollama';
-    window.assistant.storeSaveProvider(provider).catch(err => {
-      console.error('Failed to save selected provider:', err);
+    window.assistant.storeSaveProvider(selectedProvider).catch(error => {
+      console.error('Failed to save selected provider:', error);
     });
-  }, [selectedModel, models, hasHydratedStore, selectionSettled]);
+  }, [selectedModel, selectedProvider, models, hasHydratedStore, selectionSettled]);
 
-  return {
-    models,
-    providers,
-    selectedModel,
-    isLoadingModels,
-    selectedProvider,
-    setSelectedModel,
-    refreshModels,
-    hasHydratedStore,
-  };
+  return { models, providers, selectedModel, isLoadingModels, selectedProvider,
+    setSelectedModel, refreshModels, hasHydratedStore };
 }

@@ -1,3 +1,4 @@
+import type { ModelCatalogSnapshot } from '../shared/modelCatalog';
 import type { ConversationBranches } from '../shared/conversationBranches';
 import type { SearchSourceGroup, SearchSourcesEvent } from '../shared/search';
 import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
@@ -41,6 +42,7 @@ export interface Conversation {
   folderId: string | null;
   isPinned: boolean;
   isLoaded: boolean;
+  loadError?: string;
 }
 
 export interface Folder {
@@ -88,6 +90,11 @@ export interface SerializedFolder {
   id: string;
   name: string;
   timestamp: string;
+}
+
+export interface DeletedConversationMetadata extends SerializedConversationMetadata {
+  deletedAt: string;
+  expiresAt: string;
 }
 
 export type SerializedConversationDrafts = Record<string, string>;
@@ -141,8 +148,11 @@ declare global {
   interface Window {
     assistant: {
       getModels: () => Promise<ModelInfo[]>;
+      getModelCatalog: (force?: boolean) => Promise<ModelCatalogSnapshot>;
+      onModelCatalogChanged: (callback: (snapshot: ModelCatalogSnapshot) => void) => () => void;
       getModelsForProvider: (providerId: string) => Promise<ModelInfo[]>;
       getProviders: () => Promise<ProviderInfo[]>;
+      onBeforeQuit: (callback: () => Promise<void>) => () => void;
       pickAttachmentPaths: () => Promise<string[]>;
       readAttachments: (filePaths: string[]) => Promise<AttachmentSelectionResult>;
       getPathForFile: (file: File) => string;
@@ -174,6 +184,9 @@ declare global {
       storeSaveConversationList: (conversations: SerializedConversationMetadata[]) => Promise<{ success: boolean }>;
       storeSaveConversation: (conversation: SerializedConversation) => Promise<{ success: boolean }>;
       storeDeleteConversation: (id: string) => Promise<{ success: boolean }>;
+      storeListDeletedConversations: () => Promise<DeletedConversationMetadata[]>;
+      storeRestoreConversation: (id: string) => Promise<SerializedConversation>;
+      storePermanentlyDeleteConversation: (id: string) => Promise<{ success: boolean }>;
       storeLoadFolders: () => Promise<SerializedFolder[]>;
       storeSaveFolders: (folders: SerializedFolder[]) => Promise<{ success: boolean }>;
       storeDeleteFolder: (id: string) => Promise<{ success: boolean }>;

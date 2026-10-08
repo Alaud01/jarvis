@@ -1,8 +1,9 @@
 import { ipcMain } from 'electron';
 import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../../shared/stream';
 import type { SearchSourcesEvent } from '../../shared/search';
-import { getAllModels, getProvider } from '../providers/registry';
-import type { ChatMessage, ModelInfo, StreamChunk, ToolExecutionResult } from '../providers/types';
+import { getCachedModel, getProvider } from '../providers/registry';
+import type { ChatMessage, StreamChunk, ToolExecutionResult } from '../providers/types';
+import { hasToolImages, isImageInputUnsupportedError, stripToolImages, toToolImageFields } from '../providers/toolImages';
 import { compactMessagesIfNeeded, estimateTotalTokens, getContextThresholdTokens } from '../contextCompaction';
 import { closeBrowserControl } from '../browserControlService';
 import {
@@ -33,6 +34,7 @@ import { tavilySearch } from '../tavilySearchService';
 import { fetchUrlContent } from '../fetchService';
 import { logMainProcess, CHAT_MODEL_KEEP_ALIVE } from '../app/lifecycle';
 import { recordResolvedTurnUsage } from '../usageService';
+import { MAX_TURN_DURATION_MS, TOOL_BUDGET_MESSAGE, TurnBudget } from '../tools/turnBudget';
 
 // Truncated previews keep model output and tool calls readable in Jarvis logs.
 const LOG_PREVIEW_CHARS = 500;
@@ -63,6 +65,8 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       assistantMessageId: request.assistantMessageId,
     };
     const activeCompactionIds = new Set<string>();
+    let budgetStopMessage: string | undefined;
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 
     const sendToRenderer = (channel: string, ...args: unknown[]) => {
       try {
@@ -103,6 +107,11 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
     try {
       const abortController = new AbortController();
       activeStreams.set(streamKey, abortController);
+      const budget = new TurnBudget();
+      deadlineTimer = setTimeout(() => {
+        budgetStopMessage = 'This response reached its time limit. You can continue from the results above.';
+        abortController.abort();
+      }, MAX_TURN_DURATION_MS);
       let inThinking = false;
       let thinkingConsoleBuffer = '';
 
@@ -175,13 +184,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       let fetchUrlCallsThisTurn = 0;
       let notionCallsThisTurn = 0;
 
-      let allModels: ModelInfo[] = [];
-      try {
-        allModels = await getAllModels();
-      } catch (error) {
-        console.error('[Context Compaction] Failed to load model list for context limit lookup:', error);
-      }
-      const selectedModelInfo = allModels.find((m) => m.id === request.model);
+      const selectedModelInfo = getCachedModel(request.provider, request.model);
       const modelContextLength = selectedModelInfo?.contextLength;
       const contextThresholdTokens = getContextThresholdTokens(modelContextLength);
 
@@ -189,6 +192,17 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         toolName: string,
         rawArguments: Record<string, unknown> | string,
       ): Promise<ToolExecutionResult> => {
+        abortController.signal.throwIfAborted();
+        if (!budget.takeToolCall()) {
+          if (provider.conversationMode === 'threaded') {
+            // Codex owns its internal loop. Interrupt it rather than starting a
+            // second model turn outside the existing dynamic-tool bridge.
+            budgetStopMessage = 'This response reached its tool limit. You can continue from the results above.';
+            abortController.abort();
+            abortController.signal.throwIfAborted();
+          }
+          return { success: false, content: TOOL_BUDGET_MESSAGE };
+        }
         console.warn('[LLM] Tool call:', {
           tool: toolName,
           argumentsHead: truncateForLog(rawArguments),
@@ -214,7 +228,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           }
 
           tavilySearchCallsThisTurn += 1;
-          const searchResult = await tavilySearch(args);
+          const searchResult = await tavilySearch(args, abortController.signal);
           const searchContent = formatTavilySearchToolResult(searchResult);
           const sourceGroup = createSearchSourceGroup(searchResult);
           if (sourceGroup) {
@@ -254,7 +268,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           }
 
           fetchUrlCallsThisTurn += 1;
-          const fetchResult = await fetchUrlContent(args);
+          const fetchResult = await fetchUrlContent(args, abortController.signal);
           const fetchContent = formatFetchToolResult(fetchResult);
           logMainProcess('LLM', 'Fetch tool result returned to LLM', {
             url: args.url,
@@ -354,6 +368,8 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
           provider,
           model: request.model,
           modelContextLength,
+          signal: abortController.signal,
+          conversationId: request.conversationId,
           onCompactionStart: () => {
             compactionId = beginCompaction();
           },
@@ -372,6 +388,8 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       };
 
       while (true) {
+        abortController.signal.throwIfAborted();
+        budget.startRound();
         if (provider.conversationMode !== 'threaded') {
           const compacted = await compactMessagesForContext(baseMessages, 'active-context');
           if (compacted !== baseMessages) {
@@ -380,7 +398,8 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         }
 
         const turnStartedAtMs = Date.now();
-        const turnResult = await provider.streamChat(
+        abortController.signal.throwIfAborted();
+        const streamTurn = () => provider.streamChat(
           request.model,
           baseMessages,
           abortController,
@@ -397,7 +416,23 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
             executeTool: (toolName, argumentsValue) => executeTool(toolName, argumentsValue),
           }
         );
+        let turnResult;
+        try {
+          turnResult = await streamTurn();
+        } catch (error) {
+          if (isAbortLikeError(error) || !hasToolImages(baseMessages) || !isImageInputUnsupportedError(error)) {
+            throw error;
+          }
+          logMainProcess('LLM', 'Model rejected tool screenshot; retrying without images', {
+            conversationId: request.conversationId,
+            model: request.model,
+            error: error instanceof Error ? error.message.slice(0, 300) : String(error),
+          });
+          stripToolImages(baseMessages, 'unsupported');
+          turnResult = await streamTurn();
+        }
         const turnEndedAtMs = Date.now();
+        abortController.signal.throwIfAborted();
         const assistantMessage = turnResult.assistantMessage;
         console.warn('[LLM] Model output:', {
           model: request.model,
@@ -425,44 +460,62 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
         const toolResultMessages: ChatMessage[] = [];
 
         for (const toolCall of toolCalls) {
+          abortController.signal.throwIfAborted();
           const result = await executeTool(toolCall.function.name, toolCall.function.arguments);
+          abortController.signal.throwIfAborted();
           toolResultMessages.push({
             role: 'tool',
             tool_call_id: toolCall.id || toolCall.function.name,
             tool_name: toolCall.function.name,
             content: result.content,
+            ...toToolImageFields(result.imageUrls),
           });
         }
+        // Only the newest screenshots stay in context; older ones are resent
+        // every round and quickly dominate the request size.
+        if (hasToolImages(toolResultMessages)) {
+          stripToolImages(baseMessages, 'superseded');
+        }
 
-        if (requiresToolResultSynthesis(request.model)) {
+        if (budget.exhausted || requiresToolResultSynthesis(request.model)) {
           logMainProcess('LLM', 'Using tool-result synthesis fallback', {
             conversationId: request.conversationId,
             model: request.model,
             toolCallCount: toolCalls.length,
           });
-          let synthesisMessages = buildToolResultSynthesisMessages(baseMessages, assistantMessage, toolResultMessages);
-          const synthesisEstimatedTokens = estimateTotalTokens(synthesisMessages);
-          if (synthesisEstimatedTokens > contextThresholdTokens) {
-            logMainProcess('LLM', 'Synthesis messages near context limit; compacting before fallback', {
-              conversationId: request.conversationId,
-              model: request.model,
-              synthesisEstimatedTokens,
-              contextThresholdTokens,
-            });
-            let compactionId: string | null = null;
-            const compactedSynthesis = await compactMessagesIfNeeded(synthesisMessages, {
-              provider,
-              model: request.model,
-              modelContextLength,
-              onCompactionStart: () => {
-                compactionId = beginCompaction();
-              },
-            });
-            if (compactionId) finishCompaction(compactionId, 'completed');
-            synthesisMessages = compactedSynthesis;
-          }
+          const prepareSynthesisMessages = async () => {
+            let messages = buildToolResultSynthesisMessages(baseMessages, assistantMessage, toolResultMessages);
+            if (budget.exhausted) {
+              messages.push({ role: 'user', content: TOOL_BUDGET_MESSAGE });
+            }
+            const synthesisEstimatedTokens = estimateTotalTokens(messages);
+            if (synthesisEstimatedTokens > contextThresholdTokens) {
+              logMainProcess('LLM', 'Synthesis messages near context limit; compacting before fallback', {
+                conversationId: request.conversationId,
+                model: request.model,
+                synthesisEstimatedTokens,
+                contextThresholdTokens,
+              });
+              let compactionId: string | null = null;
+              const compactedSynthesis = await compactMessagesIfNeeded(messages, {
+                provider,
+                model: request.model,
+                modelContextLength,
+                signal: abortController.signal,
+                conversationId: request.conversationId,
+                onCompactionStart: () => {
+                  compactionId = beginCompaction();
+                },
+              });
+              if (compactionId) finishCompaction(compactionId, 'completed');
+              messages = compactedSynthesis;
+            }
+            return messages;
+          };
+          let synthesisMessages = await prepareSynthesisMessages();
           const synthesisStartedAtMs = Date.now();
-          const synthesisResult = await provider.streamChat(
+          abortController.signal.throwIfAborted();
+          const streamSynthesis = () => provider.streamChat(
             request.model,
             synthesisMessages,
             abortController,
@@ -471,8 +524,33 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
               tools: null,
               keepAlive: CHAT_MODEL_KEEP_ALIVE,
               reasoningEffort: request.reasoningEffort,
+              conversationId: request.conversationId,
+              contextKey: request.contextKey,
             },
           );
+          let synthesisResult;
+          try {
+            synthesisResult = await streamSynthesis();
+          } catch (error) {
+            if (
+              isAbortLikeError(error)
+              || (!hasToolImages(baseMessages) && !hasToolImages(toolResultMessages))
+              || !isImageInputUnsupportedError(error)
+            ) {
+              throw error;
+            }
+            logMainProcess('LLM', 'Model rejected synthesis screenshot; retrying without images', {
+              conversationId: request.conversationId,
+              model: request.model,
+              error: error instanceof Error ? error.message.slice(0, 300) : String(error),
+            });
+            stripToolImages(baseMessages, 'unsupported');
+            stripToolImages(toolResultMessages, 'unsupported');
+            synthesisMessages = await prepareSynthesisMessages();
+            abortController.signal.throwIfAborted();
+            synthesisResult = await streamSynthesis();
+          }
+          abortController.signal.throwIfAborted();
           recordResolvedTurnUsage({
             model: request.model,
             provider: request.provider,
@@ -513,6 +591,9 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       flushThinkingConsoleBuffer('stream-error');
       if (isAbortLikeError(error)) {
         closeThinkingSection('stream-abort');
+        if (budgetStopMessage) {
+          sendToRenderer('ollama-chunk', { ...streamContext, chunk: `\n\n${budgetStopMessage}` });
+        }
         sendToRenderer('ollama-done', streamContext);
         return { success: true, aborted: true };
       }
@@ -521,6 +602,7 @@ export function registerChatStreamHandler(activeStreams: Map<string, AbortContro
       sendToRenderer('ollama-error', errorPayload);
       throw error;
     } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       activeStreams.delete(streamKey);
     }
   });

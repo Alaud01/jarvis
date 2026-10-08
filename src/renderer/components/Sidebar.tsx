@@ -10,6 +10,7 @@ import {
 } from '@dnd-kit/core';
 import type { DragStartEvent, DragEndEvent, DragOverEvent } from '@dnd-kit/core';
 import ThemeSwitcher from './ThemeSwitcher';
+import type { WorkspaceView } from '../../shared/workspaceViews';
 import { sidebarCollision } from '../utils/sidebarCollision';
 
 interface Conversation {
@@ -47,9 +48,10 @@ interface SidebarProps {
     targetConversationId: string,
     placement: DropPlacement,
   ) => void;
-  activeWorkspace: 'chat' | 'dictionary' | 'usage';
+  activeWorkspace: WorkspaceView;
   onDictionaryOpen: () => void;
   onUsageOpen: () => void;
+  onRecentlyDeletedOpen: () => void;
 }
 
 interface ContextMenuState {
@@ -302,7 +304,8 @@ function DraggableConversationItem({
               e.stopPropagation();
               onDelete(conversation.id);
             }}
-            title="Delete conversation (Cmd Shift Backspace)"
+            disabled={conversation.isStreaming}
+            title={conversation.isStreaming ? 'Stop the response before deleting' : 'Delete conversation (Cmd Shift Backspace)'}
           >
             <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -349,6 +352,7 @@ function DroppableFolderItem({
   onContextMenu,
   children,
   isDragOver,
+  isDeleteDisabled,
 }: {
   folder: Folder;
   conversationCount: number;
@@ -363,6 +367,7 @@ function DroppableFolderItem({
   onContextMenu: (e: React.MouseEvent, id: string) => void;
   children: React.ReactNode;
   isDragOver: boolean;
+  isDeleteDisabled: boolean;
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: `folder-${folder.id}`,
@@ -483,7 +488,8 @@ function DroppableFolderItem({
                 e.stopPropagation();
                 onDelete(folder.id);
               }}
-              title="Delete folder"
+              disabled={isDeleteDisabled}
+              title={isDeleteDisabled ? 'Stop all responses in this folder before deleting' : 'Delete folder'}
             >
               <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -579,6 +585,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   activeWorkspace,
   onDictionaryOpen,
   onUsageOpen,
+  onRecentlyDeletedOpen,
 }) => {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [focusedFolderId, setFocusedFolderId] = useState<string | null>(null);
@@ -1043,6 +1050,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                           onDelete={onDeleteFolder}
                           onContextMenu={handleFolderContextMenu}
                           isDragOver={dragOverFolderId === folder.id}
+                          isDeleteDisabled={allFolderConversations.some(c => c.isStreaming)}
                         >
                           {pinnedCount > 0 && (
                             <div className="py-2 pl-1 text-[0.75rem] text-text-tertiary">
@@ -1074,6 +1082,15 @@ const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
+        <button
+          type="button"
+          aria-current={activeWorkspace === 'recently-deleted' ? 'page' : undefined}
+          className={`mx-2 mb-2 flex shrink-0 items-center gap-2 px-3 py-2 text-left text-xs transition-colors ${activeWorkspace === 'recently-deleted' ? 'bg-bg-active text-text-primary' : 'text-text-tertiary hover:bg-bg-hover hover:text-text-primary'}`}
+          onClick={() => { closeMenus(); onRecentlyDeletedOpen(); }}
+        >
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></svg>
+          Recently Deleted
+        </button>
         <div className="flex shrink-0 items-center gap-3 border-t border-border-primary px-5 py-3">
           <ThemeSwitcher />
           <div className="ml-auto flex items-center gap-1">
@@ -1195,6 +1212,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className="w-full px-3 py-1.5 text-left text-red-400 transition-colors hover:bg-bg-primary"
+                disabled={contextConversation?.isStreaming}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (contextMenu.targetId) {
@@ -1225,6 +1243,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               <button
                 type="button"
                 className="w-full px-3 py-1.5 text-left text-red-400 transition-colors hover:bg-bg-primary"
+                disabled={conversations.some(c => c.folderId === contextMenu.targetId && c.isStreaming)}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (contextMenu.targetId) {

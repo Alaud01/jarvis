@@ -27,7 +27,6 @@ export interface AppMenuActions {
 }
 
 const REGENERABLE_CACHE_PATHS = [
-  'Cache',
   'Code Cache',
   'GPUCache',
   'DawnGraphiteCache',
@@ -264,8 +263,13 @@ export function buildAppMenu(actions: AppMenuActions = {}): Electron.MenuItemCon
 export async function clearRegenerableAppCaches(): Promise<void> {
   const userDataPath = app.getPath('userData');
 
-  await Promise.allSettled([
+  // Let Electron manage its HTTP cache; never remove its live Cache directory.
+  // Finish this phase before starting filesystem cleanup, even if it fails.
+  const cacheResults = await Promise.allSettled([
     session.defaultSession.clearCache(),
+  ]);
+
+  await Promise.allSettled([
     ...REGENERABLE_CACHE_PATHS.map(relativePath =>
       fs.rm(path.join(userDataPath, relativePath), {
         recursive: true,
@@ -275,7 +279,7 @@ export async function clearRegenerableAppCaches(): Promise<void> {
       }),
     ),
   ]).then(results => {
-    const failures = results.filter(result => result.status === 'rejected');
+    const failures = [...cacheResults, ...results].filter(result => result.status === 'rejected');
     if (failures.length > 0) {
       console.warn('[Main] Some app cache cleanup tasks failed:', failures.map(failure => {
         const reason = failure.reason as NodeJS.ErrnoException;

@@ -297,6 +297,21 @@ const ModelSelector: React.FC<{
   );
 };
 
+const REASONING_EFFORT_LABELS: Record<string, string> = {
+  none: 'Off',
+  on: 'On',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra High',
+  max: 'Max',
+};
+
+function getReasoningEffortLabel(effort: string): string {
+  return REASONING_EFFORT_LABELS[effort] ?? effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
 const ReasoningSelector: React.FC<{
   model?: ModelInfo;
   selectedEffort: string | null;
@@ -344,36 +359,42 @@ const ReasoningSelector: React.FC<{
       >
         <span>Reasoning</span>
         <span className="text-text-tertiary text-[0.5rem] normal-case tracking-normal">
-          {selectedEffort ?? 'N/A'}
+          {selectedEffort ? getReasoningEffortLabel(selectedEffort) : 'N/A'}
         </span>
       </button>
 
       {isOpen && (
-        <div className="absolute bottom-full left-0 mb-1 w-44 bg-bg-primary border border-border-primary shadow-lg z-50">
-          {efforts.map(option => (
-            <button
-              key={option.value}
-              data-selected={option.value === selectedEffort ? 'true' : undefined}
-              type="button"
-              onClick={() => {
-                onEffortSelect(option.value);
-                setIsOpen(false);
-              }}
-              title={option.description}
-              className={`w-full text-left px-3 py-1.5 flex items-center justify-between gap-2 transition-colors duration-100 cursor-pointer ${
-                option.value === selectedEffort
-                  ? 'bg-bg-secondary text-text-primary'
-                  : 'text-text-secondary hover:bg-bg-secondary hover:text-text-primary'
-              }`}
-            >
-              <span className="font-mono text-xs">{option.value}</span>
-              {option.description && (
-                <span className="text-text-tertiary text-[0.55rem] normal-case tracking-normal truncate">
-                  {option.description}
+        <div className="absolute bottom-full left-0 mb-1 w-60 bg-bg-primary border border-border-primary shadow-lg z-50 flex flex-col" style={{ maxHeight: 'min(400px, 60vh)' }}>
+          <div className="px-3 py-1 font-mono text-[0.55rem] uppercase tracking-widest text-text-tertiary bg-bg-secondary shrink-0">
+            Reasoning
+          </div>
+          <div className="overflow-y-auto">
+            {efforts.map(option => (
+              <button
+                key={option.value}
+                data-selected={option.value === selectedEffort ? 'true' : undefined}
+                type="button"
+                onClick={() => {
+                  onEffortSelect(option.value);
+                  setIsOpen(false);
+                }}
+                className={`w-full text-left px-3 py-1.5 flex flex-col gap-0.5 transition-colors duration-100 cursor-pointer ${
+                  option.value === selectedEffort
+                    ? 'bg-bg-secondary text-text-primary'
+                    : 'text-text-secondary hover:bg-bg-secondary hover:text-text-primary'
+                }`}
+              >
+                <span className="flex items-center gap-1.5">
+                  <span className="font-mono text-xs">{getReasoningEffortLabel(option.value)}</span>
+                  {option.value === model?.defaultReasoningEffort && (
+                    <span className="border border-border-secondary px-1 font-mono text-[0.5rem] uppercase tracking-widest text-text-tertiary">
+                      Default
+                    </span>
+                  )}
                 </span>
-              )}
-            </button>
-          ))}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -1,4 +1,4 @@
-export const WORKSPACE_VIEWS = ['chat', 'dictionary', 'usage'] as const;
+export const WORKSPACE_VIEWS = ['chat', 'dictionary', 'usage', 'recently-deleted'] as const;
 
 export const SCROLL_KEY_DICTIONARY = 'dictionary' as const;
 export const SCROLL_KEY_USAGE = 'usage' as const;

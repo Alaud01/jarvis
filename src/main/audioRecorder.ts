@@ -2,6 +2,7 @@ import { ipcMain, systemPreferences, BrowserWindow, type MessagePortMain } from 
 import { debugLog } from './logger';
 import { isMacLidClosed } from './macLidState';
 import { isMicrophoneUnavailableErrorName, NO_MIC_DETECTED_MESSAGE } from '../shared/audioCapture';
+import { logVoiceTiming } from './voiceTiming';
 
 const SAMPLE_RATE = 16000;
 const NUM_CHANNELS = 1;
@@ -122,14 +123,22 @@ ipcMain.on('audio-data', (_event, chunk: ArrayBuffer | ArrayBufferView) => {
   storeAudioChunk(chunk);
 });
 
-export async function startRecording(): Promise<{ success: boolean; error?: string }> {
+export async function startRecording(requestId = 'standalone'): Promise<{ success: boolean; error?: string }> {
+  const startedAt = performance.now();
+  const timings: Record<string, number> = {};
+  const finish = (result: { success: boolean; error?: string }) => {
+    timings.totalMs = performance.now() - startedAt;
+    logVoiceTiming(requestId, `microphone (${result.success ? 'ready' : 'failed'})`, timings);
+    return result;
+  };
   const hasAccess = await requestMicrophoneAccess();
+  timings.permissionMs = performance.now() - startedAt;
   if (!hasAccess) {
-    return { success: false, error: 'Microphone access denied. Please grant permission in System Preferences.' };
+    return finish({ success: false, error: 'Microphone access denied. Please grant permission in System Preferences.' });
   }
   
   if (!mainWindow) {
-    return { success: false, error: 'Main window not available' };
+    return finish({ success: false, error: 'Main window not available' });
   }
   
   audioChunks = [];
@@ -141,26 +150,37 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
   isRecording = true;
   
   try {
+    let stepStartedAt = performance.now();
     const lidClosed = await isMacLidClosed();
+    timings.lidStateMs = performance.now() - stepStartedAt;
+    stepStartedAt = performance.now();
     // Request microphone access from the renderer
     const result = await mainWindow.webContents.executeJavaScript(`
       (async function() {
+        const timings = {};
+        let lapStartedAt = performance.now();
+        const lap = name => {
+          const now = performance.now();
+          timings[name] = now - lapStartedAt;
+          lapStartedAt = now;
+        };
         try {
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             return { success: false, error: 'getUserMedia not available in this context' };
           }
 
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          if (!devices.some(device => device.kind === 'audioinput')) {
-            return { success: false, error: '${NO_MIC_DETECTED_MESSAGE}', errorCode: 'no-microphone' };
+          const blockedByLid = label => ${lidClosed} && /macbook|built[- ]?in|internal microphone/i.test(label);
+          // With an open lid, getUserMedia reports missing devices directly.
+          // Closed-lid capture still checks the default device before opening it.
+          if (${lidClosed}) {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const defaultInput = devices.find(device => device.kind === 'audioinput' && device.deviceId === 'default');
+            if (!devices.some(device => device.kind === 'audioinput') || (defaultInput && blockedByLid(defaultInput.label))) {
+              return { success: false, error: '${NO_MIC_DETECTED_MESSAGE}', errorCode: 'no-microphone' };
+            }
+            lap('enumerateDevicesMs');
           }
 
-          const blockedByLid = label => ${lidClosed} && /macbook|built[- ]?in|internal microphone/i.test(label);
-          const defaultInput = devices.find(device => device.kind === 'audioinput' && device.deviceId === 'default');
-          if (defaultInput && blockedByLid(defaultInput.label)) {
-            return { success: false, error: '${NO_MIC_DETECTED_MESSAGE}', errorCode: 'no-microphone' };
-          }
-          
           const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
               sampleRate: ${SAMPLE_RATE},
@@ -170,6 +190,7 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
             }
           });
 
+          lap('getUserMediaMs');
           const audioTrack = stream.getAudioTracks()[0];
           if (!audioTrack || audioTrack.readyState !== 'live' || blockedByLid(audioTrack.label)) {
             stream.getTracks().forEach(track => track.stop());
@@ -181,13 +202,14 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
             await audioContext.resume();
           }
           const source = audioContext.createMediaStreamSource(stream);
+          lap('audioContextMs');
           
           // Store references for cleanup
           window.__audioStream = stream;
           window.__audioContext = audioContext;
           
-          await audioContext.audioWorklet.addModule(
-            URL.createObjectURL(new Blob([\`
+          // The module URL is reusable across AudioContexts in this renderer.
+          window.__audioWorkletUrl = window.__audioWorkletUrl || URL.createObjectURL(new Blob([\`
               class AudioProcessor extends AudioWorkletProcessor {
                 constructor() {
                   super();
@@ -209,8 +231,9 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
                 }
               }
               registerProcessor('audio-processor', AudioProcessor);
-            \`], { type: 'application/javascript' }))
-          );
+            \`], { type: 'application/javascript' }));
+          await audioContext.audioWorklet.addModule(window.__audioWorkletUrl);
+          lap('workletModuleMs');
           
           const processor = new AudioWorkletNode(audioContext, 'audio-processor');
           let audioPort = null;
@@ -242,9 +265,11 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
           window.__audioProcessor = processor;
           window.__audioSource = source;
           
-          return { success: true };
+          lap('audioGraphMs');
+          return { success: true, timings };
         } catch (error) {
           return {
+            timings,
             success: false,
             error: error instanceof Error ? error.message : String(error),
             errorName: error && typeof error === 'object' && 'name' in error ? String(error.name) : '',
@@ -252,6 +277,8 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
         }
       })()
     `);
+    timings.rendererMicrophoneAndWorkletMs = performance.now() - stepStartedAt;
+    if (result.timings) Object.assign(timings, result.timings);
     
     if (!result.success) {
       await cleanupAudioCapture();
@@ -264,13 +291,13 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
       closeAudioPort();
       const noMicrophone = result.errorCode === 'no-microphone'
         || isMicrophoneUnavailableErrorName(result.errorName);
-      return {
+      return finish({
         success: false,
         error: noMicrophone ? NO_MIC_DETECTED_MESSAGE : (result.error || 'Failed to start audio capture'),
-      };
+      });
     }
     
-    return { success: true };
+    return finish({ success: true });
   } catch (error) {
     isRecording = false;
     audioChunks = [];
@@ -279,7 +306,7 @@ export async function startRecording(): Promise<{ success: boolean; error?: stri
     audioSumSquares = 0;
     audioPeakAbs = 0;
     closeAudioPort();
-    return { success: false, error: error instanceof Error ? error.message : 'Unknown error starting recording' };
+    return finish({ success: false, error: error instanceof Error ? error.message : 'Unknown error starting recording' });
   }
 }
 

@@ -9,6 +9,7 @@ import ScrollToBottomButton from './components/ScrollToBottomButton';
 import VoiceSetupPanel from './components/VoiceSetupPanel';
 import PersonalDictionary from './components/PersonalDictionary';
 import UsageDashboard from './components/UsageDashboard';
+import RecentlyDeleted from './components/RecentlyDeleted';
 import { ThemeProvider } from './context/ThemeContext';
 import type { FileAttachment } from '../shared/attachments';
 import type {
@@ -81,6 +82,7 @@ const App: React.FC = () => {
     unreadCompleteConversationIds,
     restoredWorkspaceView,
     hasHydratedStore,
+    storeLoadError,
     setCurrentConversationId,
     setConversations,
     setConversationDrafts,
@@ -97,6 +99,9 @@ const App: React.FC = () => {
     handleReorderConversation,
     handleRenameConversation,
     handleDeleteConversation,
+    handleRestoreConversation,
+    isStoreMutationPending,
+    canEditConversation,
   } = conversationsHook;
 
   const modelsHook = useModels(hasHydratedStore);
@@ -123,8 +128,7 @@ const App: React.FC = () => {
   const streaming = useStreaming(conversations, visibleConversationId, setConversations, setUnreadCompleteConversationIds);
   const {
     registerStreamSession,
-    unregisterStreamSession,
-    markConversationCompleteUnread,
+    handleStreamFailure,
     handleStopStreaming,
   } = streaming;
 
@@ -149,17 +153,18 @@ const App: React.FC = () => {
   const voiceHook = useVoice((text, autoSubmit, newChat) => {
     handleVoiceTranscriptRef.current(text, autoSubmit, newChat);
   });
+  const { pendingJarvisMessageRef } = voiceHook;
 
   const handleVoiceTranscript = useCallback((text: string, autoSubmit: boolean, newChat: boolean) => {
     if (newChat && autoSubmit) {
       setWorkspaceView('chat');
-      voiceHook.pendingJarvisMessageRef.current = text;
+      pendingJarvisMessageRef.current = text;
       setCurrentConversationId(null);
       setNewChatTrigger(prev => prev + 1);
     } else {
       voiceHook.onVoiceTranscript(text, autoSubmit, newChat);
     }
-  }, [setCurrentConversationId, voiceHook]);
+  }, [pendingJarvisMessageRef, setCurrentConversationId, voiceHook]);
 
   useEffect(() => {
     handleVoiceTranscriptRef.current = handleVoiceTranscript;
@@ -268,12 +273,14 @@ const App: React.FC = () => {
   const messageVersions = useMemo(() => currentConversation ? getConversationVersions(currentConversation) : undefined, [currentConversation]);
 
   const handleSelectVersion = useCallback((messageId: string, targetId: string) => {
+    if (!canEditConversation(currentConversationId)) return;
     setEditingMessageId(null);
     setConversations(prev => prev.map(c => c.id === currentConversationId
       ? selectConversationVersion(c, messageId, targetId) : c));
-  }, [currentConversationId, setConversations]);
+  }, [canEditConversation, currentConversationId, setConversations]);
 
   const handleResubmitMessage = useCallback(async (messageId: string, newText: string) => {
+    if (!canEditConversation(currentConversationId)) return;
     if (!selectedModel) {
       alert('Please select a model first');
       return;
@@ -346,30 +353,12 @@ const App: React.FC = () => {
       });
     } catch (error) {
       console.error('Error sending message:', error);
-      setConversations(prev =>
-        prev.map(c =>
-          c.id === currentConversationId
-            ? {
-                ...c,
-                messages: c.messages.map(m =>
-                  m.id === assistantMessageId
-                    ? {
-                        ...m,
-                        text: `Error: ${error}. Make sure your selected provider is running and configured.`,
-                        isStreaming: false,
-                      }
-                    : m
-                ),
-              }
-            : c
-        )
-      );
-      markConversationCompleteUnread(conversation.id);
-      unregisterStreamSession(assistantMessageId);
+      handleStreamFailure(conversation.id, assistantMessageId, error instanceof Error ? error.message : String(error));
     }
-  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, selectedReasoningEffort, conversations, registerStreamSession, unregisterStreamSession, setConversations]);
+  }, [canEditConversation, currentConversationId, handleStreamFailure, selectedModel, selectedProvider, selectedReasoningEffort, conversations, registerStreamSession, setConversations]);
 
   const handleRegenerateResponse = useCallback(async (messageId: string) => {
+    if (!canEditConversation(currentConversationId)) return;
     if (!selectedModel) {
       alert('Please select a model first');
       return;
@@ -422,28 +411,9 @@ const App: React.FC = () => {
       });
     } catch (error) {
       console.error('Error regenerating response:', error);
-      setConversations(prev =>
-        prev.map(c =>
-          c.id === currentConversationId
-            ? {
-                ...c,
-                messages: c.messages.map(m =>
-                  m.id === assistantMessageId
-                    ? {
-                        ...m,
-                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure your selected provider is running and configured.`,
-                        isStreaming: false,
-                      }
-                    : m
-                ),
-              }
-            : c
-        )
-      );
-      markConversationCompleteUnread(conversation.id);
-      unregisterStreamSession(assistantMessageId);
+      handleStreamFailure(conversation.id, assistantMessageId, error instanceof Error ? error.message : String(error));
     }
-  }, [currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, selectedReasoningEffort, conversations, registerStreamSession, unregisterStreamSession, setConversations]);
+  }, [canEditConversation, currentConversationId, handleStreamFailure, selectedModel, selectedProvider, selectedReasoningEffort, conversations, registerStreamSession, setConversations]);
 
   const clearConversationDraftForSend = useCallback((draftKey: string) => {
     setConversationDrafts(prev => {
@@ -458,6 +428,7 @@ const App: React.FC = () => {
   }, [setConversationDrafts]);
 
   const handleSendMessage = useCallback(async (text: string, attachments: FileAttachment[] = []) => {
+    if (!canEditConversation(currentConversationId)) return;
     if (!selectedModel) {
       alert('Please select a model first');
       return;
@@ -495,6 +466,7 @@ const App: React.FC = () => {
         .catch(() => {});
     } else if (currentConversation && !currentConversation.isLoaded) {
       const storedConversation = await window.assistant.storeLoadConversation(conversationId);
+      if (!canEditConversation(conversationId)) return;
       if (storedConversation) {
         const loadedConversation = deserializeConversation(storedConversation);
         conversationMessagesForRequest = loadedConversation.messages;
@@ -542,6 +514,10 @@ const App: React.FC = () => {
       )
     );
 
+    // A new turn always starts pinned to the bottom: re-enable auto-scroll for
+    // the message container (fresh thinking sections follow on mount by default).
+    messageListRef.current?.scrollToBottom();
+
     clearConversationDraftForSend(draftKey);
 
     registerStreamSession(conversationId!, assistantMessageId);
@@ -563,36 +539,17 @@ const App: React.FC = () => {
       });
     } catch (error) {
       console.error('Error sending message:', error);
-      setConversations(prev =>
-        prev.map(c =>
-          c.id === conversationId
-            ? {
-                ...c,
-                messages: c.messages.map(m =>
-                  m.id === assistantMessageId
-                    ? {
-                        ...m,
-                        text: `Error: ${error instanceof Error ? error.message : 'Failed to get response from model'}. Make sure your selected provider is running and configured.`,
-                        isStreaming: false,
-                      }
-                    : m
-                ),
-              }
-            : c
-        )
-      );
-      markConversationCompleteUnread(conversationId!);
-      unregisterStreamSession(assistantMessageId);
+      handleStreamFailure(conversationId!, assistantMessageId, error instanceof Error ? error.message : String(error));
     }
-  }, [clearConversationDraftForSend, currentConversation, currentConversationId, markConversationCompleteUnread, selectedModel, selectedProvider, selectedReasoningEffort, messages, registerStreamSession, unregisterStreamSession, setConversations, setCurrentConversationId]);
+  }, [canEditConversation, clearConversationDraftForSend, currentConversation, currentConversationId, handleStreamFailure, selectedModel, selectedProvider, selectedReasoningEffort, messages, registerStreamSession, setConversations, setCurrentConversationId]);
 
   useEffect(() => {
-    if (currentConversationId === null && voiceHook.pendingJarvisMessageRef.current) {
-      const text = voiceHook.pendingJarvisMessageRef.current;
-      voiceHook.pendingJarvisMessageRef.current = null;
+    if (currentConversationId === null && pendingJarvisMessageRef.current) {
+      const text = pendingJarvisMessageRef.current;
+      pendingJarvisMessageRef.current = null;
       handleSendMessage(text);
     }
-  }, [currentConversationId, newChatTrigger, handleSendMessage, voiceHook.pendingJarvisMessageRef]);
+  }, [currentConversationId, newChatTrigger, handleSendMessage, pendingJarvisMessageRef]);
 
   useKeyboardShortcuts({
     onSearch: () => setConversationSearchTrigger(trigger => trigger + 1),
@@ -703,13 +660,24 @@ const App: React.FC = () => {
           activeWorkspace={workspaceView ?? 'chat'}
           onDictionaryOpen={() => handleWorkspaceOpen('dictionary')}
           onUsageOpen={() => handleWorkspaceOpen('usage')}
+          onRecentlyDeletedOpen={() => handleWorkspaceOpen('recently-deleted')}
         />
 
         <main className="chat-layout relative flex min-w-[360px] flex-1 flex-col bg-bg-primary">
+            {(storeLoadError || (workspaceView === 'chat' && currentConversation?.loadError)) && (
+              <div role="alert" className="m-4 rounded-lg border border-red-500/40 p-3 text-sm text-text-primary">
+                {storeLoadError || currentConversation?.loadError}
+                {!storeLoadError && currentConversationId && (
+                  <button type="button" className="ml-3 underline" onClick={() => void ensureConversationLoaded(currentConversationId)}>Retry</button>
+                )}
+              </div>
+            )}
             {workspaceView === null ? null : workspaceView === 'dictionary' ? (
               <PersonalDictionary scrollContainerRef={dictionaryScrollContainerRef} />
             ) : workspaceView === 'usage' ? (
               <UsageDashboard scrollContainerRef={usageScrollContainerRef} />
+            ) : workspaceView === 'recently-deleted' ? (
+              <RecentlyDeleted onRestore={handleRestoreConversation} isStoreMutationPending={isStoreMutationPending} />
             ) : <>
             <div
               aria-hidden="true"
@@ -757,7 +725,7 @@ const App: React.FC = () => {
               value={composeValue}
               onChange={handleComposeChange}
               isLoading={isCurrentConversationStreaming}
-              disabled={!selectedModel || isCurrentConversationLoading}
+              disabled={!selectedModel || isCurrentConversationLoading || isStoreMutationPending || Boolean(storeLoadError)}
               voiceTranscript={editingMessageId ? null : voiceHook.voiceTranscript as PendingVoiceTranscript | null}
               onVoiceTextUsed={voiceHook.handleVoiceTextUsed}
               voiceShortcut={voiceHook.voiceShortcut}

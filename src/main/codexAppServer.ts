@@ -235,6 +235,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const DYNAMIC_TOOL_LOG_PREVIEW_CHARS = 500;
+
+function truncateForToolLog(value: unknown): string {
+  const text = typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
+  if (text.length <= DYNAMIC_TOOL_LOG_PREVIEW_CHARS) return text;
+  return `${text.slice(0, DYNAMIC_TOOL_LOG_PREVIEW_CHARS)}... [truncated ${text.length - DYNAMIC_TOOL_LOG_PREVIEW_CHARS} chars]`;
+}
+
 function isSupportedCodexToolImageUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
@@ -784,10 +792,19 @@ export class CodexAppServerClient {
     const threadId = typeof params.threadId === 'string' ? params.threadId : null;
     const namespace = typeof params.namespace === 'string' ? params.namespace : null;
     const tool = typeof params.tool === 'string' ? params.tool : null;
-    const argumentsValue = isRecord(params.arguments) ? params.arguments : null;
     const handler = threadId ? this.activeToolHandlers.get(threadId) : undefined;
 
-    if (!handler || namespace !== 'jarvis' || !tool || !argumentsValue) {
+    // The protocol declares namespace optional and arguments as free-form JSON:
+    // accept a missing namespace for our single jarvis namespace, and accept
+    // string arguments by parsing them. Anything else is still rejected so a
+    // shape mismatch fails loudly in the logs instead of silently dropping tools.
+    if (!handler || !tool || (namespace !== null && namespace !== 'jarvis')) {
+      console.warn('[Codex] Rejected dynamic tool call:', {
+        tool,
+        namespace,
+        hasHandler: Boolean(handler),
+        argumentsHead: truncateForToolLog(params.arguments),
+      });
       this.send({
         id,
         result: {
@@ -800,6 +817,42 @@ export class CodexAppServerClient {
       });
       return;
     }
+
+    let argumentsValue: Record<string, unknown> | null = isRecord(params.arguments)
+      ? params.arguments
+      : null;
+    if (argumentsValue === null && typeof params.arguments === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(params.arguments);
+        if (isRecord(parsed)) argumentsValue = parsed;
+      } catch {
+        argumentsValue = null;
+      }
+    }
+    if (argumentsValue === null) {
+      console.warn('[Codex] Rejected dynamic tool call with unparseable arguments:', {
+        tool,
+        namespace,
+        argumentsHead: truncateForToolLog(params.arguments),
+      });
+      this.send({
+        id,
+        result: {
+          success: false,
+          contentItems: [{
+            type: 'inputText',
+            text: 'Jarvis rejected an unavailable or invalid dynamic tool call.',
+          }],
+        },
+      });
+      return;
+    }
+
+    console.warn('[Codex] Dynamic tool call:', {
+      tool,
+      namespace: namespace ?? '(none)',
+      argumentsHead: truncateForToolLog(argumentsValue),
+    });
 
     try {
       const result = await handler(tool, argumentsValue);
@@ -1066,6 +1119,13 @@ export class CodexAppServerClient {
   private async answerSharedAuthRefresh(id: unknown): Promise<void> {
     try {
       const credential = await this.readUsableSharedCredential();
+      const supplied = this.suppliedSharedCredential;
+      if (supplied && this.sharedTurnReservations > 0
+        && sharedCredentialIdentity(supplied) !== sharedCredentialIdentity(credential)) {
+        // A refresh must not migrate a running turn (and its tools) to the
+        // newly selected account. Release this turn before following Switcher.
+        throw new SharedCodexAuthError('The Codex Switcher account changed during this response. Resend to use the newly selected account.');
+      }
       this.supplySharedCredential(credential);
       this.send({
         id,

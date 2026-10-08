@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
+import type { WorkspaceView } from '../../shared/workspaceViews';
 
 interface UseKeyboardShortcutsArgs {
   onSearch: () => void;
   onNewChat: () => void;
   onToggleSidebar: () => void;
   onDeleteCurrentConversation: () => void;
-  workspaceView: 'chat' | 'dictionary' | 'usage';
+  workspaceView: WorkspaceView;
   hasCurrentConversation: boolean;
 }
 
@@ -36,7 +37,7 @@ export function useKeyboardShortcuts({
       }
       if (e.metaKey && e.shiftKey && e.key === 'Backspace') {
         e.preventDefault();
-        if (hasCurrentConversation) {
+        if (workspaceView === 'chat' && hasCurrentConversation) {
           onDeleteCurrentConversation();
         }
       }

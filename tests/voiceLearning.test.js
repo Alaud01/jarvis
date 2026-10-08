@@ -67,7 +67,7 @@ test('classifies sentence rewrites as ineligible for automatic learning', () => 
   );
 });
 
-test('multipart process-flow upload includes dictionary voice context', async () => {
+test('multipart process-flow upload strips dictionary and vocabulary context', async () => {
   const context = {
     app: { name: 'Mail', bundleId: 'com.apple.mail', pid: 42 },
     destination: 'generic',
@@ -84,8 +84,9 @@ test('multipart process-flow upload includes dictionary voice context', async ()
   const body = Buffer.concat(chunks).toString('utf8');
 
   assert.match(body, /name="context"/);
-  assert.match(body, /"preferred":"Jarvis"/);
-  assert.match(body, /"text":"Jarvis"/);
+  assert.doesNotMatch(body, /"preferred":"Jarvis"/);
+  assert.doesNotMatch(body, /"text":"Jarvis"/);
+  assert.doesNotMatch(body, /"dictionary"|"vocabulary"/);
   assert.match(body, /"bundleId":"com\.apple\.mail"/);
   assert.equal(Buffer.byteLength(body), upload.contentLength);
 });

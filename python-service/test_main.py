@@ -1,8 +1,6 @@
 import io
-import importlib
 import json
 import os
-import ssl
 import tempfile
 import unittest
 from unittest import mock
@@ -28,20 +26,9 @@ class FakeResponse:
 
 
 class VoiceContextTests(unittest.TestCase):
-    def test_local_parakeet_defaults_to_huggingface_110m_with_openrouter_fallback(self):
-        try:
-            with mock.patch.dict(os.environ, {}, clear=True):
-                reloaded_main = importlib.reload(main)
-                self.assertTrue(reloaded_main.LOCAL_PARAKEET_ENABLED)
-                self.assertEqual(reloaded_main.LOCAL_PARAKEET_MODEL, "nvidia/parakeet-tdt_ctc-110m")
-                self.assertEqual(reloaded_main.LOCAL_PARAKEET_DEVICE, "mps")
-                self.assertTrue(reloaded_main.LOCAL_PARAKEET_PRELOAD_ENABLED)
-                self.assertEqual(reloaded_main.OPENROUTER_TRANSCRIPTION_MODEL, "nvidia/parakeet-tdt-0.6b-v3")
-                self.assertEqual(reloaded_main.LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS, 90.0)
-                self.assertFalse(reloaded_main.LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED)
-                self.assertEqual(reloaded_main.LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS, 600.0)
-        finally:
-            importlib.reload(main)
+    def test_defaults_to_mlx_whisper_turbo(self):
+        self.assertEqual(main.LOCAL_WHISPER_MODEL, "mlx-community/whisper-large-v3-turbo")
+        self.assertGreaterEqual(main.LOCAL_WHISPER_COLD_START_BUDGET_SECONDS, 1.0)
 
     def test_missing_context_uses_generic_defaults(self):
         context = main.parse_voice_context(None)
@@ -82,12 +69,10 @@ class VoiceContextTests(unittest.TestCase):
 
         self.assertIn("do not remove fillers or apply stylistic formatting", messages[0]["content"])
 
-    def test_dictionary_context_limits_are_validated(self):
-        raw_context = json.dumps(
-            {"dictionary": [{"preferred": "x" * 121, "aliases": []}]}
-        )
-        with self.assertRaises(HTTPException):
-            main.parse_voice_context(raw_context)
+    def test_legacy_dictionary_payload_is_ignored_without_validation(self):
+        context = main.parse_voice_context(json.dumps({"dictionary": "ignored", "vocabulary": ["ignored"]}))
+        self.assertNotIn("dictionary", context.model_dump())
+        self.assertNotIn("vocabulary", context.model_dump())
 
 
 class RefinementTests(unittest.TestCase):
@@ -183,22 +168,15 @@ class RefinementTests(unittest.TestCase):
         self.assertIn("In technical literal mode, preserve explicitly dictated line breaks and infer obvious", prompt)
         self.assertIn("do not reformat commands or code based only on stylistic preference", prompt)
 
-    def test_prompt_locks_dictionary_and_boosted_vocabulary_terms(self):
-        context = main.VoiceContext(
-            dictionary=[main.VoiceDictionaryEntry(preferred="OpenAI", aliases=["open ai"])],
-            vocabulary=[main.VoiceVocabularyEntry(text="PyTorch", pinned=True)],
-        )
-
-        messages = main.build_refinement_messages("Use OpenAI with PyTorch", context)
-        prompt = messages[0]["content"]
+    def test_refinement_prompt_ignores_dictionary_and_vocabulary(self):
+        context = main.VoiceContext(dictionary=[{"preferred": "FORBIDDEN", "aliases": ["hello"]}], vocabulary=[{"text": "FORBIDDEN"}])
+        messages = main.build_refinement_messages("hello", context)
+        self.assertNotIn("FORBIDDEN", json.dumps(messages))
+        self.assertNotIn("personal_dictionary", messages[0]["content"])
+        self.assertNotIn("vocabulary", messages[0]["content"])
         payload = json.loads(messages[1]["content"])
-
-        self.assertIn("personal_dictionary preferred values are authoritative locked text", prompt)
-        self.assertIn("Never grammar-correct, normalize, split", prompt)
-        self.assertIn("vocabulary values are boosted recognition terms", prompt)
-        self.assertIn("must never cause an unrelated word to be replaced", prompt)
-        self.assertEqual(payload["personal_dictionary"][0]["preferred"], "OpenAI")
-        self.assertEqual(payload["vocabulary"][0]["text"], "PyTorch")
+        self.assertNotIn("personal_dictionary", payload)
+        self.assertNotIn("vocabulary", payload)
 
     def test_valid_structured_output_is_parsed(self):
         content = json.dumps(
@@ -229,48 +207,42 @@ class RefinementTests(unittest.TestCase):
         self.assertEqual(result.text, "raw transcript")
         self.assertEqual(result.refinement_mode, "raw_fallback")
 
-    def test_dictionary_is_included_in_prompt(self):
-        context = main.VoiceContext(
-            dictionary=[main.VoiceDictionaryEntry(preferred="Jarvis", aliases=["jar viss"])]
-        )
-        messages = main.build_refinement_messages("Ask Jarvis", context)
-        payload = json.loads(messages[1]["content"])
-        self.assertEqual(payload["personal_dictionary"][0]["preferred"], "Jarvis")
-        self.assertIn("preserve every occurrence exactly", messages[0]["content"])
 
-    def test_dictionary_replacement_preserves_exact_casing_and_boundaries(self):
-        entries = [main.VoiceDictionaryEntry(id="rule-openai", preferred="OpenAI", aliases=["open ai"])]
-        text, applied_rules = main.apply_dictionary_entries("open ai and open air", entries)
-        self.assertEqual(text, "OpenAI and open air")
-        self.assertEqual(len(applied_rules), 1)
-        self.assertEqual(applied_rules[0].ruleId, "rule-openai")
-        self.assertEqual(applied_rules[0].start, 0)
-        self.assertEqual(applied_rules[0].end, len("OpenAI"))
+    # Personal dictionary test retained for future restoration.
+    # def test_dictionary_replacement_preserves_exact_casing_and_boundaries(self):
+    #     entries = [main.VoiceDictionaryEntry(id="rule-openai", preferred="OpenAI", aliases=["open ai"])]
+    #     text, applied_rules = main.apply_dictionary_entries("open ai and open air", entries)
+    #     self.assertEqual(text, "OpenAI and open air")
+    #     self.assertEqual(len(applied_rules), 1)
+    #     self.assertEqual(applied_rules[0].ruleId, "rule-openai")
+    #     self.assertEqual(applied_rules[0].start, 0)
+    #     self.assertEqual(applied_rules[0].end, len("OpenAI"))
 
-    def test_preferred_term_without_alias_is_vocabulary_not_replacement(self):
-        entries = [main.VoiceDictionaryEntry(preferred="Jarvis", aliases=[])]
-        text, applied_rules = main.apply_dictionary_entries("ask jarvis", entries)
-        self.assertEqual(text, "ask jarvis")
-        self.assertEqual(applied_rules, [])
+    # Personal dictionary test retained for future restoration.
+    # def test_preferred_term_without_alias_is_vocabulary_not_replacement(self):
+    #     entries = [main.VoiceDictionaryEntry(preferred="Jarvis", aliases=[])]
+    #     text, applied_rules = main.apply_dictionary_entries("ask jarvis", entries)
+    #     self.assertEqual(text, "ask jarvis")
+    #     self.assertEqual(applied_rules, [])
 
-    def test_dictionary_prefers_longest_alias(self):
-        entries = [
-            main.VoiceDictionaryEntry(preferred="Flow", aliases=["wispr"]),
-            main.VoiceDictionaryEntry(preferred="Wispr Flow", aliases=["wispr flow"]),
-        ]
-        text, applied = main.apply_dictionary_entries("use wispr flow", entries)
-        self.assertEqual(text, "use Wispr Flow")
-        self.assertEqual(len(applied), 1)
+    # Personal dictionary test retained for future restoration.
+    # def test_dictionary_prefers_longest_alias(self):
+    #     entries = [
+    #         main.VoiceDictionaryEntry(preferred="Flow", aliases=["wispr"]),
+    #         main.VoiceDictionaryEntry(preferred="Wispr Flow", aliases=["wispr flow"]),
+    #     ]
+    #     text, applied = main.apply_dictionary_entries("use wispr flow", entries)
+    #     self.assertEqual(text, "use Wispr Flow")
+    #     self.assertEqual(len(applied), 1)
 
-    def test_dictionary_edit_is_reported_on_refinement_fallback(self):
-        context = main.VoiceContext(
-            dictionary=[main.VoiceDictionaryEntry(preferred="Jarvis", aliases=["jar viss"])]
-        )
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            with mock.patch.object(main.urllib_request, "urlopen", side_effect=urllib_error.URLError("offline")):
+    def test_dictionary_does_not_change_refinement_fallback(self):
+        context = main.VoiceContext(dictionary=[{"preferred": "Jarvis", "aliases": ["jar viss"]}])
+        for failure in [urllib_error.URLError("offline"), TimeoutError("timed out")]:
+            with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}), mock.patch.object(main.urllib_request, "urlopen", side_effect=failure):
                 result = main.refine_transcript("ask jar viss", context)
-        self.assertEqual(result.text, "ask Jarvis")
-        self.assertEqual(result.applied_edits, ["dictionary"])
+            self.assertEqual(result.text, "ask jar viss")
+            self.assertEqual(result.applied_edits, [])
+            self.assertEqual(result.applied_rules, [])
 
     def test_rule_fallback_resolves_question_restart(self):
         raw_text = (
@@ -342,7 +314,7 @@ class RefinementTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
 
         self.assertEqual(result.text, "Hello, world.")
-        self.assertEqual(payload["model"], "openai/gpt-oss-120b")
+        self.assertEqual(payload["model"], "openai/gpt-oss-safeguard-20b")
         self.assertEqual(payload["reasoning"], {"effort": "low"})
         self.assertEqual(payload["provider"]["sort"], "latency")
         self.assertEqual(
@@ -411,176 +383,88 @@ class PausePreservingChunkTests(unittest.TestCase):
         self.assertEqual(ranges, [(0, 1000), (1000, 2000), (2000, 3000), (3000, 4000), (4000, 5000)])
 
 
-class OpenRouterTranscriptionTests(unittest.TestCase):
+
+
+
+
+class WhisperTranscriptionTests(unittest.TestCase):
     def setUp(self):
         self.wav = main.np.zeros(1600, dtype=main.np.float32)
+        self.segments = [(0, 1600)]
 
-    def test_transient_ssl_failure_is_retried(self):
-        responses = [
-            ssl.SSLError("ssl/tls alert bad record mac"),
-            FakeResponse({"text": "recovered transcript"}),
-        ]
-
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            with mock.patch.object(main.urllib_request, "urlopen", side_effect=responses) as urlopen:
-                with mock.patch.object(main.time, "sleep") as sleep:
-                    transcript = main.transcribe_chunk_with_openrouter(self.wav)
-
-        self.assertEqual(transcript, "recovered transcript")
-        self.assertEqual(urlopen.call_count, 2)
-        sleep.assert_called_once_with(main.OPENROUTER_RETRY_BASE_DELAY_SECONDS)
-
-    def test_exhausted_ssl_failures_return_bad_gateway(self):
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            with mock.patch.object(main.urllib_request, "urlopen", side_effect=ssl.SSLError("bad record mac")):
-                with mock.patch.object(main.time, "sleep"):
-                    with self.assertRaises(HTTPException) as raised:
-                        main.transcribe_chunk_with_openrouter(self.wav)
-
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertIn("bad record mac", raised.exception.detail)
-
-    def test_authentication_failure_is_not_retried(self):
-        error = urllib_error.HTTPError(
-            main.OPENROUTER_TRANSCRIPTION_URL,
-            401,
-            "Unauthorized",
-            {},
-            io.BytesIO(b'{"error":"unauthorized"}'),
-        )
-
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            with mock.patch.object(main.urllib_request, "urlopen", side_effect=error) as urlopen:
-                with self.assertRaises(HTTPException) as raised:
-                    main.transcribe_chunk_with_openrouter(self.wav)
-
-        self.assertEqual(raised.exception.status_code, 401)
-        self.assertEqual(urlopen.call_count, 1)
-        self.assertTrue(error.closed)
-
-    def test_retryable_http_failure_is_closed_before_retry(self):
-        error = urllib_error.HTTPError(
-            main.OPENROUTER_TRANSCRIPTION_URL,
-            503,
-            "Service Unavailable",
-            {},
-            io.BytesIO(b'{"error":"unavailable"}'),
-        )
-        responses = [error, FakeResponse({"text": "recovered transcript"})]
-
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
-            with mock.patch.object(main.urllib_request, "urlopen", side_effect=responses) as urlopen:
-                with mock.patch.object(main.time, "sleep"):
-                    transcript = main.transcribe_chunk_with_openrouter(self.wav)
-
-        self.assertEqual(transcript, "recovered transcript")
-        self.assertEqual(urlopen.call_count, 2)
-        self.assertTrue(error.closed)
-
-
-class LocalParakeetTranscriptionTests(unittest.TestCase):
-    def setUp(self):
-        self.wav = main.np.zeros(1600, dtype=main.np.float32)
-        self.speech_segments = [(0, 1600)]
-
-    def test_local_timeout_does_not_fall_back_to_openrouter_by_default(self):
-        with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
-            with mock.patch.object(main, "LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED", False):
-                with mock.patch.object(main, "get_ready_local_parakeet_model", side_effect=TimeoutError("loading")):
-                    with mock.patch.object(main, "transcribe_chunks_with_openrouter") as openrouter:
-                        with self.assertRaises(HTTPException) as raised:
-                            main.transcribe_audio(self.wav, self.speech_segments, main.VoiceContext())
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertIn("Local Parakeet", raised.exception.detail)
-        openrouter.assert_not_called()
-
-    def test_local_failure_without_openrouter_key_reports_local_failure(self):
-        with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
-            with mock.patch.dict(os.environ, {}, clear=True):
-                with mock.patch.object(main, "get_ready_local_parakeet_model", side_effect=RuntimeError("model cache missing")):
-                    with mock.patch.object(main, "transcribe_chunks_with_openrouter") as openrouter:
-                        with self.assertRaises(HTTPException) as raised:
-                            main.transcribe_audio(self.wav, self.speech_segments, main.VoiceContext())
-
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertIn("Local Parakeet is unavailable", raised.exception.detail)
-        self.assertIn("model cache missing", raised.exception.detail)
-        openrouter.assert_not_called()
-
-    def test_cold_start_wait_does_not_count_against_active_transcription_budget(self):
-        with mock.patch.object(main, "LOCAL_PARAKEET_ENABLED", True):
-            with mock.patch.object(main, "get_ready_local_parakeet_model") as get_ready:
-                with mock.patch.object(
-                    main,
-                    "transcribe_chunks_with_local_parakeet",
-                    return_value=main.LocalTranscriptionResult("local transcript"),
-                ):
-                    with mock.patch.object(main, "time") as fake_time:
-                        fake_time.perf_counter.side_effect = [100.0, 101.0]
-                        text, metadata = main.transcribe_audio(
-                            self.wav,
-                            self.speech_segments,
-                            main.VoiceContext(),
-                        )
-
-        get_ready.assert_called_once()
-        self.assertEqual(text, "local transcript")
-        self.assertEqual(metadata.provider, "local-parakeet")
+    def test_transcribes_chunks_on_mlx_without_any_glossary_or_dictionary(self):
+        import types
+        whisper = types.ModuleType("mlx_whisper")
+        whisper.transcribe = mock.Mock(side_effect=[{"text": " First. "}, {"text": "Second."}])
+        context = main.VoiceContext(dictionary=[{"preferred": "FORBIDDEN", "aliases": ["First"]}], vocabulary=[{"text": "FORBIDDEN"}])
+        with mock.patch.dict("sys.modules", {"mlx_whisper": whisper}), \
+             mock.patch.object(main, "get_ready_local_whisper_model"), \
+             mock.patch.object(main, "iter_transcription_chunks", return_value=([self.wav, self.wav], 0.2)), \
+             mock.patch.object(main.urllib_request, "urlopen") as cloud:
+            text, metadata = main.transcribe_audio(self.wav, self.segments, context)
+        self.assertEqual(text, "First. Second.")
+        self.assertEqual(metadata.provider, "local-whisper")
+        self.assertEqual(metadata.model, main.LOCAL_WHISPER_MODEL)
+        self.assertFalse(metadata.used_vocabulary_guidance)
         self.assertFalse(metadata.fallback_used)
+        cloud.assert_not_called()
+        for call in whisper.transcribe.call_args_list:
+            self.assertEqual(call.kwargs, {
+                "path_or_hf_repo": main.LOCAL_WHISPER_MODEL, "task": "transcribe", "fp16": True,
+                "language": "en",
+                "verbose": None, "temperature": 0.0, "condition_on_previous_text": False,
+                "word_timestamps": False,
+            })
+            self.assertEqual(call.args[0].dtype, main.np.float32)
+            self.assertTrue(call.args[0].flags.c_contiguous)
 
-    def test_auto_device_prefers_mps_when_available(self):
-        fake_torch = mock.Mock()
-        fake_torch.backends.mps.is_available.return_value = True
+    def test_empty_speech_does_not_load_or_transcribe(self):
+        with mock.patch.object(main, "get_ready_local_whisper_model") as ready:
+            text, metadata = main.transcribe_audio(self.wav, [])
+        self.assertEqual(text, "")
+        ready.assert_not_called()
+        self.assertFalse(metadata.used_vocabulary_guidance)
 
-        with mock.patch.object(main, "LOCAL_PARAKEET_DEVICE", "auto"):
-            self.assertEqual(main.select_local_parakeet_device(fake_torch), "mps")
+    def test_inference_failure_is_reported_without_cloud_fallback(self):
+        import types
+        whisper = types.ModuleType("mlx_whisper")
+        whisper.transcribe = mock.Mock(side_effect=RuntimeError("Metal inference failed"))
+        with mock.patch.dict("sys.modules", {"mlx_whisper": whisper}), \
+             mock.patch.object(main, "get_ready_local_whisper_model"), \
+             mock.patch.object(main.urllib_request, "urlopen") as cloud:
+            with self.assertRaises(HTTPException) as raised:
+                main.transcribe_audio(self.wav, self.segments)
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("Metal inference failed", raised.exception.detail)
+        cloud.assert_not_called()
 
-    def test_auto_device_uses_cpu_when_mps_unavailable(self):
-        fake_torch = mock.Mock()
-        fake_torch.backends.mps.is_available.return_value = False
+    def test_cold_start_wait_has_a_bounded_timeout(self):
+        with mock.patch.object(main, "local_whisper_loading", True), \
+             mock.patch.object(main.local_whisper_ready, "wait", return_value=False) as wait:
+            with self.assertRaises(HTTPException) as raised:
+                main.get_ready_local_whisper_model()
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("still loading", raised.exception.detail)
+        wait.assert_called_once_with(main.LOCAL_WHISPER_COLD_START_BUDGET_SECONDS)
 
-        with mock.patch.object(main, "LOCAL_PARAKEET_DEVICE", "auto"):
-            self.assertEqual(main.select_local_parakeet_device(fake_torch), "cpu")
+    def test_model_load_error_is_actionable(self):
+        with mock.patch.object(main, "local_whisper_loading", True), \
+             mock.patch.object(main, "local_whisper_load_error", "missing mlx"), \
+             mock.patch.object(main.local_whisper_ready, "wait", return_value=True):
+            with self.assertRaises(HTTPException) as raised:
+                main.get_ready_local_whisper_model()
+        self.assertEqual(raised.exception.status_code, 503)
+        self.assertIn("missing mlx", raised.exception.detail)
 
-    def test_forced_mps_fails_when_unavailable(self):
-        fake_torch = mock.Mock()
-        fake_torch.backends.mps.is_available.return_value = False
-
-        with mock.patch.object(main, "LOCAL_PARAKEET_DEVICE", "mps"):
-            with self.assertRaises(RuntimeError):
-                main.select_local_parakeet_device(fake_torch)
-
-    def test_unload_local_parakeet_model_clears_resident_model_state(self):
-        try:
-            main.local_parakeet_model = object()
-            main.local_parakeet_device = "mps"
-            main.local_parakeet_last_used_at = 123.0
-            with mock.patch.object(main.gc, "collect") as collect:
-                with mock.patch.object(main, "clear_torch_device_cache") as clear_cache:
-                    main.unload_local_parakeet_model("test")
-
-            self.assertIsNone(main.local_parakeet_model)
-            self.assertIsNone(main.local_parakeet_device)
-            self.assertIsNone(main.local_parakeet_last_used_at)
-            collect.assert_called_once()
-            clear_cache.assert_called_once_with("mps")
-        finally:
-            main.local_parakeet_model = None
-            main.local_parakeet_device = None
-            main.local_parakeet_last_used_at = None
-
-    def test_local_parakeet_import_environment_sets_writable_cache_dirs_and_quiets_nemo(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with mock.patch.object(main, "PYTHON_CACHE_ROOT", main.Path(temp_dir)):
-                with mock.patch.dict(os.environ, {}, clear=True):
-                    main.configure_local_parakeet_import_environment()
-
-                    self.assertEqual(os.environ["MPLCONFIGDIR"], str(main.Path(temp_dir) / "matplotlib"))
-                    self.assertEqual(os.environ["XDG_CACHE_HOME"], str(main.Path(temp_dir) / "xdg"))
-                    self.assertTrue(main.Path(os.environ["MPLCONFIGDIR"]).is_dir())
-                    self.assertTrue(main.Path(os.environ["XDG_CACHE_HOME"]).is_dir())
-                    self.assertEqual(main.logging.getLogger("nemo_logger").level, main.logging.ERROR)
+    def test_successful_refinement_does_not_apply_dictionary(self):
+        response = FakeResponse({"choices": [{"message": {"content": json.dumps({"text": "Ask jar viss.", "applied_edits": ["punctuation"]})}}]})
+        context = main.VoiceContext(dictionary=[{"preferred": "Jarvis", "aliases": ["jar viss"]}])
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}), \
+             mock.patch.object(main.urllib_request, "urlopen", return_value=response):
+            result = main.refine_transcript("ask jar viss", context)
+        self.assertEqual(result.text, "Ask jar viss.")
+        self.assertEqual(result.applied_rules, [])
+        self.assertEqual(result.applied_edits, ["punctuation"])
 
 
 if __name__ == "__main__":

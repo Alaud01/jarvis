@@ -1,6 +1,7 @@
 import type {
   ChatMessage,
   ModelInfo,
+  ModelDiscoverySource,
   Provider,
   SendChatOptions,
   StreamChatTurnOptions,
@@ -14,6 +15,63 @@ const DEFAULT_CLOUD_TAGS_URL = 'https://ollama.com/api/tags';
 
 interface OllamaTagsResponse {
   models: Array<{ name?: string; model?: string }>;
+}
+
+interface OllamaShowResponse {
+  capabilities?: string[];
+  thinking?: { values?: unknown[]; default?: unknown };
+}
+
+type OllamaThink = boolean | string;
+
+interface OllamaThinkingSupport {
+  values: string[];
+  defaultValue: string;
+}
+
+// Selector values for Ollama's boolean `think` setting.
+const THINK_OFF = 'none';
+const THINK_ON = 'on';
+const SHOW_TIMEOUT_MS = 3_000;
+const SHOW_CONCURRENCY = 6;
+
+function toEffortValue(value: unknown): string | undefined {
+  if (value === false) return THINK_OFF;
+  if (value === true) return THINK_ON;
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+function toThinkValue(effort: string): OllamaThink {
+  if (effort === THINK_OFF) return false;
+  if (effort === THINK_ON) return true;
+  return effort;
+}
+
+export function parseOllamaThinkingSupport(show: OllamaShowResponse): OllamaThinkingSupport | null {
+  const listed = (show.thinking?.values ?? [])
+    .map(toEffortValue)
+    .filter((value): value is string => Boolean(value));
+  const values = listed.length
+    ? Array.from(new Set(listed))
+    : show.capabilities?.includes('thinking') ? [THINK_OFF, THINK_ON] : [];
+  if (values.length < 2) return null;
+  const preferred = toEffortValue(show.thinking?.default);
+  return {
+    values,
+    defaultValue: preferred && values.includes(preferred) ? preferred : values.find(value => value !== THINK_OFF) ?? values[0],
+  };
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await run(items[index]);
+    }
+  }));
+  return results;
 }
 
 interface OllamaChatResponse {
@@ -61,73 +119,92 @@ export class OllamaProvider implements Provider {
   readonly name = 'Ollama';
   private baseUrl: string;
   private cloudTagsUrl: string;
+  // undefined: capabilities unknown; null: the model cannot think.
+  private readonly thinkingSupport = new Map<string, OllamaThinkingSupport | null>();
+  readonly modelSources: readonly ModelDiscoverySource[];
 
   constructor(baseUrl?: string) {
     this.baseUrl = baseUrl || process.env.OLLAMA_BASE_URL || DEFAULT_BASE_URL;
     this.cloudTagsUrl = process.env.OLLAMA_CLOUD_TAGS_URL || DEFAULT_CLOUD_TAGS_URL;
+    this.modelSources = [
+      { id: 'local', fetchModels: signal => this.fetchLocalModels(signal) },
+      ...(process.env.OLLAMA_INCLUDE_CLOUD_MODELS === 'false' ? [] : [
+        { id: 'cloud', fetchModels: (signal?: AbortSignal) => this.fetchCloudModels(signal) },
+      ]),
+    ];
   }
 
   getApiKey(): string | null {
     return null;
   }
 
-  async fetchModels(): Promise<ModelInfo[]> {
-    const modelsById = new Map<string, ModelInfo>();
-
-    try {
-      const response = await fetch(`${this.baseUrl}/api/tags`);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch models: ${response.statusText}`);
-      }
-      const data = (await response.json()) as OllamaTagsResponse;
-      for (const model of data.models || []) {
-        const name = getOllamaModelName(model);
-        if (!name) continue;
-        modelsById.set(name, {
-          id: name,
-          name,
-          provider: this.id,
-        });
-      }
-    } catch (error) {
-      console.error('[Ollama] Error fetching models:', error);
+  async fetchModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+    // Direct callers also retain successful sources when another source fails.
+    const results = await Promise.allSettled(this.modelSources.map(source => source.fetchModels(signal)));
+    const models = new Map<string, ModelInfo>();
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue;
+      for (const model of result.value) if (!models.has(model.id)) models.set(model.id, model);
     }
+    return [...models.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
 
-    const includeCloudModels = process.env.OLLAMA_INCLUDE_CLOUD_MODELS !== 'false';
-    if (includeCloudModels) {
+  private async fetchLocalModels(signal = AbortSignal.timeout(5_000)): Promise<ModelInfo[]> {
+    const response = await fetch(`${this.baseUrl}/api/tags`, { signal });
+    if (!response.ok) throw new Error(`Failed to fetch local models: ${response.statusText}`);
+    const data = await response.json() as OllamaTagsResponse;
+    const names = (data.models || []).map(getOllamaModelName).filter(Boolean);
+    return this.withThinkingSupport(names.map(name => ({ id: name, showUrl: `${this.baseUrl}/api/show`, showName: name })), signal);
+  }
+
+  private async fetchCloudModels(signal = AbortSignal.timeout(5_000)): Promise<ModelInfo[]> {
+    const headers: Record<string, string> = {};
+    const cloudApiKey = process.env.OLLAMA_API_KEY?.trim();
+    if (cloudApiKey) headers.Authorization = `Bearer ${cloudApiKey}`;
+    const response = await fetch(this.cloudTagsUrl, { headers, signal });
+    if (!response.ok) throw new Error(`Failed to fetch cloud models: ${response.statusText}`);
+    const data = await response.json() as OllamaTagsResponse;
+    const showUrl = this.cloudTagsUrl.replace(/\/api\/tags\/?$/, '/api/show');
+    const names = (data.models || []).map(getOllamaModelName).filter(Boolean);
+    return this.withThinkingSupport(
+      names.map(name => ({ id: toLocalCloudModelName(name), showUrl, showName: name, headers })),
+      signal,
+    );
+  }
+
+  private async withThinkingSupport(
+    models: Array<{ id: string; showUrl: string; showName: string; headers?: Record<string, string> }>,
+    signal: AbortSignal,
+  ): Promise<ModelInfo[]> {
+    // Capability lookups are best effort and must not hold up the model list.
+    const showSignal = AbortSignal.any([signal, AbortSignal.timeout(SHOW_TIMEOUT_MS)]);
+    return mapWithConcurrency(models, SHOW_CONCURRENCY, async ({ id, showUrl, showName, headers }) => {
+      const model: ModelInfo = { id, name: id, provider: this.id };
       try {
-        const headers: Record<string, string> = {};
-        const cloudApiKey = process.env.OLLAMA_API_KEY?.trim();
-        if (cloudApiKey) {
-          headers.Authorization = `Bearer ${cloudApiKey}`;
-        }
-
-        const response = await fetch(this.cloudTagsUrl, {
-          headers,
-          signal: AbortSignal.timeout(5000),
+        const response = await fetch(showUrl, {
+          method: 'POST',
+          signal: showSignal,
+          headers: { 'Content-Type': 'application/json', ...headers },
+          body: JSON.stringify({ model: showName }),
         });
-        if (!response.ok) {
-          throw new Error(`Failed to fetch cloud models: ${response.statusText}`);
-        }
-
-        const data = (await response.json()) as OllamaTagsResponse;
-        for (const model of data.models || []) {
-          const name = getOllamaModelName(model);
-          if (!name) continue;
-          const cloudName = toLocalCloudModelName(name);
-          if (modelsById.has(cloudName)) continue;
-          modelsById.set(cloudName, {
-            id: cloudName,
-            name: cloudName,
-            provider: this.id,
-          });
-        }
-      } catch (error) {
-        console.error('[Ollama] Error fetching cloud models:', error);
+        if (!response.ok) return model;
+        const support = parseOllamaThinkingSupport(await response.json() as OllamaShowResponse);
+        this.thinkingSupport.set(id, support);
+        return support
+          ? { ...model, reasoningEfforts: support.values.map(value => ({ value })), defaultReasoningEffort: support.defaultValue }
+          : model;
+      } catch {
+        return model;
       }
-    }
+    });
+  }
 
-    return [...modelsById.values()].sort((a, b) => a.name.localeCompare(b.name));
+  private getThinkValue(model: string, effort: string | undefined): OllamaThink | undefined {
+    const support = this.thinkingSupport.get(model);
+    // Unknown capabilities keep the previous always-think request.
+    if (support === undefined) return true;
+    if (support === null) return undefined;
+    return toThinkValue(effort && support.values.includes(effort) ? effort : support.defaultValue);
   }
 
   async sendChat(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string> {
@@ -138,6 +215,7 @@ export class OllamaProvider implements Provider {
 
     const response = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
+      signal: options?.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody),
     });
@@ -166,9 +244,12 @@ export class OllamaProvider implements Provider {
       model,
       messages,
       stream: true,
-      think: true,
       options: { num_predict: 64000 },
     };
+    const think = this.getThinkValue(model, options?.reasoningEffort);
+    if (think !== undefined) {
+      requestBody.think = think;
+    }
 
     if (options?.keepAlive !== undefined) {
       requestBody.keep_alive = options.keepAlive;

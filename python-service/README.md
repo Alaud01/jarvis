@@ -1,63 +1,13 @@
 # Voice Flow Service
 
-FastAPI service for audio transcription with VAD and text refinement.
+FastAPI service for audio transcription with Silero VAD, Apple MLX Whisper Turbo, and optional text refinement.
 
 ## Prerequisites
 
-- Python 3.14+
-- `OPENROUTER_API_KEY` for OpenRouter fallback transcription and refinement
-- NeMo and PyTorch installed in the environment when local Parakeet transcription is enabled
-
-Local Parakeet is the default transcription provider. OpenRouter remains configured as the fallback path
-for cold starts, local model failures, and transcript refinement. Optional OpenRouter settings:
-
-```bash
-export OPENROUTER_TRANSCRIPTION_MODEL="nvidia/parakeet-tdt-0.6b-v3"
-export OPENROUTER_REFINEMENT_MODEL="openai/gpt-oss-120b"
-export OPENROUTER_REFINEMENT_REASONING_EFFORT="low"
-export OPENROUTER_REFERER="https://your-site.example"
-export OPENROUTER_TITLE="Jarvis"
-export OPENROUTER_MAX_ATTEMPTS="3"
-export OPENROUTER_RETRY_BASE_DELAY_SECONDS="0.5"
-export OPENROUTER_REFINEMENT_TIMEOUT_SECONDS="12"
-export OPENROUTER_REFINEMENT_MIN_THROUGHPUT="200"
-export OPENROUTER_REFINEMENT_DISAMBIGUATION_HINT_CHARS="80"
-export VOICE_MAX_TRANSCRIPTION_CHUNK_SECONDS="45"
-```
-
-Optional local Parakeet settings:
-
-```bash
-export VOICE_LOCAL_PARAKEET_ENABLED="true"
-export VOICE_LOCAL_PARAKEET_MODEL="nvidia/parakeet-tdt_ctc-110m"
-export VOICE_LOCAL_PARAKEET_DEVICE="mps"
-export VOICE_LOCAL_PARAKEET_PRELOAD_ENABLED="true"
-export VOICE_LOCAL_PARAKEET_COLD_START_BUDGET_SECONDS="90"
-export VOICE_LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED="false"
-export VOICE_LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS="600"
-export VOICE_LOCAL_PARAKEET_READY_BUDGET_SECONDS="0.5"
-export VOICE_LOCAL_PARAKEET_SHORT_BUDGET_SECONDS="3.0"
-export VOICE_LOCAL_PARAKEET_MEDIUM_BUDGET_SECONDS="5.0"
-```
-
-When local Parakeet is enabled, the service starts loading it in the background and uses it only when it is
-ready. Cold start has its own wait budget and does not count against active transcription latency. If the
-local model is unavailable, the request falls back sequentially to OpenRouter and returns transcription
-metadata describing the provider/model used. Local timeout fallback is disabled by default so a cold or slow
-local model does not silently become an unguided OpenRouter transcription; set
-`VOICE_LOCAL_PARAKEET_TIMEOUT_FALLBACK_ENABLED=true` to opt into that behavior.
-Vocabulary entries are passed through the voice context as Vocabulary Guidance. Local Parakeet uses NeMo CTC
-context-biasing when guidance terms are available, and transcription metadata reports whether guidance was
-used.
-
-On Apple Silicon, `VOICE_LOCAL_PARAKEET_DEVICE=mps` forces PyTorch's Metal backend and fails fast if MPS is
-not available. Use `auto` to prefer MPS when available and otherwise use CPU. The loaded NeMo/PyTorch model
-can keep several GB resident; `VOICE_LOCAL_PARAKEET_IDLE_UNLOAD_SECONDS` unloads it after inactivity and
-clears the torch device cache. Set `VOICE_LOCAL_PARAKEET_PRELOAD_ENABLED=false` for the lowest idle RAM at
-the cost of paying cold-start latency on the next dictation.
-
-Refinement routes to the lowest-latency provider that meets the preferred throughput floor. Providers below
-the floor remain available as OpenRouter fallbacks.
+- Apple Silicon Mac with Metal available
+- Python 3.11 or newer, running natively as arm64
+- Internet access for the first model download (approximately 1.6 GB)
+- Optional `OPENROUTER_API_KEY` for transcript refinement
 
 ## Setup
 
@@ -66,32 +16,94 @@ cd python-service
 ./setup.sh
 ```
 
-## Start Service on Port 8765
+Or run `pnpm setup:python` from the repository root. `requirements.txt` installs `mlx-whisper` on Apple Silicon.
+The managed installer in the desktop app installs the same dependencies and verifies the same model.
+
+## Transcription runtime
+
+Transcription uses `mlx-community/whisper-large-v3-turbo` through `mlx-whisper`, with FP16 weights on the
+Metal GPU. Loading, transcription, and unloading all run on the same persistent voice worker thread.
+The model loads at app launch and unloads after 10 minutes (600 seconds) of inactivity, releasing both its
+cached weight references and MLX's GPU allocation cache. Loading and active voice requests prevent unloading.
+
+Pressing the recording shortcut or button immediately sends a nonblocking `POST /warmup` request, starting
+reload while microphone capture begins. A warm model simply refreshes the idle deadline. Requests arriving
+while a load is already pending share it; a request during offloading waits for offloading, then reloads.
+Transcription also requests loading if needed, so clients that do not call `/warmup` remain supported.
+Activity at recording start, model load completion, and voice request completion resets the idle deadline.
+Set `VOICE_LOCAL_WHISPER_IDLE_UNLOAD_SECONDS=0` to disable idle unloading.
+The first launch downloads the model; later launches use the Hugging Face cache. App-managed installations
+store their runtime and caches under `~/Library/Application Support/Jarvis/python-service`.
+
+One voice worker serializes dictations and keeps health checks responsive during inference. Requests wait
+up to `VOICE_LOCAL_WHISPER_COLD_START_BUDGET_SECONDS` (default 90) for a cold model. Loading or inference
+failures return a local error. The Electron request timeout defaults to 150 seconds and should exceed this
+wait plus inference/refinement time.
+
+Whisper receives only 16 kHz audio, with no glossary, initial prompt, hotwords, or vocabulary boosting.
+Personal Dictionary payloads, replacement rules, protected-term refinement prompts, and correction learning
+are disabled. Their integration code is commented out and saved entries remain available for later use.
+
+Silero VAD rejects empty recordings and chooses bounded chunk boundaries for long requests. Internal pauses
+remain intact. Whisper is explicitly set to English (`language="en"`), skipping language detection,
+and transcribes rather than translates.
+
+## Optional settings
+
+```bash
+export VOICE_LOCAL_WHISPER_COLD_START_BUDGET_SECONDS="90"
+export VOICE_LOCAL_WHISPER_IDLE_UNLOAD_SECONDS="600"
+export VOICE_PROCESS_FLOW_TIMEOUT_MS="150000"
+export VOICE_MAX_TRANSCRIPTION_CHUNK_SECONDS="45"
+export OPENROUTER_REFINEMENT_MODEL="openai/gpt-oss-safeguard-20b"
+export OPENROUTER_REFINEMENT_REASONING_EFFORT="low"
+export OPENROUTER_REFINEMENT_TIMEOUT_SECONDS="12"
+export OPENROUTER_REFINEMENT_MIN_THROUGHPUT="200"
+export OPENROUTER_REFINEMENT_DISAMBIGUATION_HINT_CHARS="80"
+```
+
+With an OpenRouter key, refinement handles grammar, punctuation, spoken revisions, and formatting.
+Without a key or when refinement fails, the service uses its conservative spoken-revision fallback.
+Personal Dictionary is excluded from both paths.
+
+## Timing logs
+
+Every dictation uses the same `[VoiceTiming <id>]` prefix across Electron and Python.
+Each summary is one line with milliseconds for each step:
+
+- `startup`: target-app capture, microphone setup, and shortcut-to-recording readiness.
+- `microphone`: permission check, Mac lid check, and renderer microphone/worklet setup.
+- `overlay`: time until the renderer acknowledges a frame for the requested status.
+- `service`: model-loading wait, worker dispatch, upload copy, audio loading, VAD,
+  transcription, refinement, pipeline total, and service total.
+- `transport`: upload preparation, HTTP request, response-body parsing, and round-trip total.
+- `delivery`: remaining context wait, microphone stop/drain, service round trip, routing/paste,
+  completion hold, and stop-to-hide request. The hide animation follows that request.
+
+Totals contain their component steps. HTTP time contains Python service time; service time
+contains model wait plus pipeline time. Do not add these nested totals together.
+Detailed progress and transcript text are available with `JARVIS_LOG_LEVEL=debug`.
+The overlay requests `Starting microphone...` immediately while target capture and microphone
+setup proceed; it changes to `Listening...` only once capture is ready. On macOS the status
+window is recreated for each new recording to handle Spaces, so renderer creation can still
+contribute to its first frame. Model warmup runs in parallel and does not gate the overlay.
+
+## Start service
 
 ```bash
 venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port "${VOICE_SERVICE_PORT:-8765}"
 ```
 
-Or simply:
-
-```bash
-venv/bin/python main.py
-```
-
-Both commands default to port `8765` unless `VOICE_SERVICE_PORT` is set.
+Or use `pnpm start:python` from the repository root.
 
 ## Endpoints
 
-- `GET /health` - Health check
-- `POST /process-flow` - Process audio (VAD → STT → refinement)
-- `POST /transcribe-only` - Transcribe without refinement
+- `GET /health` — VAD health plus Whisper loading, idle timeout, active requests, device, and error state
+- `POST /warmup` — start/reuse model loading without waiting for weights
+- `POST /process-flow` — VAD → local Whisper transcription → optional refinement
+- `POST /transcribe-only` — VAD → local Whisper transcription
 
-VAD is used to reject empty recordings and choose boundaries for long requests. Natural pauses inside normal
-utterances are preserved for STT punctuation and self-correction cues.
-
-## Usage
-
-Send a WAV file to `/process-flow`:
+Send a WAV file with optional app/field context:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/process-flow \
@@ -99,6 +111,4 @@ curl -X POST http://127.0.0.1:8765/process-flow \
   -F "file=@audio.wav"
 ```
 
-The `context` multipart field is optional. When present, it is a JSON object describing the focused app,
-bounded nearby focused-field text, active replacement rules, and vocabulary guidance used for app-aware
-refinement. Requests containing only `file` remain supported and use generic refinement.
+Requests containing only `file` use generic refinement. Legacy dictionary/vocabulary context fields are ignored.

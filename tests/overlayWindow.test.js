@@ -2,10 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const Module = require('node:module');
+const vm = require('node:vm');
 
 const waitForAsyncWork = () => new Promise(resolve => setImmediate(resolve));
 
 test('overlay lifecycle ignores stale windows and cancels stale hides', async t => {
+  const timingLogs = [];
+  t.mock.method(console, 'warn', line => timingLogs.push(line));
   const originalLoad = Module._load;
   const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   let display = {
@@ -27,6 +30,10 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
 
     executeJavaScript(script) {
       this.scripts.push(script);
+      if (this.failPresentation && script.includes('window.revealOverlay(')) {
+        this.failPresentation = false;
+        return Promise.reject(new Error('renderer lost'));
+      }
       return Promise.resolve();
     }
   }
@@ -99,37 +106,182 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
     Object.defineProperty(process, 'platform', platformDescriptor);
   });
 
-  overlay.showOverlay('recording');
-  overlay.showOverlay('processing');
+  const timingContext = { requestId: 'overlay-test', startedAt: performance.now() };
+  overlay.showOverlay('recording', undefined, undefined, timingContext);
+  overlay.showOverlay('processing', undefined, undefined, timingContext);
 
   assert.equal(FakeBrowserWindow.instances.length, 1, 'a loading window must not be recreated');
   const firstWindow = FakeBrowserWindow.instances[0];
   assert.equal(firstWindow.options.backgroundColor, '#00000000');
   assert.equal(firstWindow.options.focusable, false);
+  assert.equal(firstWindow.options.hiddenInMissionControl, true);
+  assert.equal(firstWindow.options.webPreferences.backgroundThrottling, false);
   assert.equal(firstWindow.bounds.y, -200, 'attach to the display edge, not its work area');
   assert.equal(firstWindow.bounds.x + firstWindow.bounds.width / 2, 2196);
 
   const html = decodeURIComponent(firstWindow.webContents.url.split(',')[1]);
-  assert.match(html, /<body class="preparing">/);
+  assert.match(html, /<body class="idle">/);
+  assert.match(html, /body\.idle \.overlay \{\s*display: none;/);
   assert.match(html, /body\.exiting/);
   assert.match(html, /@keyframes label-enter/);
   assert.match(html, /@keyframes label-leave/);
-  assert.match(html, /@keyframes spinner-stage-change/);
-  assert.match(html, /previousState !== payload\.state/,
-    'every actual status change must restart the coordinated transition');
+  assert.doesNotMatch(html, /overlay-status-change|spinner-stage-change|Starting microphone/,
+    'status updates must not compete with the surface entrance or pulse on startup');
+
+  // Execute the actual renderer lifecycle, including a canceled dismissal.
+  let now = 0;
+  const timers = new Map();
+  const frames = new Map();
+  let timerId = 0;
+  const node = (className = '') => {
+    const value = { className, textContent: '', style: { setProperty(key, value) { this[key] = value; } }, offsetWidth: 80, getBoundingClientRect: () => ({ width: 80.4 }) };
+    value.classList = {
+      add: (...names) => { value.className = [...new Set([...value.className.split(' '), ...names])].join(' ').trim(); },
+      remove: (...names) => { value.className = value.className.split(' ').filter(name => !names.includes(name)).join(' '); },
+      contains: name => value.className.split(' ').includes(name),
+    };
+    return value;
+  };
+  const body = node('idle');
+  const pill = node('overlay');
+  const spinner = node('pixel-spinner');
+  spinner.children = Array.from({ length: 16 }, () => node('cell'));
+  const labelMeasure = node('label-measure');
+  const motionPreference = { matches: false, addEventListener(name, handler) { this.onChange = handler; } };
+  const initialLabel = node('label');
+  const labels = [initialLabel];
+  const stack = {
+    querySelectorAll: () => [...labels],
+    appendChild: item => { labels.push(item); item.parentNode = stack; },
+    removeChild: item => { labels.splice(labels.indexOf(item), 1); item.parentNode = null; },
+  };
+  initialLabel.parentNode = stack;
+  const renderer = vm.createContext({
+    window: { matchMedia: () => motionPreference },
+    performance: { now: () => now },
+    document: {
+      body, querySelector: () => pill, createElement: () => node(),
+      getElementById: id => ({ spinner, 'label-stack': stack, label: initialLabel, 'label-measure': labelMeasure })[id],
+    },
+    setTimeout: callback => { timers.set(++timerId, callback); return timerId; },
+    clearTimeout: id => timers.delete(id),
+    requestAnimationFrame: callback => { frames.set(++timerId, callback); return timerId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  });
+  vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], renderer);
+  const recording = { state: 'recording', label: 'Listening...', stage: 'recording', width: 300 };
+  const flushFrames = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    for (const callback of pending) callback(now);
+  };
+  const flushTimers = () => {
+    const pending = [...timers.values()];
+    timers.clear();
+    for (const callback of pending) callback();
+  };
+  renderer.window.revealOverlay(recording);
+  assert.equal(body.classList.contains('idle'), false);
+  assert.equal(body.classList.contains('preparing'), true, 'stage the initial reveal before its frame');
+  assert.equal(initialLabel.textContent, 'Listening...');
+  assert.equal(body.style['--content-width'], '113px', 'fractional text widths round up to avoid accidental ellipsis');
+  renderer.window.updateOverlayState({ state: 'processing', label: 'Processing...', stage: 'processing', width: 300 });
+  assert.equal(pill.classList.contains('is-changing'), false, 'an early status update cannot override entrance motion');
+  assert.equal(frames.size, 2, 'one shared pixel loop and the entrance frame remain scheduled');
+  flushFrames();
+  assert.equal(body.classList.contains('preparing'), false);
+  flushTimers();
+  const spinnerClass = spinner.className;
+  renderer.window.updateOverlayState({ state: 'processing', label: 'Processing...', stage: 'processing', width: 300 });
+  assert.equal(spinner.className, spinnerClass, 'unchanged stages keep their animation running');
+
+  renderer.window.dismissOverlay();
+  renderer.window.revealOverlay(recording);
+  assert.equal(body.classList.contains('preparing'), false, 'reverse an exit without restarting the entrance');
+  assert.equal(frames.size, 1, 'an interrupted exit keeps the existing pixel loop');
+  flushTimers();
+  assert.equal(body.classList.contains('idle'), false, 'an old dismissal cannot hide a new recording');
+  assert.equal(body.classList.contains('exiting'), false);
+  assert.equal(labels.at(-1).textContent, 'Listening...');
+  renderer.window.dismissOverlay();
+  flushTimers();
+  assert.equal(body.classList.contains('idle'), true, 'dismissed content stops painting');
+
+  renderer.window.revealOverlay(recording);
+  assert.equal(frames.size, 2);
+  renderer.window.dismissOverlay();
+  assert.equal(frames.size, 1, 'a dismissal cancels its entrance but continues pixels through the exit');
+  flushFrames();
+  assert.equal(body.classList.contains('exiting'), true);
+  assert.equal(body.classList.contains('preparing'), false);
+  flushTimers();
+  assert.equal(body.classList.contains('idle'), true);
+
+  assert.equal(frames.size, 0, 'idle content does not keep scheduling pixel frames');
+  renderer.window.revealOverlay(recording);
+  flushFrames();
+  now = 125;
+  flushFrames();
+  const pixels = () => spinner.children.map(cell => Number(cell.style.opacity));
+  const beforeMorph = pixels();
+  const beforeColor = spinner.style['--pixel-from'];
+  const processing = { state: 'processing', label: 'Processing...', stage: 'processing', width: 300 };
+  renderer.window.updateOverlayState(processing);
+  assert.deepEqual(pixels(), beforeMorph, 'changing state cannot snap pixel opacity');
+  assert.equal(spinner.style['--pixel-from'], beforeColor, 'changing state cannot snap its colour');
+  now += 16;
+  flushFrames();
+  assert.ok(Math.max(...pixels().map((value, i) => Math.abs(value - beforeMorph[i]))) < 0.1,
+    'the first morph frame keeps the running pattern continuous');
+  now += 64;
+  flushFrames();
+  const interruptedPixels = pixels();
+  renderer.window.updateOverlayState({ state: 'complete', label: 'Transcribed', stage: 'complete', width: 300 });
+  assert.deepEqual(pixels(), interruptedPixels, 'rapid state changes start from the current blend');
+  assert.equal(frames.size, 1, 'all states share one frame callback');
+  now += 16;
+  flushFrames();
+  assert.ok(Math.max(...pixels().map((value, i) => Math.abs(value - interruptedPixels[i]))) < 0.1);
+  now += 300;
+  flushFrames();
+  const settledPixels = pixels();
+  renderer.window.updateOverlayState({ state: 'complete', label: 'Transcribed', stage: 'complete', width: 300 });
+  flushFrames();
+  assert.deepEqual(pixels(), settledPixels, 'a duplicate status does not restart its animation phase');
+  motionPreference.matches = true;
+  motionPreference.onChange();
+  assert.equal(frames.size, 0, 'reduced motion renders a static grid');
+  const stillPixels = pixels();
+  now += 1000;
+  flushFrames();
+  assert.deepEqual(pixels(), stillPixels);
+  renderer.window.updateOverlayState(processing);
+  assert.equal(frames.size, 0);
+  assert.notEqual(spinner.style['--pixel-from'], beforeColor, 'reduced motion still changes status colour');
+  motionPreference.matches = false;
+  motionPreference.onChange();
+  assert.equal(frames.size, 1, 'normal animation resumes if reduced motion is turned off');
+  renderer.window.dismissOverlay();
+  flushTimers();
+  assert.equal(frames.size, 0);
 
   firstWindow.emit('ready-to-show');
   await waitForAsyncWork();
   await waitForAsyncWork();
   assert.equal(firstWindow.visible, true);
-  assert.match(firstWindow.webContents.scripts.join('\n'), /prepareOverlayShow/);
-  assert.match(firstWindow.webContents.scripts.join('\n'), /startOverlayShow/);
+  assert.equal(timingLogs.length, 1, 'only the current presentation should acknowledge a renderer frame');
+  assert.match(timingLogs[0], /^\[VoiceTiming overlay-test\] overlay \(processing; renderer frame acknowledged\)/);
+  assert.match(timingLogs[0], /phaseStartToRendererFrameMs=\d+ms/);
+  assert.match(firstWindow.webContents.scripts.join('\n'), /window\.revealOverlay\(\{"state":"processing"/);
   assert.match(firstWindow.webContents.scripts.join('\n'), /--top-reserve', '40px'/);
+  overlay.showOverlay('recording');
+  await waitForAsyncWork();
+  assert.match(firstWindow.webContents.scripts.at(-1), /Listening\.\.\./);
   const initialBounds = { ...firstWindow.bounds };
 
   overlay.hideOverlay();
   overlay.showOverlay('complete', 'Hello');
-  await new Promise(resolve => setTimeout(resolve, 220));
+  await new Promise(resolve => setTimeout(resolve, 280));
   assert.equal(firstWindow.visible, true, 'an old hide timer must not hide a newer presentation');
   assert.deepEqual(firstWindow.bounds, initialBounds, 'status changes morph within fixed window bounds');
 
@@ -154,11 +306,22 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
     'external displays omit the built-in display cutout clearance');
 
   overlay.hideOverlay();
-  await new Promise(resolve => setTimeout(resolve, 220));
-  assert.equal(firstWindow.visible, false);
+  await new Promise(resolve => setTimeout(resolve, 280));
+  assert.equal(firstWindow.visible, true, 'idle macOS overlay remains shown and transparent');
+  assert.match(firstWindow.webContents.scripts.at(-1), /window\.dismissOverlay\(\)/);
 
+  const scriptsBeforeReshow = firstWindow.webContents.scripts.length;
   overlay.showOverlay('recording');
-  assert.equal(firstWindow.destroyed, true, 'a hidden macOS window should be force-destroyed');
+  await waitForAsyncWork();
+  assert.equal(FakeBrowserWindow.instances.length, 1, 'reuse the renderer on later recordings');
+  assert.equal(firstWindow.destroyed, false);
+  assert.match(firstWindow.webContents.scripts.slice(scriptsBeforeReshow).join('\n'),
+    /window\.revealOverlay\(\{"state":"recording"/);
+
+  firstWindow.hide();
+  overlay.hideOverlay();
+  overlay.showOverlay('recording');
+  assert.equal(firstWindow.destroyed, true, 'replace a macOS window that was externally hidden');
   assert.equal(FakeBrowserWindow.instances.length, 2);
 
   const secondWindow = FakeBrowserWindow.instances[1];
@@ -174,4 +337,14 @@ test('overlay lifecycle ignores stale windows and cancels stale hides', async t 
   await waitForAsyncWork();
   await waitForAsyncWork();
   assert.equal(thirdWindow.visible, true);
+
+  thirdWindow.webContents.failPresentation = true;
+  overlay.showOverlay('processing');
+  await waitForAsyncWork();
+  assert.equal(thirdWindow.destroyed, true, 'replace a broken overlay renderer');
+  const replacement = FakeBrowserWindow.instances[3];
+  replacement.emit('ready-to-show');
+  await waitForAsyncWork();
+  assert.equal(replacement.visible, true);
+  assert.match(replacement.webContents.scripts.join('\n'), /window\.revealOverlay\(\{"state":"processing"/);
 });

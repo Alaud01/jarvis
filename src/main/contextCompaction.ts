@@ -9,8 +9,10 @@ const COMPACTION_SUMMARY_MAX_TOKENS = 1_500;
 interface CompactionOptions {
   provider: Provider;
   model: string;
+  signal?: AbortSignal;
   modelContextLength?: number;
   reserveFraction?: number;
+  conversationId?: string;
   onCompactionStart?: () => void;
 }
 
@@ -75,6 +77,8 @@ async function summarizeHistoryWithLLM(
   model: string,
   messagesToSummarize: ChatMessage[],
   latestUserRequest: string,
+  signal?: AbortSignal,
+  conversationId?: string,
 ): Promise<string> {
   const historyText = formatHistoryForSummary(messagesToSummarize);
   const summaryMessages: ChatMessage[] = [
@@ -99,7 +103,7 @@ async function summarizeHistoryWithLLM(
   ];
 
   const startedAtMs = Date.now();
-  const rawSummary = await provider.sendChat(model, summaryMessages);
+  const rawSummary = await provider.sendChat(model, summaryMessages, { signal, conversationId });
   const summary = rawSummary.trim();
   recordUsageEvent({
     model,
@@ -172,6 +176,8 @@ export async function compactMessagesIfNeeded(
     options.model,
     messagesToSummarize,
     latestUserRequest,
+    options.signal,
+    options.conversationId,
   );
 
   const compacted: ChatMessage[] = [

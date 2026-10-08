@@ -1,4 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
+import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { logVoiceTiming } from './voiceTiming';
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
@@ -9,8 +12,8 @@ import { getManagedVoiceRuntimeEnv, getReadyManagedVoicePythonExecutable } from 
 
 const PYTHON_SERVICE_PORT = Number(process.env.VOICE_SERVICE_PORT || 8765);
 const PYTHON_SERVICE_HOST = '127.0.0.1';
-const READY_TRANSCRIPTION_PROVIDERS = new Set(['local-parakeet', 'openrouter']);
-// Must exceed local Parakeet cold-start wait (default 90s) plus inference/refinement headroom.
+const READY_TRANSCRIPTION_PROVIDERS = new Set(['local-whisper']);
+// Must exceed Whisper Turbo cold-start wait (default 90s) plus inference/refinement headroom.
 const PROCESS_FLOW_TIMEOUT_MS = Math.max(
   60_000,
   Number(process.env.VOICE_PROCESS_FLOW_TIMEOUT_MS || 150_000),
@@ -21,14 +24,14 @@ type VoiceServiceHealth = {
   models_loaded?: boolean;
   transcription_provider?: string;
   transcription_model?: string;
-  local_parakeet_enabled?: boolean;
-  local_parakeet_loaded?: boolean;
-  local_parakeet_loading?: boolean;
-  local_parakeet_loading_for_ms?: number | null;
-  local_parakeet_device?: string | null;
-  local_parakeet_error?: string | null;
-  local_parakeet_timeout_fallback_enabled?: boolean;
-  local_parakeet_cold_start_budget_seconds?: number;
+  local_whisper_loaded?: boolean;
+  local_whisper_loading?: boolean;
+  local_whisper_loading_for_ms?: number | null;
+  local_whisper_device?: string | null;
+  local_whisper_error?: string | null;
+  local_whisper_idle_unload_seconds?: number;
+  local_whisper_active_requests?: number;
+  local_whisper_cold_start_budget_seconds?: number;
   openrouter_configured?: boolean;
   refinement_model?: string;
 };
@@ -84,6 +87,20 @@ function getPythonRuntime(): { executable: string; env: NodeJS.ProcessEnv } {
   };
 }
 
+export async function warmupVoiceModel(): Promise<void> {
+  try {
+    const response = await fetch(`http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/warmup`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      console.warn('[PythonService] Voice model warmup request failed:', response.status);
+    }
+  } catch (error) {
+    console.warn('[PythonService] Unable to request voice model warmup:', error);
+  }
+}
+
 export async function startPythonService(): Promise<boolean> {
   if (pythonProcess) {
     debugLog('[PythonService] Already running');
@@ -93,6 +110,7 @@ export async function startPythonService(): Promise<boolean> {
   const existingServiceHealth = await checkServiceHealth();
   if (existingServiceHealth.ready) {
     infoLog(`[PythonService] Reusing healthy service already running on port ${PYTHON_SERVICE_PORT}`);
+    void warmupVoiceModel();
     isServiceReady = true;
     return true;
   }
@@ -132,26 +150,29 @@ export async function startPythonService(): Promise<boolean> {
   const spawnedProcess = pythonProcess;
   let spawnedExited = false;
 
-  pythonProcess.stdout?.on('data', (data) => {
-    const line = data.toString().trim();
+  const forwardPythonLine = (line: string, stderr: boolean) => {
     if (!line) return;
-    // VoiceService stage logs and other operational output should stay visible at default warn level.
-    if (line.includes('[VoiceService]') || line.includes('ERROR') || line.includes('WARNING')) {
+    if (line.includes('[VoiceTiming ')) {
+      console.warn(line);
+    } else if (line.includes('[VoiceService]')) {
       console.warn(`[PythonService] ${line}`);
-      return;
+    } else if (stderr) {
+      console.error(`[PythonService] ${line}`);
+    } else {
+      debugLog(`[PythonService] ${line}`);
     }
-    debugLog(`[PythonService] ${line}`);
-  });
-
-  pythonProcess.stderr?.on('data', (data) => {
-    const line = data.toString().trim();
-    if (!line) return;
-    if (line.includes('[VoiceService]')) {
-      console.warn(`[PythonService] ${line}`);
-      return;
-    }
-    console.error(`[PythonService] ${line}`);
-  });
+  };
+  for (const [stream, stderr] of [[pythonProcess.stdout, false], [pythonProcess.stderr, true]] as const) {
+    const decoder = new StringDecoder('utf8');
+    let pending = '';
+    stream?.on('data', (data: Buffer) => {
+      pending += decoder.write(data);
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? '';
+      lines.forEach(line => forwardPythonLine(line, stderr));
+    });
+    stream?.on('end', () => forwardPythonLine(pending + decoder.end(), stderr));
+  }
 
   pythonProcess.on('error', (err) => {
     console.error('[PythonService] Process error:', err);
@@ -335,9 +356,17 @@ export function createMultipartUpload(audio: UploadableAudio, context?: VoiceCon
 } {
   const { chunks, byteLength, filename, contentType } = getAudioUploadParts(audio);
   const boundary = `----WebKitFormBoundary${Math.random().toString(16).slice(2)}`;
-  const contextPart = context
+  // Personal dictionary integration is suspended for Whisper Turbo.
+  // const transcriptionContext = context;
+  const transcriptionContext = context ? {
+    app: context.app,
+    destination: context.destination,
+    field: context.field,
+    accessibilityStatus: context.accessibilityStatus,
+  } : undefined;
+  const contextPart = transcriptionContext
     ? Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="context"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(context)}\r\n`
+      `--${boundary}\r\nContent-Disposition: form-data; name="context"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(transcriptionContext)}\r\n`
     )
     : Buffer.alloc(0);
   const fileHeader = Buffer.from(
@@ -394,7 +423,7 @@ async function parseJsonResponse<T extends Record<string, unknown>>(
   }
 }
 
-export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: VoiceContext): Promise<{
+export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: VoiceContext, requestId = randomUUID().slice(0, 8)): Promise<{
   text: string;
   raw_text?: string;
   speech_duration_ms?: number;
@@ -420,43 +449,6 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
 }> {
   const url = `http://${PYTHON_SERVICE_HOST}:${PYTHON_SERVICE_PORT}/process-flow`;
   const startedAt = performance.now();
-  const preflight = await checkServiceHealth();
-
-  const audioParts = getAudioUploadParts(audioBuffer);
-  const recordedAudio = Buffer.isBuffer(audioBuffer) ? null : audioBuffer;
-  console.warn('[PythonService] process-flow starting:', {
-    timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
-    audio: {
-      durationMs: recordedAudio ? Math.round(recordedAudio.durationMs) : undefined,
-      byteLength: audioParts.byteLength,
-      peak: recordedAudio ? Number(recordedAudio.peak.toFixed(4)) : undefined,
-      rms: recordedAudio ? Number(recordedAudio.rms.toFixed(4)) : undefined,
-    },
-    context: context
-      ? {
-          destination: context.destination,
-          appName: context.app?.name,
-          bundleId: context.app?.bundleId,
-        }
-      : null,
-    service: {
-      reachable: preflight.reachable,
-      ready: preflight.ready,
-      transcriptionProvider: preflight.health?.transcription_provider,
-      transcriptionModel: preflight.health?.transcription_model,
-      localParakeetEnabled: preflight.health?.local_parakeet_enabled,
-      localParakeetLoaded: preflight.health?.local_parakeet_loaded,
-      localParakeetLoading: preflight.health?.local_parakeet_loading,
-      localParakeetLoadingForMs: preflight.health?.local_parakeet_loading_for_ms,
-      localParakeetDevice: preflight.health?.local_parakeet_device,
-      localParakeetError: preflight.health?.local_parakeet_error,
-      timeoutFallbackEnabled: preflight.health?.local_parakeet_timeout_fallback_enabled,
-      coldStartBudgetSeconds: preflight.health?.local_parakeet_cold_start_budget_seconds,
-      openrouterConfigured: preflight.health?.openrouter_configured,
-      refinementModel: preflight.health?.refinement_model,
-    },
-  });
-
   try {
     const uploadStartedAt = performance.now();
     const upload = createMultipartUpload(audioBuffer, context);
@@ -468,6 +460,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       headers: {
         'Content-Type': `multipart/form-data; boundary=${upload.boundary}`,
         'Content-Length': String(upload.contentLength),
+        'X-Voice-Request-Id': requestId,
       },
       body: upload.body,
       duplex: 'half',
@@ -503,17 +496,11 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
     const parseMs = Math.round(performance.now() - parseStartedAt);
     const totalMs = Math.round(performance.now() - startedAt);
 
-    console.warn('[PythonService] process-flow timing:', {
+    logVoiceTiming(requestId, 'transport (HTTP includes service work)', {
       uploadPrepareMs,
-      fetchMs,
-      parseMs,
-      totalMs,
-      timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
-      audioBytes: upload.contentLength,
-      success: parsed.ok ? Boolean(parsed.data.success) : false,
-      transcriptionMetadata: parsed.ok ? parsed.data.transcription_metadata : undefined,
-      speechDurationMs: parsed.ok ? parsed.data.speech_duration_ms : undefined,
-      error: parsed.ok ? parsed.data.error : parsed.error,
+      httpUntilHeadersMs: fetchMs,
+      responseBodyAndParseMs: parseMs,
+      roundTripTotalMs: totalMs,
     });
 
     if (!parsed.ok) {
@@ -540,24 +527,16 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
       console.error('[PythonService] process-flow aborted by client timeout:', {
         elapsedMs,
         timeoutMs: PROCESS_FLOW_TIMEOUT_MS,
-        preflight: {
-          localParakeetLoaded: preflight.health?.local_parakeet_loaded,
-          localParakeetLoading: preflight.health?.local_parakeet_loading,
-          localParakeetLoadingForMs: preflight.health?.local_parakeet_loading_for_ms,
-          coldStartBudgetSeconds: preflight.health?.local_parakeet_cold_start_budget_seconds,
-          timeoutFallbackEnabled: preflight.health?.local_parakeet_timeout_fallback_enabled,
-          localParakeetError: preflight.health?.local_parakeet_error,
-        },
         afterTimeout: {
           reachable: postFailureHealth.reachable,
           ready: postFailureHealth.ready,
-          localParakeetLoaded: postFailureHealth.health?.local_parakeet_loaded,
-          localParakeetLoading: postFailureHealth.health?.local_parakeet_loading,
-          localParakeetLoadingForMs: postFailureHealth.health?.local_parakeet_loading_for_ms,
-          localParakeetError: postFailureHealth.health?.local_parakeet_error,
+          localWhisperLoaded: postFailureHealth.health?.local_whisper_loaded,
+          localWhisperLoading: postFailureHealth.health?.local_whisper_loading,
+          localWhisperLoadingForMs: postFailureHealth.health?.local_whisper_loading_for_ms,
+          localWhisperError: postFailureHealth.health?.local_whisper_error,
         },
         hint:
-          'Electron aborted before /process-flow returned. Check [VoiceService] stage logs; cold Parakeet load can exceed the old 60s client timeout.',
+          'Electron aborted before /process-flow returned. Check [VoiceService] stage logs; Whisper Turbo may still be loading.',
         error,
       });
       return {
@@ -565,7 +544,7 @@ export async function processVoiceFlow(audioBuffer: UploadableAudio, context?: V
         success: false,
         error:
           `Voice processing timed out after ${elapsedMs}ms (client limit ${PROCESS_FLOW_TIMEOUT_MS}ms). `
-          + 'Local Parakeet may still be loading — watch [VoiceService] logs and retry once the model is ready.',
+          + 'Whisper Turbo may still be loading — watch [VoiceService] logs and retry once the model is ready.',
       };
     }
     console.error('[PythonService] Error processing voice after', elapsedMs, 'ms:', error);

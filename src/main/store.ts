@@ -1,7 +1,8 @@
 import type { ConversationBranches } from '../shared/conversationBranches';
 import Store from 'electron-store';
-import fs from 'node:fs';
+import { ConversationFiles, SerialTaskQueue } from './conversationFiles';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { SearchSourceGroup } from '../shared/search';
 import type { FileAttachment } from '../shared/attachments';
 import { isWorkspaceView } from '../shared/workspaceViews';
@@ -53,11 +54,26 @@ export interface SerializedFolder {
   timestamp: string;
 }
 
+export interface DeletedConversationMetadata extends SerializedConversationMetadata {
+  deletedAt: string;
+  expiresAt: string;
+}
+
+interface ConversationDeletion {
+  id: string;
+  metadata?: DeletedConversationMetadata;
+  restoredId?: string;
+  purgePending?: boolean;
+}
+
+export const CONVERSATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
 interface StoreSchema {
   conversations: SerializedConversation[];
   conversationMetadata: SerializedConversationMetadata[];
   conversationMessages: Record<string, SerializedMessage[]>;
   conversationMessageFilesMigrated?: boolean;
+  conversationDeletions: ConversationDeletion[];
   folders: SerializedFolder[];
   selectedModel: string;
   selectedReasoningEffort: string;
@@ -87,6 +103,7 @@ const store = new Store<StoreSchema>({
     conversationMetadata: [],
     conversationMessages: {},
     conversationMessageFilesMigrated: false,
+    conversationDeletions: [],
     folders: [],
     selectedModel: '',
     selectedReasoningEffort: '',
@@ -105,56 +122,12 @@ const store = new Store<StoreSchema>({
 
 const conversationStorageDir = path.join(path.dirname((store as { path: string }).path), 'jarvis-conversations');
 
-function ensureConversationStorageDir(): void {
-  fs.mkdirSync(conversationStorageDir, { recursive: true });
-}
-
-function getConversationPath(id: string): string {
-  return path.join(conversationStorageDir, `${encodeURIComponent(id)}.json`);
-}
-
-function readConversationFile(id: string): SerializedConversation | null {
-  try {
-    const raw = fs.readFileSync(getConversationPath(id), 'utf8');
-    return JSON.parse(raw) as SerializedConversation;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      console.error(`Failed to read conversation ${id}:`, error);
-    }
-    return null;
-  }
-}
-
-function writeConversationFile(conversation: SerializedConversation): void {
-  ensureConversationStorageDir();
-  fs.writeFileSync(getConversationPath(conversation.id), `${JSON.stringify(conversation)}\n`, 'utf8');
-}
-
-function deleteConversationFile(id: string): void {
-  try {
-    fs.rmSync(getConversationPath(id), { force: true });
-  } catch (error) {
-    console.error(`Failed to delete conversation ${id}:`, error);
-  }
-}
-
-function pruneConversationFiles(validIds: Set<string>): void {
-  try {
-    if (!fs.existsSync(conversationStorageDir)) {
-      return;
-    }
-
-    const validFileNames = new Set([...validIds].map(id => `${encodeURIComponent(id)}.json`));
-    for (const entry of fs.readdirSync(conversationStorageDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.json') || validFileNames.has(entry.name)) {
-        continue;
-      }
-      fs.rmSync(path.join(conversationStorageDir, entry.name), { force: true });
-    }
-  } catch (error) {
-    console.error('Failed to prune orphaned conversation files:', error);
-  }
-}
+const conversationFiles = new ConversationFiles<SerializedConversation>(conversationStorageDir);
+const conversationQueue = new SerialTaskQueue();
+// Tombstones outlive trash contents so delayed snapshots cannot resurrect old IDs.
+const isDeleted = (id: string): boolean => getDeletions().some(entry => entry.id === id);
+const getDeletions = (): ConversationDeletion[] => store.get('conversationDeletions', []);
+export const flushConversationStorage = (): Promise<void> => conversationQueue.flush();
 
 function pruneConversationMessageMap(validIds: Set<string>): void {
   const messages = store.get('conversationMessages', {}) as Record<string, SerializedMessage[]>;
@@ -194,8 +167,8 @@ function pruneConversationDrafts(validIds: Set<string>): void {
   }
 }
 
-function pruneDeletedConversationState(validIds: Set<string>): void {
-  pruneConversationFiles(validIds);
+async function pruneDeletedConversationState(validIds: Set<string>): Promise<void> {
+  // Never infer file deletion from an index: it may lag a durable file write.
   pruneConversationMessageMap(validIds);
   pruneLegacyConversations(validIds);
   pruneConversationReferences(validIds);
@@ -212,7 +185,7 @@ function conversationToMetadata(conversation: SerializedConversation): Serialize
   };
 }
 
-function ensureConversationStorageMigrated(): void {
+async function ensureConversationStorageMigrated(): Promise<void> {
   if (store.get('conversationMessageFilesMigrated', false) as boolean) {
     return;
   }
@@ -239,137 +212,233 @@ function ensureConversationStorageMigrated(): void {
     }
   });
 
-  nextMetadata.forEach(conversationMetadata => {
-    if (readConversationFile(conversationMetadata.id)) {
-      return;
+  for (const conversationMetadata of nextMetadata) {
+    if (await conversationFiles.read(conversationMetadata.id)) {
+      continue;
     }
 
     const legacyConversation = legacyConversationMap.get(conversationMetadata.id);
-    writeConversationFile({
+    await conversationFiles.write({
       ...conversationMetadata,
       messages: legacyConversation?.messages ?? messages[conversationMetadata.id] ?? [],
+      branches: legacyConversation?.branches,
     });
-  });
+  }
 
   store.set('conversationMetadata', nextMetadata);
   store.set('conversationMessages', {});
   store.set('conversations', []);
   store.set('conversationMessageFilesMigrated', true);
-  pruneDeletedConversationState(new Set(nextMetadata.map(conversation => conversation.id)));
+  await pruneDeletedConversationState(new Set(nextMetadata.map(conversation => conversation.id)));
 }
 
-export function loadConversationMetadata(): SerializedConversationMetadata[] {
-  ensureConversationStorageMigrated();
-  return store.get('conversationMetadata', []) as SerializedConversationMetadata[];
+function getConversationMetadata(): SerializedConversationMetadata[] {
+  return store.get('conversationMetadata', []).filter(entry => !isDeleted(entry.id));
 }
 
-export function loadConversation(id: string): SerializedConversation | null {
-  ensureConversationStorageMigrated();
-  const metadata = loadConversationMetadata().find(c => c.id === id);
-  if (!metadata) {
-    return null;
+async function purgeDeletedConversation(id: string): Promise<void> {
+  // Commit purge intent first. A crash or failed unlink is retried, never restored.
+  store.set('conversationDeletions', getDeletions().map(item => item.id === id
+    ? { id, purgePending: true } : item));
+  await conversationFiles.delete(id);
+  store.set('conversationDeletions', getDeletions().map(item => item.id === id
+    ? { id } : item));
+}
+
+async function cleanExpiredConversations(): Promise<void> {
+  for (const entry of getDeletions()) {
+    if (entry.purgePending || (entry.metadata && Date.parse(entry.metadata.expiresAt) <= Date.now())) {
+      try {
+        await purgeDeletedConversation(entry.id);
+      } catch (error) {
+        console.error(`Failed to purge deleted conversation ${entry.id}; will retry:`, error);
+      }
+    }
   }
+}
 
-  const storedConversation = readConversationFile(id);
-  return {
-    ...storedConversation,
-    ...metadata,
-    messages: storedConversation?.messages ?? [],
+async function prepareConversationStorage(): Promise<void> {
+  await ensureConversationStorageMigrated();
+  await cleanExpiredConversations();
+}
+
+export function cleanupDeletedConversations(): Promise<void> {
+  return conversationQueue.run(prepareConversationStorage);
+}
+
+export function startDeletedConversationCleanup(): () => void {
+  const cleanup = (): void => {
+    void cleanupDeletedConversations().catch(error => console.error('Failed to clean recently deleted conversations:', error));
   };
+  cleanup();
+  const timer = setInterval(cleanup, 60_000);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
-export function loadConversations(ids?: string[]): SerializedConversation[] {
-  ensureConversationStorageMigrated();
-  const metadata = loadConversationMetadata();
-  const requestedIds = ids ? new Set(ids) : null;
-
-  return metadata
-    .filter(c => !requestedIds || requestedIds.has(c.id))
-    .map(c => {
-      const stored = readConversationFile(c.id);
-      return { ...stored, ...c, messages: stored?.messages ?? [] };
-    });
+async function softDeleteConversations(metadata: SerializedConversationMetadata[]): Promise<void> {
+  if (!metadata.length) return;
+  // Validate before committing the tombstones; preserve the complete files in place.
+  for (const entry of metadata) await readStoredConversation(entry);
+  const now = Date.now();
+  store.set('conversationDeletions', [...getDeletions(), ...metadata.map(entry => ({
+    id: entry.id,
+    metadata: { ...entry, deletedAt: new Date(now).toISOString(), expiresAt: new Date(now + CONVERSATION_RETENTION_MS).toISOString() },
+  }))]);
+  const remaining = getConversationMetadata();
+  store.set('conversationMetadata', remaining);
+  await pruneDeletedConversationState(new Set(remaining.map(entry => entry.id)));
 }
 
-export function saveConversationMetadata(metadata: SerializedConversationMetadata[]): void {
-  ensureConversationStorageMigrated();
-  const validIds = new Set(metadata.map(conversation => conversation.id));
-  store.set('conversationMetadata', metadata);
-  pruneDeletedConversationState(validIds);
+export function listDeletedConversations(): Promise<DeletedConversationMetadata[]> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    return getDeletions().flatMap(entry => !entry.purgePending && entry.metadata
+      && Date.parse(entry.metadata.expiresAt) > Date.now() ? [entry.metadata] : [])
+      .sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
+  });
 }
 
-export function saveConversation(conversation: SerializedConversation): void {
-  ensureConversationStorageMigrated();
-  const metadata = loadConversationMetadata();
-  const nextMetadata = metadata.some(c => c.id === conversation.id)
-    ? metadata.map(c => c.id === conversation.id ? conversationToMetadata(conversation) : c)
-    : [conversationToMetadata(conversation), ...metadata];
+export function restoreConversation(id: string): Promise<SerializedConversation> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    const entry = getDeletions().find(item => item.id === id);
+    if (!entry?.metadata || entry.purgePending || !(Date.parse(entry.metadata.expiresAt) > Date.now())) {
+      throw new Error('Deleted conversation is no longer available.');
+    }
+    const restoredId = entry.restoredId ?? randomUUID();
+    // Journal the destination before writing, making a failed restore retryable.
+    store.set('conversationDeletions', getDeletions().map(item => item.id === id ? { ...item, restoredId } : item));
+    const existing = getConversationMetadata().find(item => item.id === restoredId);
+    const { deletedAt: _deletedAt, expiresAt: _expiresAt, ...metadata } = entry.metadata;
+    const restored = existing ? await readStoredConversation(existing) : {
+      ...await readStoredConversation(metadata),
+      id: restoredId,
+      folderId: loadFolders().some(folder => folder.id === metadata.folderId) ? metadata.folderId : null,
+    };
+    if (!existing) {
+      await conversationFiles.write(restored);
+      store.set('conversationMetadata', [conversationToMetadata(restored), ...getConversationMetadata()]);
+    }
+    // Publish the new durable copy before scheduling removal of the old one.
+    store.set('conversationDeletions', getDeletions().map(item => item.id === id ? { id, purgePending: true } : item));
+    return restored;
+  });
+}
 
-  store.set('conversationMetadata', nextMetadata);
-  writeConversationFile(conversation);
+export function permanentlyDeleteConversation(id: string): Promise<void> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    if (!isDeleted(id)) throw new Error('Only recently deleted conversations can be permanently deleted.');
+    await purgeDeletedConversation(id);
+  });
+}
+
+export function loadConversationMetadata(): Promise<SerializedConversationMetadata[]> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    return getConversationMetadata();
+  });
+}
+
+async function readStoredConversation(metadata: SerializedConversationMetadata): Promise<SerializedConversation> {
+  const stored = await conversationFiles.read(metadata.id);
+  if (!stored) {
+    throw new Error(`Conversation ${metadata.id} is missing. Refusing to replace it with an empty transcript.`);
+  }
+  return { ...stored, ...metadata };
+}
+
+export function loadConversation(id: string): Promise<SerializedConversation | null> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    const metadata = getConversationMetadata().find(c => c.id === id);
+    return metadata ? readStoredConversation(metadata) : null;
+  });
+}
+
+export function loadConversations(ids?: string[]): Promise<SerializedConversation[]> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    const requestedIds = ids ? new Set(ids) : null;
+    const conversations: SerializedConversation[] = [];
+    for (const metadata of getConversationMetadata()) {
+      if (!requestedIds || requestedIds.has(metadata.id)) {
+        conversations.push(await readStoredConversation(metadata));
+      }
+    }
+    return conversations;
+  });
+}
+
+export function saveConversationMetadata(metadata: SerializedConversationMetadata[]): Promise<void> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    const nextMetadata = metadata.filter(c => !isDeleted(c.id));
+    const suppliedIds = new Set(nextMetadata.map(c => c.id));
+    nextMetadata.push(...getConversationMetadata().filter(c => !suppliedIds.has(c.id)));
+    store.set('conversationMetadata', nextMetadata);
+    // List edits are not deletions. Only explicit delete/replace operations may
+    // prune files, so a stale list cannot destroy a newer conversation snapshot.
+  });
+}
+
+export function saveConversation(conversation: SerializedConversation): Promise<void> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    if (isDeleted(conversation.id)) return;
+    await conversationFiles.write(conversation);
+    const metadata = getConversationMetadata();
+    const nextMetadata = metadata.some(c => c.id === conversation.id)
+      ? metadata.map(c => c.id === conversation.id ? conversationToMetadata(conversation) : c)
+      : [conversationToMetadata(conversation), ...metadata];
+    store.set('conversationMetadata', nextMetadata);
+  });
 }
 
 export function loadLegacyConversations(): SerializedConversation[] {
-  return store.get('conversations', []) as SerializedConversation[];
+  return store.get('conversations', []);
 }
 
-export function saveConversations(conversations: SerializedConversation[]): void {
-  const validIds = new Set(conversations.map(conversation => conversation.id));
-  store.set('conversationMetadata', conversations.map(conversationToMetadata));
-  conversations.forEach(writeConversationFile);
-  store.set('conversationMessages', {});
-  store.set('conversations', []);
-  store.set('conversationMessageFilesMigrated', true);
-  pruneDeletedConversationState(validIds);
+export function saveConversations(conversations: SerializedConversation[]): Promise<void> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    const remaining = conversations.filter(c => !isDeleted(c.id));
+    for (const conversation of remaining) await conversationFiles.write(conversation);
+    const remainingIds = new Set(remaining.map(c => c.id));
+    await softDeleteConversations(getConversationMetadata().filter(c => !remainingIds.has(c.id)));
+    store.set('conversationMetadata', remaining.map(conversationToMetadata));
+    store.set('conversationMessages', {});
+    store.set('conversations', []);
+    store.set('conversationMessageFilesMigrated', true);
+    await pruneDeletedConversationState(new Set(remaining.map(c => c.id)));
+  });
 }
 
-export function deleteConversation(id: string): void {
-  ensureConversationStorageMigrated();
-  const metadata = loadConversationMetadata();
-  const legacyConversations = loadLegacyConversations();
-  const conversationMessages = store.get('conversationMessages', {}) as Record<string, SerializedMessage[]>;
-  const nextMetadata = metadata.filter(c => c.id !== id);
-  const validIds = new Set(nextMetadata.map(conversation => conversation.id));
-
-  deleteConversationFile(id);
-  delete conversationMessages[id];
-  store.set('conversationMetadata', nextMetadata);
-  store.set('conversations', legacyConversations.filter(c => c.id !== id));
-  store.set('conversationMessages', conversationMessages);
-  pruneConversationReferences(validIds);
-  pruneConversationDrafts(validIds);
+export function deleteConversation(id: string): Promise<void> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    await softDeleteConversations(getConversationMetadata().filter(c => c.id === id));
+  });
 }
 
 export function loadFolders(): SerializedFolder[] {
-  return store.get('folders', []) as SerializedFolder[];
+  return store.get('folders', []);
 }
 
 export function saveFolders(folders: SerializedFolder[]): void {
   store.set('folders', folders);
 }
 
-export function deleteFolderAndConversations(id: string): string[] {
-  ensureConversationStorageMigrated();
-  const metadata = loadConversationMetadata();
-  const deletedIds = new Set(metadata.filter(c => c.folderId === id).map(c => c.id));
-  const legacyConversations = loadLegacyConversations();
-  const conversationMessages = store.get('conversationMessages', {}) as Record<string, SerializedMessage[]>;
-  const nextMetadata = metadata.filter(c => c.folderId !== id);
-  const validIds = new Set(nextMetadata.map(conversation => conversation.id));
-
-  deletedIds.forEach(conversationId => {
-    deleteConversationFile(conversationId);
-    delete conversationMessages[conversationId];
+export function deleteFolderAndConversations(id: string): Promise<string[]> {
+  return conversationQueue.run(async () => {
+    await prepareConversationStorage();
+    const metadata = getConversationMetadata();
+    const deletedIds = metadata.filter(c => c.folderId === id).map(c => c.id);
+    await softDeleteConversations(metadata.filter(c => c.folderId === id));
+    store.set('folders', loadFolders().filter(f => f.id !== id));
+    return deletedIds;
   });
-
-  store.set('conversationMetadata', nextMetadata);
-  store.set('conversations', legacyConversations.filter(c => c.folderId !== id));
-  store.set('conversationMessages', conversationMessages);
-  pruneConversationReferences(validIds);
-  pruneConversationDrafts(validIds);
-  const folders: SerializedFolder[] = store.get('folders', []);
-  store.set('folders', folders.filter(f => f.id !== id));
-  return [...deletedIds];
 }
 
 export function loadSelectedModel(): string {

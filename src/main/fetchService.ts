@@ -526,7 +526,8 @@ async function fetchPublicResponse(initialUrl: string, signal: AbortSignal): Pro
   throw new Error(`fetch_url stopped after ${MAX_REDIRECTS} redirects.`);
 }
 
-export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolResult> {
+export async function fetchUrlContent(args: FetchToolArgs, signal?: AbortSignal): Promise<FetchToolResult> {
+  signal?.throwIfAborted();
   const fetchedAt = new Date().toISOString();
   let requestedUrl = args.url;
 
@@ -559,7 +560,7 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
   const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
 
   try {
-    const response = await fetchPublicResponse(requestedUrl, abortController.signal);
+    const response = await fetchPublicResponse(requestedUrl, signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal);
 
     const finalUrl = response.url || requestedUrl;
     const contentLength = parseContentLength(response.headers);
@@ -688,6 +689,7 @@ export async function fetchUrlContent(args: FetchToolArgs): Promise<FetchToolRes
       fetchedAt,
     };
   } catch (error) {
+    signal?.throwIfAborted();
     const policyMessage = findFetchPolicyMessage(error);
     const errorMessage = policyMessage
       ?? (error instanceof DOMException && error.name === 'AbortError'

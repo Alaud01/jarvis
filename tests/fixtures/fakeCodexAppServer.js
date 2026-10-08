@@ -50,17 +50,27 @@ function respondToTurn(thread, threadId, turnId, requestId) {
 }
 
 function startToolCall(threadId, turnId, requestId) {
+  // FAKE_TOOL_CALL_SHAPE exercises alternate item/tool/call wire shapes the
+  // protocol permits: 'string-args' sends arguments as a JSON string and
+  // 'no-namespace' omits the optional namespace field.
+  const shape = process.env.FAKE_TOOL_CALL_SHAPE || 'default';
+  const toolParams = {
+    threadId,
+    turnId,
+    callId: 'call-test',
+    tool: 'browser_open',
+    arguments: { url: 'https://example.com' },
+  };
+  if (shape !== 'no-namespace') {
+    toolParams.namespace = 'jarvis';
+  }
+  if (shape === 'string-args') {
+    toolParams.arguments = JSON.stringify(toolParams.arguments);
+  }
   send({
     id: requestId,
     method: 'item/tool/call',
-    params: {
-      threadId,
-      turnId,
-      callId: 'call-test',
-      namespace: 'jarvis',
-      tool: 'browser_open',
-      arguments: { url: 'https://example.com' },
-    },
+    params: toolParams,
   });
 }
 
@@ -184,7 +194,8 @@ lines.on('line', line => {
           return;
         }
         const refreshedAccount = accountFromAccessToken(response.result.accessToken);
-        if (refreshedAccount === 'expiring') {
+        const refreshedClaims = JSON.parse(Buffer.from(response.result.accessToken.split('.')[1], 'base64url').toString('utf8'));
+        if (refreshedAccount === 'expiring' && !refreshedClaims.test_refreshed) {
           failTurn(threadId, turnId, 'Your access token could not be refreshed.', 'unauthorized');
           return;
         }
@@ -228,6 +239,10 @@ lines.on('line', line => {
           },
         },
       });
+      return;
+    }
+    if (process.env.FAKE_CODEX_LIMIT_AFTER_TOOL === '1') {
+      failTurn(activeTurn.threadId, activeTurn.turnId, 'Workspace credits are depleted.', 'usageLimitExceeded');
       return;
     }
     send({

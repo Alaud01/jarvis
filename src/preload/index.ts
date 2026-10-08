@@ -1,3 +1,4 @@
+import type { ModelCatalogSnapshot } from '../shared/modelCatalog';
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { SearchSourcesEvent } from '../shared/search';
 import type { CompactionEvent, StreamChunkEvent, StreamErrorEvent, StreamEventContext, StopStreamRequest } from '../shared/stream';
@@ -37,7 +38,24 @@ type SendMessageStreamRequest = {
 };
 
 contextBridge.exposeInMainWorld('assistant', {
+  onBeforeQuit: (callback: () => Promise<void>) => {
+    const listener = (_event: IpcRendererEvent, requestId: string) => {
+      void Promise.resolve().then(callback).then(
+        () => ipcRenderer.send('store:flushed', requestId),
+        (error: unknown) => ipcRenderer.send('store:flushed', requestId,
+          error instanceof Error ? error.message : 'Unable to save pending changes.'),
+      );
+    };
+    ipcRenderer.on('store:flush', listener);
+    return () => ipcRenderer.removeListener('store:flush', listener);
+  },
   getModels: () => ipcRenderer.invoke('get-models'),
+  getModelCatalog: (force = false): Promise<ModelCatalogSnapshot> => ipcRenderer.invoke('get-model-catalog', force),
+  onModelCatalogChanged: (callback: (snapshot: ModelCatalogSnapshot) => void) => {
+    const listener = (_event: IpcRendererEvent, snapshot: ModelCatalogSnapshot) => callback(snapshot);
+    ipcRenderer.on('model-catalog-changed', listener);
+    return () => ipcRenderer.removeListener('model-catalog-changed', listener);
+  },
   getModelsForProvider: (providerId: string) => ipcRenderer.invoke('get-models-for-provider', providerId),
   getProviders: () => ipcRenderer.invoke('get-providers'),
   pickAttachmentPaths: (): Promise<string[]> => ipcRenderer.invoke('pick-attachment-paths'),
@@ -113,6 +131,9 @@ contextBridge.exposeInMainWorld('assistant', {
   storeSaveConversationList: (conversations: unknown) => ipcRenderer.invoke('store:save-conversation-list', conversations),
   storeSaveConversation: (conversation: unknown) => ipcRenderer.invoke('store:save-conversation', conversation),
   storeDeleteConversation: (id: string) => ipcRenderer.invoke('store:delete-conversation', id),
+  storeListDeletedConversations: () => ipcRenderer.invoke('store:list-deleted-conversations'),
+  storeRestoreConversation: (id: string) => ipcRenderer.invoke('store:restore-conversation', id),
+  storePermanentlyDeleteConversation: (id: string) => ipcRenderer.invoke('store:permanently-delete-conversation', id),
   storeLoadFolders: () => ipcRenderer.invoke('store:load-folders'),
   storeSaveFolders: (folders: unknown) => ipcRenderer.invoke('store:save-folders', folders),
   storeDeleteFolder: (id: string) => ipcRenderer.invoke('store:delete-folder', id),

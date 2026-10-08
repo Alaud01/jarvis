@@ -6,7 +6,9 @@ import { startPythonService } from './pythonService';
 import { initializeVoiceFlow, registerVoiceFlowIPC } from './voiceFlow';
 import { setOverlayThemeBackground } from './overlayWindow';
 import { getCodexProvider, initializeProviders } from './providers/registry';
-import { deleteLegacyStoredProviderApiKeys } from './store';
+import { deleteLegacyStoredProviderApiKeys, flushConversationStorage } from './store';
+import { flushRenderer } from './ipc/flushRenderer';
+import { QuitCoordinator } from './app/quitCoordinator';
 import { resolveCodexSwitcherAuthPath } from './codexSharedAuth';
 import {
   buildAppMenu,
@@ -46,7 +48,6 @@ let mainWindow: BrowserWindow | null = null;
 const activeStreams = new Map<string, AbortController>();
 let isQuitting = false;
 let shutdownComplete = false;
-let shutdownPromise: Promise<void> | null = null;
 
 ipcMain.on('set-theme-background', (_event, isDark: boolean) => {
   setOverlayThemeBackground(isDark);
@@ -264,29 +265,45 @@ app.on('activate', () => {
   }
 });
 
-app.on('before-quit', (event) => {
-  isQuitting = true;
-  tray?.destroy();
-  tray = null;
-
-  // Electron does not await async event listeners. Hold the quit open until
-  // child services have actually stopped, otherwise Ctrl+C can orphan them.
-  if (shutdownComplete) {
-    return;
-  }
-
-  event.preventDefault();
-
-  if (!shutdownPromise) {
-    infoLog('[Main] Stopping application services...');
-    shutdownPromise = shutdownApplicationServices().finally(() => {
-      shutdownComplete = true;
-      app.quit();
+const quitCoordinator = new QuitCoordinator({
+  flushRenderer: () => flushRenderer(mainWindow?.webContents),
+  flushStorage: flushConversationStorage,
+  confirm: async (error, signal) => {
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Changes could not be saved',
+      message: 'Jarvis could not finish saving before quitting.',
+      detail: `${error instanceof Error ? error.message : String(error)}\nQuit Anyway may discard unsaved changes.`,
+      buttons: ['Retry', 'Cancel', 'Quit Anyway'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      signal,
     });
-  }
+    return response === 0 ? 'retry' : response === 2 ? 'quit' : 'cancel';
+  },
+  beginShutdown: () => {
+    isQuitting = true;
+    tray?.destroy();
+    tray = null;
+    activeStreams.forEach(controller => controller.abort());
+    infoLog('[Main] Stopping application services...');
+  },
+  stopServices: shutdownApplicationServices,
+  exit: forced => {
+    shutdownComplete = true;
+    if (forced) app.exit(0);
+    else app.quit();
+  },
+  report: error => console.error('[Main] Shutdown cleanup failed:', error),
 });
 
-// Development runners such as concurrently forward terminal signals directly
-// to Electron. Convert them into Electron's graceful quit path.
-process.on('SIGINT', () => app.quit());
-process.on('SIGTERM', () => app.quit());
+app.on('before-quit', event => {
+  if (shutdownComplete) return;
+  event.preventDefault();
+  void quitCoordinator.request();
+});
+
+// Terminal termination must not wait on a renderer or an interactive dialog.
+process.on('SIGINT', () => { void quitCoordinator.request(true); });
+process.on('SIGTERM', () => { void quitCoordinator.request(true); });

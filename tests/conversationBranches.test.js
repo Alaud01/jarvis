@@ -69,7 +69,11 @@ test('renderer serialization round-trips archived dates and detects version-only
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   });
   const exported = {};
-  vm.runInNewContext(outputText, { exports: exported, require, Date });
+  vm.runInNewContext(outputText, {
+    exports: exported,
+    require: name => name === '../../shared/saveQueue' ? require('../dist/shared/saveQueue') : require(name),
+    Date,
+  });
   const { serializeConversation, deserializeConversation, getConversationRevision } = exported;
   const now = new Date('2026-09-07T00:00:00Z');
   const c = { ...original(), id: 'chat', title: 'Title', timestamp: now, isLoaded: true, folderId: null, isPinned: false };

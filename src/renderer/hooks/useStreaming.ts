@@ -17,6 +17,7 @@ export interface UseStreamingResult {
   ) => void;
   scheduleStreamFlush: (assistantMessageId: string) => void;
   handleStopStreaming: () => Promise<void>;
+  handleStreamFailure: (conversationId: string, assistantMessageId: string, error: string) => void;
 }
 
 interface StreamingSession {
@@ -148,6 +149,22 @@ export function useStreaming(
     unregisterStreamSession(assistantMessageId);
   }, [flushStreamChunkBuffer, markConversationCompleteUnread, unregisterStreamSession, updateMessageInConversation]);
 
+  const handleStreamFailure = useCallback((conversationId: string, assistantMessageId: string, error: string) => {
+    // IPC sends both an error event and a rejected invocation. Handle whichever
+    // arrives first, flushing buffered output before appending the error once.
+    if (!streamingSessionsRef.current.has(assistantMessageId)) return;
+    flushStreamChunkBuffer(assistantMessageId);
+    updateMessageInConversation(conversationId, assistantMessageId, message => ({
+      ...message,
+      text: message.text
+        ? `${message.text}\n\nError: ${error}`
+        : `Error: ${error}. Make sure your selected provider is running and configured.`,
+      isStreaming: false,
+    }));
+    markConversationCompleteUnread(conversationId);
+    unregisterStreamSession(assistantMessageId);
+  }, [flushStreamChunkBuffer, markConversationCompleteUnread, unregisterStreamSession, updateMessageInConversation]);
+
   useEffect(() => {
     const handleChunk = (event: StreamChunkEvent) => {
       if (!streamingSessionsRef.current.has(event.assistantMessageId)) {
@@ -166,22 +183,7 @@ export function useStreaming(
 
     const handleError = (event: StreamErrorEvent) => {
       console.error('Streaming error:', event.error);
-      if (!streamingSessionsRef.current.has(event.assistantMessageId)) {
-        return;
-      }
-
-      flushStreamChunkBuffer(event.assistantMessageId);
-      updateMessageInConversation(
-        event.conversationId,
-        event.assistantMessageId,
-        message => ({
-          ...message,
-          text: `Error: ${event.error}. Make sure your selected provider is running and configured.`,
-          isStreaming: false,
-        })
-      );
-      markConversationCompleteUnread(event.conversationId);
-      unregisterStreamSession(event.assistantMessageId);
+      handleStreamFailure(event.conversationId, event.assistantMessageId, event.error);
     };
 
     const getConversationIdForMessage = (assistantMessageId: string): string | null => {
@@ -261,7 +263,7 @@ export function useStreaming(
       searchSourcesCleanup();
       compactionCleanup();
     };
-  }, [finishStreaming, flushStreamChunkBuffer, markConversationCompleteUnread, scheduleStreamFlush, unregisterStreamSession, updateMessageInConversation]);
+  }, [finishStreaming, handleStreamFailure, scheduleStreamFlush, updateMessageInConversation]);
 
   const handleStopStreaming = useCallback(async () => {
     if (!currentConversationIdRef.current) {
@@ -299,5 +301,6 @@ export function useStreaming(
     updateMessageInConversation,
     scheduleStreamFlush,
     handleStopStreaming,
+    handleStreamFailure,
   };
 }

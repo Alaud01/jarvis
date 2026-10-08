@@ -599,16 +599,17 @@ export class CodexProvider implements Provider {
   async sendChat(
     modelId: string,
     messages: ChatMessage[],
-    _options?: SendChatOptions,
+    options?: SendChatOptions,
   ): Promise<string> {
     // sendChat streams nothing and runs no tools, so a retry duplicates nothing.
-    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages));
+    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages, options), options?.signal);
   }
 
   private async sendChatOnActiveAccount(
     attempt: AccountAttempt,
     modelId: string,
     messages: ChatMessage[],
+    options?: SendChatOptions,
   ): Promise<string> {
     const account = await this.client.ensureChatGptAccount();
     if (account.type !== 'chatgpt') {
@@ -628,6 +629,7 @@ export class CodexProvider implements Provider {
       model,
       input: builtInput.input,
       onDelta: () => undefined,
+      signal: options?.signal,
     });
   }
 

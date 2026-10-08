@@ -2,7 +2,8 @@ import { execFile } from 'child_process';
 import { systemPreferences } from 'electron';
 import type { VoiceContext, VoiceDestinationKind } from '../shared/voice';
 import type { FrontmostApp } from './textInserter';
-import { getActiveDictionaryVoiceEntries, getActiveVocabularyVoiceEntries } from './dictionaryService';
+// Personal dictionary is suspended for Whisper Turbo.
+// import { getActiveDictionaryVoiceEntries, getActiveVocabularyVoiceEntries } from './dictionaryService';
 
 const TEXT_BEFORE_LIMIT = 1000;
 const TEXT_AFTER_LIMIT = 500;
@@ -112,8 +113,10 @@ export async function captureVoiceContext(
     destination: classifyVoiceDestination(app, projectFocused),
     field: null,
     accessibilityStatus: projectFocused ? 'not_requested' : 'unavailable',
-    dictionary: getActiveDictionaryVoiceEntries(app),
-    vocabulary: getActiveVocabularyVoiceEntries(app),
+    // dictionary: getActiveDictionaryVoiceEntries(app),
+    dictionary: [],
+    // vocabulary: getActiveVocabularyVoiceEntries(app),
+    vocabulary: [],
   };
 
   if (projectFocused || process.platform !== 'darwin' || app?.pid == null) {

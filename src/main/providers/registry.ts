@@ -1,26 +1,31 @@
 import type { ModelInfo, Provider, ProviderInfo } from './types';
-import { OllamaProvider } from './ollama';
+// import { OllamaProvider } from './ollama';
 import { OpenCodeGoProvider } from './opencode-go';
-import { OpenRouterProvider } from './openrouter';
+// import { OpenRouterProvider } from './openrouter';
 import { CodexProvider } from './codex';
 import type { CodexAppServerOptions } from '../codexAppServer';
+import { ModelCatalog } from './modelCatalog';
 
 const providers: Map<string, Provider> = new Map();
+const modelCatalog = new ModelCatalog();
 
 export function initializeProviders(
   opencodeGoApiKey?: string,
-  openRouterApiKey?: string,
+  _openRouterApiKey?: string,
   codexOptions?: CodexAppServerOptions,
 ): void {
   providers.clear();
-  const ollama = new OllamaProvider();
-  providers.set(ollama.id, ollama);
+  modelCatalog.clear();
+  // Ollama chat and model discovery are disabled (no active subscription).
+  // const ollama = new OllamaProvider();
+  // providers.set(ollama.id, ollama);
 
   const opencodeGo = new OpenCodeGoProvider(opencodeGoApiKey);
   providers.set(opencodeGo.id, opencodeGo);
 
-  const openRouter = new OpenRouterProvider(openRouterApiKey);
-  providers.set(openRouter.id, openRouter);
+  // OpenRouter chat and model discovery are temporarily disabled.
+  // const openRouter = new OpenRouterProvider(_openRouterApiKey);
+  // providers.set(openRouter.id, openRouter);
 
   if (codexOptions) {
     const codex = new CodexProvider(codexOptions);
@@ -44,25 +49,32 @@ export function getAvailableProviders(): ProviderInfo[] {
   return result;
 }
 
-export async function getAllModels(): Promise<ModelInfo[]> {
-  const allModels: ModelInfo[] = [];
-  const fetchPromises = [...providers.values()].map(async (provider) => {
-    try {
-      const models = await provider.fetchModels();
-      allModels.push(...models);
-    } catch (error) {
-      console.error(`[Registry] Error fetching models from ${provider.id}:`, error);
-    }
-  });
+export function getModelCatalog(force = false) {
+  for (const provider of providers.values()) void modelCatalog.refresh(provider, force);
+  return modelCatalog.snapshot([...providers.values()]);
+}
 
-  await Promise.all(fetchPromises);
-  return allModels;
+export function onModelCatalogChanged(listener: () => void): () => void {
+  return modelCatalog.subscribe(listener);
+}
+
+export function getModelCatalogSnapshot() {
+  return modelCatalog.snapshot([...providers.values()]);
+}
+
+export async function getAllModels(): Promise<ModelInfo[]> {
+  return getModelCatalog().models;
+}
+
+export function getCachedModel(providerId: string, modelId: string): ModelInfo | undefined {
+  const provider = providers.get(providerId);
+  return provider ? modelCatalog.get(provider, modelId) : undefined;
 }
 
 export async function getModelsForProvider(providerId: string): Promise<ModelInfo[]> {
   const provider = providers.get(providerId);
   if (!provider) return [];
-  return provider.fetchModels();
+  return modelCatalog.refresh(provider);
 }
 
 export function getCodexProvider(): CodexProvider | undefined {

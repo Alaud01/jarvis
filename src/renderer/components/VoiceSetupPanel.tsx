@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type { LocalVoiceModelStatus } from '../../shared/voiceSetup';
 
-const DISMISS_KEY = 'jarvis.localVoiceModelSetup.dismissed';
+const DISMISS_KEY = 'jarvis.whisperTurboSetup.dismissed';
 const INSTALLING_POLL_MS = 2000;
 const IDLE_POLL_MS = 15000;
 
@@ -15,10 +15,7 @@ function getStatusLabel(status: LocalVoiceModelStatus): string {
   if (status.status === 'failed') {
     return 'Install failed';
   }
-  if (status.openRouterFallbackConfigured) {
-    return 'Using OpenRouter fallback';
-  }
-  return 'Setup optional';
+  return 'Setup required';
 }
 
 function shouldShow(status: LocalVoiceModelStatus | null, dismissed: boolean): boolean {
@@ -107,7 +104,6 @@ const VoiceSetupPanel: React.FC = () => {
   }
 
   const lastMessage = installError || status?.lastError || status?.lastStep || '';
-  const canUseFallback = Boolean(status?.openRouterFallbackConfigured);
 
   return (
     <div className="border-t border-border-primary bg-bg-secondary px-4 py-3">
@@ -122,15 +118,13 @@ const VoiceSetupPanel: React.FC = () => {
             </span>
           </div>
           <p className="mt-1 text-[0.75rem] leading-relaxed text-text-secondary">
-            Install Parakeet in a managed runtime at {status?.managedServiceDir || '~/Library/Application Support/Jarvis/python-service'}.
+            Install Whisper large-v3-turbo in a managed runtime at {status?.managedServiceDir || '~/Library/Application Support/Jarvis/python-service'}.
             {' '}
             This downloads {status?.estimatedDownloadSize || 'the local voice dependencies and model'}.
           </p>
-          {!canUseFallback && (
-            <p className="mt-1 font-mono text-[0.65rem] text-text-tertiary">
-              Add an OpenRouter key to use cloud transcription while local setup is skipped or unavailable.
-            </p>
-          )}
+          <p className="mt-1 font-mono text-[0.65rem] text-text-tertiary">
+            Transcription runs locally with Apple MLX. Install the model to enable dictation.
+          </p>
           {lastMessage && (
             <p className="mt-1 truncate font-mono text-[0.65rem] text-text-tertiary" title={lastMessage}>
               {lastMessage}
@@ -151,7 +145,7 @@ const VoiceSetupPanel: React.FC = () => {
             className="border border-border-secondary px-3 py-1 font-mono text-[0.575rem] uppercase tracking-widest text-text-secondary transition-colors hover:border-text-primary hover:text-text-primary"
             onClick={handleDismiss}
           >
-            {canUseFallback ? 'Use fallback' : 'Dismiss'}
+            Dismiss
           </button>
         </div>
       </div>

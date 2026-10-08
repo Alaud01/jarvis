@@ -49,7 +49,8 @@ test('folder deletion names every pinned chat and counts all members', () => {
     { title: 'Important notes', isPinned: true },
     { title: 'Research', isPinned: true },
   ]);
-  assert.match(message, /permanently delete 3 conversations/);
+  assert.match(message, /delete 3 conversations/);
+  assert.match(message, /restore these conversations from Recently Deleted for 30 days/);
   assert.match(message, /pinned chats:\n• Important notes\n• Research/);
 });
 

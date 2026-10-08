@@ -234,7 +234,8 @@ async function parseTavilyError(response: Response): Promise<string> {
   }
 }
 
-export async function tavilySearch(args: TavilySearchToolArgs): Promise<TavilySearchToolResult> {
+export async function tavilySearch(args: TavilySearchToolArgs, signal?: AbortSignal): Promise<TavilySearchToolResult> {
+  signal?.throwIfAborted();
   const searchedAt = new Date().toISOString();
   const query = args.query.trim();
 
@@ -270,7 +271,7 @@ export async function tavilySearch(args: TavilySearchToolArgs): Promise<TavilySe
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(buildTavilySearchBody({ ...args, query })),
-      signal: abortController.signal,
+      signal: signal ? AbortSignal.any([signal, abortController.signal]) : abortController.signal,
     });
 
     if (!response.ok) {
@@ -294,6 +295,7 @@ export async function tavilySearch(args: TavilySearchToolArgs): Promise<TavilySe
       results: mapTavilyResults(data),
     };
   } catch (error) {
+    signal?.throwIfAborted();
     const errorMessage = error instanceof DOMException && error.name === 'AbortError'
       ? `Tavily search timed out after ${timeoutMs}ms.`
       : error instanceof Error

@@ -18,6 +18,7 @@ import {
   serializeConversationMetadata,
   serializeFolder,
 } from '../utils/conversation';
+import { SaveQueue } from '../../shared/saveQueue';
 import { resolveWorkspaceView } from '../../shared/workspaceViews';
 import { folderDeletionMessage } from '../../shared/folderDeletion';
 import type { WorkspaceView } from '../../shared/workspaceViews';
@@ -30,6 +31,7 @@ export interface UseConversationsResult {
   unreadCompleteConversationIds: Set<string>;
   restoredWorkspaceView: WorkspaceView;
   hasHydratedStore: boolean;
+  storeLoadError: string | null;
   setCurrentConversationId: (id: string | null) => void;
   setConversations: React.Dispatch<React.SetStateAction<Conversation[]>>;
   setFolders: React.Dispatch<React.SetStateAction<Folder[]>>;
@@ -51,6 +53,9 @@ export interface UseConversationsResult {
   ) => void;
   handleRenameConversation: (id: string, title: string) => void;
   handleDeleteConversation: (id: string) => void;
+  handleRestoreConversation: (id: string) => Promise<void>;
+  isStoreMutationPending: boolean;
+  canEditConversation: (id: string | null) => boolean;
   newChatTrigger: number;
   triggerNewChat: () => void;
   clearConversationAccess: (id: string) => void;
@@ -64,18 +69,28 @@ export function useConversations(): UseConversationsResult {
   const [unreadCompleteConversationIds, setUnreadCompleteConversationIds] = useState<Set<string>>(() => new Set());
   const [restoredWorkspaceView, setRestoredWorkspaceView] = useState<WorkspaceView>('chat');
   const [hasHydratedStore, setHasHydratedStore] = useState(false);
+  const [storeLoadError, setStoreLoadError] = useState<string | null>(null);
   const [newChatTrigger, setNewChatTrigger] = useState(0);
 
   const conversationAccessRef = useRef<Map<string, number>>(new Map());
   const savedStreamingSnapshotsRef = useRef<Map<string, string>>(new Map());
-  const savedConversationRevisionsRef = useRef<Map<string, string>>(new Map());
-  const savedConversationMetadataRevisionRef = useRef<string>('');
-  const metadataSaveTimerRef = useRef<number | null>(null);
-  const conversationSaveTimersRef = useRef<Map<string, number>>(new Map());
-  const draftSaveTimerRef = useRef<number | null>(null);
+  const [saveQueue] = useState(() => new SaveQueue(SAVE_DEBOUNCE_MS, (key, error) => {
+    console.error(`Failed to save ${key}; retaining snapshot for retry:`, error);
+  }));
+  const deletingIdsRef = useRef(new Set<string>());
+  const committedDeletionIdsRef = useRef(new Set<string>());
+  const storeSyncFailedRef = useRef(false);
+  const loadingIdsRef = useRef(new Map<string, symbol>());
+  const storeMutationRef = useRef(false);
+  const [isStoreMutationPending, setIsStoreMutationPending] = useState(false);
   const scrollSaveTimerRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef<Record<string, number>>({});
   const scrollPositionsDirtyRef = useRef(false);
+  const latestSaveStateRef = useRef({ conversations, hasHydratedStore });
+
+  useEffect(() => {
+    latestSaveStateRef.current = { conversations, hasHydratedStore };
+  }, [conversations, hasHydratedStore]);
 
   const flushScrollPositions = useCallback(() => {
     if (scrollSaveTimerRef.current !== null) {
@@ -97,21 +112,32 @@ export function useConversations(): UseConversationsResult {
   }, []);
 
   useEffect(() => {
-    const conversationSaveTimers = conversationSaveTimersRef.current;
-    window.addEventListener('pagehide', flushScrollPositions);
-
-    return () => {
-      window.removeEventListener('pagehide', flushScrollPositions);
-      if (metadataSaveTimerRef.current !== null) {
-        window.clearTimeout(metadataSaveTimerRef.current);
-      }
-      if (draftSaveTimerRef.current !== null) {
-        window.clearTimeout(draftSaveTimerRef.current);
-      }
-      conversationSaveTimers.forEach(timerId => window.clearTimeout(timerId));
+    const flush = () => {
       flushScrollPositions();
+      void saveQueue.flush().catch(() => undefined);
     };
-  }, [flushScrollPositions]);
+    window.addEventListener('pagehide', flush);
+    const cleanup = window.assistant.onBeforeQuit(async () => {
+      flushScrollPositions();
+      // Streaming intentionally skips intermediate disk writes. Capture the
+      // latest rendered transcript before acknowledging a normal quit.
+      const latest = latestSaveStateRef.current;
+      if (latest.hasHydratedStore) {
+        for (const conversation of latest.conversations) {
+          if (!conversation.isLoaded || deletingIdsRef.current.has(conversation.id)) continue;
+          saveQueue.schedule(conversation.id, getConversationRevision(conversation), () => (
+            window.assistant.storeSaveConversation(serializeConversation(conversation))
+          ));
+        }
+      }
+      await saveQueue.flush();
+    });
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      cleanup();
+      flush();
+    };
+  }, [flushScrollPositions, saveQueue]);
 
   useEffect(() => {
     let isMounted = true;
@@ -150,9 +176,15 @@ export function useConversations(): UseConversationsResult {
             resolvedCurrentId,
             ...deserialized.slice(0, CONVERSATION_CACHE_LIMIT).map(c => c.id),
           ].filter((id): id is string => Boolean(id)))).slice(0, CONVERSATION_CACHE_LIMIT);
-          const warmConversations = warmIds.length > 0
-            ? await window.assistant.storeLoadConversationsById(warmIds)
-            : [];
+          const warmResults = await Promise.allSettled(warmIds.map(id => window.assistant.storeLoadConversation(id)));
+          if (!isMounted) return;
+          const failedWarmIds = new Set<string>();
+          const warmConversations = warmResults.flatMap((result, index) => {
+            if (result.status === 'fulfilled') return result.value ? [result.value] : [];
+            failedWarmIds.add(warmIds[index]);
+            console.error('Failed to load conversation:', result.reason);
+            return [];
+          });
           const warmConversationMap = new Map(
             warmConversations.map(c => [c.id, deserializeConversation(c)])
           );
@@ -164,26 +196,31 @@ export function useConversations(): UseConversationsResult {
                   folderId: conversation.folderId,
                   isPinned: conversation.isPinned,
                 }
-              : conversation;
+              : failedWarmIds.has(conversation.id)
+                ? { ...conversation, loadError: 'This conversation could not be loaded. Its stored history has been preserved.' }
+                : conversation;
           });
 
           warmIds.forEach((id, index) => {
             conversationAccessRef.current.set(id, Date.now() - index);
           });
-          savedConversationMetadataRevisionRef.current = getConversationMetadataRevision(hydratedConversations);
+          saveQueue.seed('metadata', getConversationMetadataRevision(hydratedConversations));
           warmConversationMap.forEach(conversation => {
-            savedConversationRevisionsRef.current.set(conversation.id, getConversationRevision(conversation));
+            saveQueue.seed(conversation.id, getConversationRevision(conversation));
           });
 
           setConversations(hydratedConversations);
           setCurrentConversationId(resolvedCurrentId);
         } else {
-          savedConversationMetadataRevisionRef.current = getConversationMetadataRevision([]);
+          saveQueue.seed('metadata', getConversationMetadataRevision([]));
           setConversations([]);
           setCurrentConversationId(null);
         }
       } else {
         console.error('Failed to load stored conversations:', conversationsResult.reason);
+        setStoreLoadError('Your conversation list could not be loaded. Restart Jarvis to retry. Existing conversations have been preserved.');
+        // An empty renderer must never overwrite a list that failed to load.
+        return;
       }
 
       if (foldersResult.status === 'fulfilled') {
@@ -221,61 +258,40 @@ export function useConversations(): UseConversationsResult {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [saveQueue]);
 
   useEffect(() => {
     if (!hasHydratedStore) {
       return;
     }
 
-    const metadataRevision = getConversationMetadataRevision(conversations);
-    if (metadataRevision !== savedConversationMetadataRevisionRef.current) {
-      savedConversationMetadataRevisionRef.current = metadataRevision;
-      if (metadataSaveTimerRef.current !== null) {
-        window.clearTimeout(metadataSaveTimerRef.current);
-      }
-      metadataSaveTimerRef.current = window.setTimeout(() => {
-        metadataSaveTimerRef.current = null;
-        window.assistant.storeSaveConversationList(conversations.map(serializeConversationMetadata)).catch(err => {
-          console.error('Failed to save conversation metadata:', err);
-        });
-      }, SAVE_DEBOUNCE_MS);
+    if (!storeMutationRef.current) {
+      const metadata = conversations.filter(c => !deletingIdsRef.current.has(c.id));
+      saveQueue.schedule('metadata', getConversationMetadataRevision(metadata), () => (
+        window.assistant.storeSaveConversationList(metadata.map(serializeConversationMetadata))
+      ));
     }
 
     conversations.forEach(conversation => {
-      if (!conversation.isLoaded) {
+      if (!conversation.isLoaded || deletingIdsRef.current.has(conversation.id)) {
         return;
       }
 
       const streamingMessage = conversation.messages.find(message => message.isStreaming);
       if (streamingMessage) {
-        // Save the initial branch before waiting for generation; avoid hashing and
+        // Save the initial transcript before waiting for generation; avoid hashing and
         // writing the transcript on every streamed token.
-        if (!conversation.branches || savedStreamingSnapshotsRef.current.get(conversation.id) === streamingMessage.id) return;
+        if (savedStreamingSnapshotsRef.current.get(conversation.id) === streamingMessage.id) return;
         savedStreamingSnapshotsRef.current.set(conversation.id, streamingMessage.id);
       } else {
         savedStreamingSnapshotsRef.current.delete(conversation.id);
       }
 
-      const revision = getConversationRevision(conversation);
-      if (revision === savedConversationRevisionsRef.current.get(conversation.id)) {
-        return;
-      }
-
-      savedConversationRevisionsRef.current.set(conversation.id, revision);
-      const existingTimer = conversationSaveTimersRef.current.get(conversation.id);
-      if (existingTimer !== undefined) {
-        window.clearTimeout(existingTimer);
-      }
-      const timerId = window.setTimeout(() => {
-        conversationSaveTimersRef.current.delete(conversation.id);
-        window.assistant.storeSaveConversation(serializeConversation(conversation)).catch(err => {
-          console.error('Failed to save conversation:', err);
-        });
-      }, SAVE_DEBOUNCE_MS);
-      conversationSaveTimersRef.current.set(conversation.id, timerId);
+      saveQueue.schedule(conversation.id, getConversationRevision(conversation), () => (
+        window.assistant.storeSaveConversation(serializeConversation(conversation))
+      ));
     });
-  }, [conversations, hasHydratedStore]);
+  }, [conversations, hasHydratedStore, isStoreMutationPending, saveQueue]);
 
   useEffect(() => {
     if (!hasHydratedStore) return;
@@ -293,13 +309,11 @@ export function useConversations(): UseConversationsResult {
   }, [conversations, currentConversationId, hasHydratedStore]);
 
   useEffect(() => {
-    if (!hasHydratedStore) return;
+    if (!hasHydratedStore || storeMutationRef.current) return;
 
     const serialized = folders.map(serializeFolder);
-    window.assistant.storeSaveFolders(serialized).catch(err => {
-      console.error('Failed to save folders:', err);
-    });
-  }, [folders, hasHydratedStore]);
+    saveQueue.schedule('folders', JSON.stringify(serialized), () => window.assistant.storeSaveFolders(serialized));
+  }, [folders, hasHydratedStore, isStoreMutationPending, saveQueue]);
 
   useEffect(() => {
     if (!hasHydratedStore) return;
@@ -312,34 +326,29 @@ export function useConversations(): UseConversationsResult {
   useEffect(() => {
     if (!hasHydratedStore) return;
 
-    if (draftSaveTimerRef.current !== null) {
-      window.clearTimeout(draftSaveTimerRef.current);
-    }
-
-    draftSaveTimerRef.current = window.setTimeout(() => {
-      draftSaveTimerRef.current = null;
-      window.assistant.storeSaveConversationDrafts(conversationDrafts).catch(err => {
-        console.error('Failed to save conversation drafts:', err);
-      });
-    }, SAVE_DEBOUNCE_MS);
-  }, [conversationDrafts, hasHydratedStore]);
+    saveQueue.schedule('drafts', JSON.stringify(conversationDrafts), () => (
+      window.assistant.storeSaveConversationDrafts(conversationDrafts)
+    ));
+  }, [conversationDrafts, hasHydratedStore, saveQueue]);
 
   const ensureConversationLoaded = useCallback(async (id: string) => {
     conversationAccessRef.current.set(id, Date.now());
 
     const alreadyLoaded = conversations.some(c => c.id === id && c.isLoaded);
-    if (alreadyLoaded) {
+    if (alreadyLoaded || loadingIdsRef.current.has(id) || deletingIdsRef.current.has(id)) {
       return;
     }
 
+    const loadToken = Symbol(id);
+    loadingIdsRef.current.set(id, loadToken);
     try {
       const storedConversation = await window.assistant.storeLoadConversation(id);
-      if (!storedConversation) {
+      if (!storedConversation || loadingIdsRef.current.get(id) !== loadToken || deletingIdsRef.current.has(id)) {
         return;
       }
 
       const loadedConversation = deserializeConversation(storedConversation);
-      savedConversationRevisionsRef.current.set(id, getConversationRevision(loadedConversation));
+      saveQueue.seed(id, getConversationRevision(loadedConversation));
       setConversations(prev =>
         prev.map(conversation =>
           conversation.id === id
@@ -349,22 +358,29 @@ export function useConversations(): UseConversationsResult {
                 timestamp: conversation.timestamp,
                 folderId: conversation.folderId,
                 isPinned: conversation.isPinned,
+                loadError: undefined,
               }
             : conversation
         )
       );
     } catch (error) {
+      if (loadingIdsRef.current.get(id) !== loadToken) return;
       console.error('Failed to load conversation:', error);
+      setConversations(prev => prev.map(c => c.id === id ? {
+        ...c, loadError: 'This conversation could not be loaded. Its stored history has been preserved.',
+      } : c));
+    } finally {
+      if (loadingIdsRef.current.get(id) === loadToken) loadingIdsRef.current.delete(id);
     }
-  }, [conversations]);
+  }, [conversations, saveQueue]);
 
   useEffect(() => {
-    if (!hasHydratedStore || !currentConversationId) {
+    if (!hasHydratedStore || !currentConversationId || conversations.find(c => c.id === currentConversationId)?.loadError) {
       return;
     }
 
     void ensureConversationLoaded(currentConversationId);
-  }, [currentConversationId, ensureConversationLoaded, hasHydratedStore]);
+  }, [conversations, currentConversationId, ensureConversationLoaded, hasHydratedStore]);
 
   useEffect(() => {
     if (!hasHydratedStore) {
@@ -379,7 +395,7 @@ export function useConversations(): UseConversationsResult {
     }
 
     const evictable = loadedConversations
-      .filter(c => !pinnedIds.has(c.id) && !c.messages.some(m => m.isStreaming))
+      .filter(c => !pinnedIds.has(c.id) && !deletingIdsRef.current.has(c.id) && !saveQueue.hasPending(c.id) && !c.messages.some(m => m.isStreaming))
       .sort((a, b) =>
         (conversationAccessRef.current.get(a.id) ?? 0) - (conversationAccessRef.current.get(b.id) ?? 0)
       );
@@ -397,7 +413,7 @@ export function useConversations(): UseConversationsResult {
           : conversation
       )
     );
-  }, [conversations, currentConversationId, hasHydratedStore]);
+  }, [conversations, currentConversationId, hasHydratedStore, saveQueue]);
 
   const handleComposeChange = useCallback((value: string) => {
     const draftKey = currentConversationId ?? NEW_CHAT_DRAFT_ID;
@@ -416,39 +432,102 @@ export function useConversations(): UseConversationsResult {
     });
   }, [currentConversationId]);
 
-  const handleDeleteConversation = useCallback((id: string) => {
-    if (!window.confirm('Delete this conversation?')) return;
+  const canEditConversation = useCallback((id: string | null) => (
+    hasHydratedStore && !storeSyncFailedRef.current && !storeMutationRef.current && (!id || !deletingIdsRef.current.has(id))
+  ), [hasHydratedStore]);
 
-    setConversations(prev => {
-      const remainingConversations = prev.filter(c => c.id !== id);
-      const nextConversationId = currentConversationId === id
-        ? remainingConversations[0]?.id ?? null
-        : currentConversationId;
-
-      void window.assistant.storeDeleteConversation(id)
-        .then(() => {
-          conversationAccessRef.current.delete(id);
-          savedConversationRevisionsRef.current.delete(id);
-          const timerId = conversationSaveTimersRef.current.get(id);
-          if (timerId !== undefined) {
-            window.clearTimeout(timerId);
-            conversationSaveTimersRef.current.delete(id);
+  const runStoreMutation = useCallback(async (write: () => Promise<void>) => {
+    if (!hasHydratedStore || storeMutationRef.current) throw new Error('Please wait for the current operation to finish.');
+    storeMutationRef.current = true;
+    setIsStoreMutationPending(true);
+    let mutationStarted = false;
+    try {
+      // Drain in-flight metadata before changing store membership. Scheduling stays
+      // paused until the renderer has merged the result of this operation.
+      await saveQueue.flush();
+      mutationStarted = true;
+      await write();
+    } catch (error) {
+      if (mutationStarted) {
+        // A durable deletion/restore may precede a failing index write. Read
+        // authoritative membership before allowing the renderer to edit again.
+        try {
+          const [metadata, storedFolders] = await Promise.all([
+            window.assistant.storeLoadConversationList(),
+            window.assistant.storeLoadFolders(),
+          ]);
+          const activeIds = new Set(metadata.map(entry => entry.id));
+          for (const conversation of latestSaveStateRef.current.conversations) {
+            if (activeIds.has(conversation.id)) continue;
+            committedDeletionIdsRef.current.add(conversation.id);
+            deletingIdsRef.current.add(conversation.id);
+            loadingIdsRef.current.delete(conversation.id);
+            saveQueue.cancel(conversation.id);
           }
-          setConversations(prevInner => prevInner.filter(c => c.id !== id));
-          if (currentConversationId === id) {
-            setCurrentConversationId(nextConversationId);
-          }
-        })
-        .catch(err => {
-          console.error('Failed to delete conversation from store:', err);
-          window.alert('Failed to delete conversation. Please try again.');
-        });
+          setConversations(prev => {
+            const existingIds = new Set(prev.map(conversation => conversation.id));
+            return [
+              ...prev.filter(conversation => activeIds.has(conversation.id)),
+              ...metadata.filter(entry => !existingIds.has(entry.id)).map(deserializeConversationMetadata),
+            ];
+          });
+          setFolders(storedFolders.map(deserializeFolder));
+        } catch (reconcileError) {
+          storeSyncFailedRef.current = true;
+          setHasHydratedStore(false);
+          setStoreLoadError('Conversation storage could not be reconciled. Restart Jarvis to retry. Existing histories have been preserved.');
+          console.error('Failed to reconcile conversation storage:', reconcileError);
+        }
+      }
+      throw error;
+    } finally {
+      storeMutationRef.current = false;
+      setIsStoreMutationPending(false);
+    }
+  }, [hasHydratedStore, saveQueue]);
 
-      return prev;
+  const handleRestoreConversation = useCallback(async (id: string) => {
+    await runStoreMutation(async () => {
+      const restored = deserializeConversation(await window.assistant.storeRestoreConversation(id));
+      loadingIdsRef.current.delete(id);
+      deletingIdsRef.current.delete(restored.id);
+      committedDeletionIdsRef.current.delete(restored.id);
+      saveQueue.seed(restored.id, getConversationRevision(restored));
+      setConversations(prev => prev.some(c => c.id === restored.id) ? prev : [restored, ...prev]);
     });
-  }, [currentConversationId]);
+  }, [runStoreMutation, saveQueue]);
+
+  const handleDeleteConversation = useCallback((id: string) => {
+    const conversation = conversations.find(c => c.id === id);
+    if (!conversation || !canEditConversation(id)) return;
+    if (conversation.messages.some(m => m.isStreaming)) {
+      window.alert('Stop the response before deleting this conversation.');
+      return;
+    }
+    if (!window.confirm('Delete this conversation? You can restore it from Recently Deleted for 30 days.')) return;
+    deletingIdsRef.current.add(id);
+    loadingIdsRef.current.delete(id);
+    void runStoreMutation(async () => {
+      // The last render may not have reached the debounced save effect yet.
+      await window.assistant.storeSaveConversationList(conversations.map(serializeConversationMetadata));
+      if (conversation.isLoaded) await window.assistant.storeSaveConversation(serializeConversation(conversation));
+      const result = await window.assistant.storeDeleteConversation(id);
+      if (!result.success) throw new Error('Deletion failed');
+      saveQueue.cancel(id);
+      conversationAccessRef.current.delete(id);
+      savedStreamingSnapshotsRef.current.delete(id);
+      setConversations(prev => prev.filter(c => c.id !== id));
+    })
+      .catch(err => {
+        if (!committedDeletionIdsRef.current.has(id)) deletingIdsRef.current.delete(id);
+        setConversations(prev => [...prev]);
+        console.error('Failed to delete conversation from store:', err);
+        window.alert('Failed to delete conversation. Please try again.');
+      });
+  }, [canEditConversation, conversations, runStoreMutation, saveQueue]);
 
   const handleCreateFolder = useCallback(() => {
+    if (!canEditConversation(null)) return '';
     const newFolder: Folder = {
       id: crypto.randomUUID(),
       name: getNextFolderName(folders),
@@ -456,21 +535,27 @@ export function useConversations(): UseConversationsResult {
     };
     setFolders(prev => [newFolder, ...prev]);
     return newFolder.id;
-  }, [folders]);
+  }, [canEditConversation, folders]);
 
   const handleRenameFolder = useCallback((id: string, name: string) => {
+    if (!canEditConversation(null)) return;
     const trimmedName = name.trim();
     if (!trimmedName) {
       return;
     }
 
     setFolders(prev => prev.map(f => f.id === id ? { ...f, name: trimmedName } : f));
-  }, []);
+  }, [canEditConversation]);
 
   const handleDeleteFolder = useCallback((id: string) => {
     const folder = folders.find(f => f.id === id);
     if (!folder) return;
     const convosInFolder = conversations.filter(c => c.folderId === id);
+    if (!canEditConversation(null)) return;
+    if (convosInFolder.some(c => c.messages.some(m => m.isStreaming))) {
+      window.alert('Stop all responses in this folder before deleting it.');
+      return;
+    }
     const deletedIds = new Set(convosInFolder.map(c => c.id));
     if (!window.confirm(folderDeletionMessage(folder.name, convosInFolder))) return;
 
@@ -479,48 +564,58 @@ export function useConversations(): UseConversationsResult {
       ? remainingConversations[0]?.id ?? null
       : currentConversationId;
 
-    void window.assistant.storeDeleteFolder(id)
-      .then(() => {
-        deletedIds.forEach(conversationId => {
-          conversationAccessRef.current.delete(conversationId);
-          savedConversationRevisionsRef.current.delete(conversationId);
-          const timerId = conversationSaveTimersRef.current.get(conversationId);
-          if (timerId !== undefined) {
-            window.clearTimeout(timerId);
-            conversationSaveTimersRef.current.delete(conversationId);
-          }
-        });
-        setConversations(prev => prev.filter(c => c.folderId !== id));
-        setFolders(prev => prev.filter(f => f.id !== id));
-        if (currentConversationId && deletedIds.has(currentConversationId)) {
-          setCurrentConversationId(nextConversationId);
-        }
-      })
+    deletedIds.forEach(conversationId => {
+      deletingIdsRef.current.add(conversationId);
+      loadingIdsRef.current.delete(conversationId);
+    });
+    void runStoreMutation(async () => {
+      await window.assistant.storeSaveConversationList(conversations.map(serializeConversationMetadata));
+      for (const conversation of convosInFolder) {
+        if (conversation.isLoaded) await window.assistant.storeSaveConversation(serializeConversation(conversation));
+      }
+      const result = await window.assistant.storeDeleteFolder(id);
+      if (!result.success) throw new Error('Folder deletion failed');
+      deletedIds.forEach(conversationId => saveQueue.cancel(conversationId));
+      deletedIds.forEach(conversationId => {
+        conversationAccessRef.current.delete(conversationId);
+        savedStreamingSnapshotsRef.current.delete(conversationId);
+      });
+      setConversations(prev => prev.filter(c => !deletedIds.has(c.id)));
+      setFolders(prev => prev.filter(f => f.id !== id));
+      setCurrentConversationId(prev => prev && deletedIds.has(prev) ? nextConversationId : prev);
+    })
       .catch(err => {
+        deletedIds.forEach(conversationId => {
+          if (!committedDeletionIdsRef.current.has(conversationId)) deletingIdsRef.current.delete(conversationId);
+        });
+        setConversations(prev => [...prev]);
         console.error('Failed to delete folder from store:', err);
         window.alert('Failed to delete folder. Please try again.');
       });
-  }, [folders, conversations, currentConversationId]);
+  }, [folders, conversations, currentConversationId, canEditConversation, runStoreMutation, saveQueue]);
 
   const handleMoveConversation = useCallback((conversationId: string, folderId: string | null) => {
+    if (!canEditConversation(conversationId)) return;
     setConversations(prev => prev.map(c =>
       c.id === conversationId ? { ...c, folderId } : c
     ));
-  }, []);
+  }, [canEditConversation]);
 
   const handlePinConversation = useCallback((conversationId: string, isPinned: boolean) => {
+    if (!canEditConversation(conversationId)) return;
     setConversations(prev => prev.map(conversation =>
       conversation.id === conversationId
         ? { ...conversation, isPinned }
         : conversation
     ));
-  }, []);
+  }, [canEditConversation]);
 
   const handleReorderConversation = useCallback((
     conversationId: string,
     targetConversationId: string,
     placement: 'before' | 'after',
   ) => {
+    if (!canEditConversation(conversationId) || !canEditConversation(targetConversationId)) return;
     if (conversationId === targetConversationId) {
       return;
     }
@@ -542,16 +637,17 @@ export function useConversations(): UseConversationsResult {
       remaining.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, repositioned);
       return remaining;
     });
-  }, []);
+  }, [canEditConversation]);
 
   const handleRenameConversation = useCallback((id: string, title: string) => {
+    if (!canEditConversation(id)) return;
     const trimmedTitle = title.trim();
     if (!trimmedTitle) {
       return;
     }
 
     setConversations(prev => prev.map(c => c.id === id ? { ...c, title: trimmedTitle } : c));
-  }, []);
+  }, [canEditConversation]);
 
   const triggerNewChat = useCallback(() => {
     setCurrentConversationId(null);
@@ -560,13 +656,8 @@ export function useConversations(): UseConversationsResult {
 
   const clearConversationAccess = useCallback((id: string) => {
     conversationAccessRef.current.delete(id);
-    savedConversationRevisionsRef.current.delete(id);
-    const timerId = conversationSaveTimersRef.current.get(id);
-    if (timerId !== undefined) {
-      window.clearTimeout(timerId);
-      conversationSaveTimersRef.current.delete(id);
-    }
-  }, []);
+    saveQueue.cancel(id);
+  }, [saveQueue]);
 
   const getScrollPosition = useCallback((key: string) => (
     scrollPositionsRef.current[key]
@@ -604,6 +695,7 @@ export function useConversations(): UseConversationsResult {
     unreadCompleteConversationIds,
     restoredWorkspaceView,
     hasHydratedStore,
+    storeLoadError,
     setCurrentConversationId,
     setConversations,
     setFolders,
@@ -621,6 +713,9 @@ export function useConversations(): UseConversationsResult {
     handleReorderConversation,
     handleRenameConversation,
     handleDeleteConversation,
+    handleRestoreConversation,
+    isStoreMutationPending,
+    canEditConversation,
     newChatTrigger,
     triggerNewChat,
     clearConversationAccess,

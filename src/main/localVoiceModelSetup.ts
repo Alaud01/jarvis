@@ -5,8 +5,8 @@ import * as path from 'path';
 import { app } from 'electron';
 import type { LocalVoiceModelInstallResult, LocalVoiceModelStatus } from '../shared/voiceSetup';
 
-const LOCAL_MODEL_NAME = 'nvidia/parakeet-tdt_ctc-110m';
-const ESTIMATED_DOWNLOAD_SIZE = 'Several GB for PyTorch/NeMo plus Parakeet model cache';
+const LOCAL_MODEL_NAME = 'mlx-community/whisper-large-v3-turbo';
+const ESTIMATED_DOWNLOAD_SIZE = 'Approximately 1.6 GB of Whisper Turbo weights plus runtime dependencies';
 const INSTALL_LOG_LIMIT = 40;
 
 let installPromise: Promise<LocalVoiceModelInstallResult> | null = null;
@@ -40,7 +40,7 @@ export function getManagedVoicePythonExecutable(): string {
 }
 
 function getModelReadyMarkerPath(): string {
-  return path.join(getManagedVoiceServiceDir(), 'parakeet-model-ready.json');
+  return path.join(getManagedVoiceServiceDir(), 'whisper-turbo-model-ready.json');
 }
 
 export function getManagedVoiceRuntimeEnv(): NodeJS.ProcessEnv {
@@ -49,7 +49,6 @@ export function getManagedVoiceRuntimeEnv(): NodeJS.ProcessEnv {
     VOICE_PYTHON_CACHE_DIR: path.join(serviceDir, 'cache', 'python'),
     HF_HOME: path.join(serviceDir, 'cache', 'huggingface'),
     TORCH_HOME: path.join(serviceDir, 'cache', 'torch'),
-    NEMO_HOME: path.join(serviceDir, 'cache', 'nemo'),
     MPLCONFIGDIR: path.join(serviceDir, 'cache', 'matplotlib'),
   };
 }
@@ -157,10 +156,10 @@ async function dependenciesInstalled(): Promise<boolean> {
   }
 
   const pythonExecutable = getManagedVoicePythonExecutable();
-  return pythonExecutable ? localParakeetDependenciesInstalled(pythonExecutable, getManagedVoiceRuntimeEnv()) : false;
+  return pythonExecutable ? localWhisperDependenciesInstalled(pythonExecutable, getManagedVoiceRuntimeEnv()) : false;
 }
 
-function localParakeetDependenciesInstalled(
+function localWhisperDependenciesInstalled(
   pythonExecutable: string,
   env?: NodeJS.ProcessEnv,
 ): Promise<boolean> {
@@ -168,7 +167,7 @@ function localParakeetDependenciesInstalled(
     return Promise.resolve(false);
   }
 
-  const cacheKey = `${pythonExecutable}:${env?.HF_HOME || ''}:${env?.NEMO_HOME || ''}:${env?.TORCH_HOME || ''}`;
+  const cacheKey = `${pythonExecutable}:${env?.HF_HOME || ''}`;
   const cached = dependencyCheckCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -176,7 +175,7 @@ function localParakeetDependenciesInstalled(
 
   const check = commandSucceeds(
     pythonExecutable,
-    ['-c', 'import torch; from nemo.collections.asr.models import ASRModel'],
+    ['-c', 'import mlx.core as mx; import mlx_whisper; assert mx.metal.is_available()'],
     env,
     60000,
   );
@@ -194,7 +193,7 @@ async function findReadyLocalVoiceRuntime(): Promise<{ pythonExecutable: string;
   const sourcePythonExecutable = isDev ? getSourceVoicePythonExecutable() : null;
   if (
     sourcePythonExecutable
-    && await localParakeetDependenciesInstalled(sourcePythonExecutable)
+    && await localWhisperDependenciesInstalled(sourcePythonExecutable)
   ) {
     return { pythonExecutable: sourcePythonExecutable, managed: false };
   }
@@ -210,9 +209,6 @@ async function buildLocalVoiceModelStatus(installInProgress = installPromise !==
     || (fs.existsSync(managedPythonExecutable) ? managedPythonExecutable : getSourceVoicePythonExecutable());
   const depsInstalled = await dependenciesInstalled();
   const modelReady = Boolean(readyRuntime);
-  const openRouterFallbackConfigured = Boolean(
-    process.env.OPENROUTER_API_KEY?.trim(),
-  );
 
   return {
     status: installInProgress
@@ -229,7 +225,6 @@ async function buildLocalVoiceModelStatus(installInProgress = installPromise !==
     pythonExecutable,
     modelName: LOCAL_MODEL_NAME,
     estimatedDownloadSize: ESTIMATED_DOWNLOAD_SIZE,
-    openRouterFallbackConfigured,
     lastStep: lastStep || undefined,
     lastError: lastError || undefined,
     logs,
@@ -255,7 +250,6 @@ async function installLocalVoiceModelInternal(): Promise<LocalVoiceModelInstallR
   const managedServiceDir = getManagedVoiceServiceDir();
   const sourceServiceDir = getSourcePythonServiceDir();
   const baseRequirementsPath = path.join(sourceServiceDir, 'requirements.txt');
-  const localRequirementsPath = path.join(sourceServiceDir, 'requirements-local-parakeet.txt');
   const pythonExecutable = getManagedVoicePythonExecutable();
 
   try {
@@ -278,27 +272,25 @@ async function installLocalVoiceModelInternal(): Promise<LocalVoiceModelInstallR
       step: 'Installing voice service dependencies',
     });
 
-    await runCommand(pythonExecutable, ['-m', 'pip', 'install', '-r', localRequirementsPath], {
-      env: getManagedVoiceRuntimeEnv(),
-      step: 'Installing local Parakeet dependencies',
-    });
-
     await runCommand(
       pythonExecutable,
       [
         '-c',
         [
-          'from nemo.collections.asr.models import ASRModel',
-          `model = ASRModel.from_pretrained(model_name="${LOCAL_MODEL_NAME}")`,
-          'model.eval()',
+          'import mlx.core as mx',
+          'from mlx_whisper.transcribe import ModelHolder',
+          'assert mx.metal.is_available(), "Apple Silicon with Metal is required"',
+          'mx.set_default_device(mx.gpu)',
+          `ModelHolder.get_model("${LOCAL_MODEL_NAME}", mx.float16)`,
         ].join('; '),
       ],
       {
         env: getManagedVoiceRuntimeEnv(),
-        step: 'Downloading and verifying local Parakeet model',
+        step: 'Downloading and verifying MLX Whisper Turbo model',
       },
     );
 
+    dependencyCheckCache.clear();
     await writeModelReadyMarker();
     lastStep = 'Local voice model is ready';
     appendLog(lastStep);
