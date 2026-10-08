@@ -264,3 +264,32 @@ test('all 30 documented Go models route both request modes with stable session a
     }
   }
 });
+
+test('dropped Go connections retry once before any response arrives', async t => {
+  let attempts = 0;
+  t.mock.method(global, 'fetch', async () => {
+    attempts++;
+    if (attempts === 1) {
+      const error = new Error('socket hang up');
+      error.cause = { code: 'UND_ERR_CLOSED' };
+      throw error;
+    }
+    return Response.json({ choices: [{ message: { content: 'retried' } }] });
+  });
+  const result = await new OpenCodeGoProvider('test-key').sendChat('kimi-k3', messages, options);
+  assert.equal(result, 'retried');
+  assert.equal(attempts, 2);
+});
+
+test('aborted Go requests are not retried', async t => {
+  let attempts = 0;
+  t.mock.method(global, 'fetch', async () => {
+    attempts++;
+    const error = new Error('aborted');
+    error.name = 'AbortError';
+    error.cause = { code: 'UND_ERR_CLOSED' };
+    throw error;
+  });
+  await assert.rejects(new OpenCodeGoProvider('test-key').sendChat('kimi-k3', messages, options), /aborted/);
+  assert.equal(attempts, 1);
+});

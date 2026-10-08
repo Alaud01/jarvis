@@ -336,6 +336,33 @@ function buildAnthropicHeaders(apiKey: string, sessionId: string): Record<string
   };
 }
 
+// Connection failures that happen before any response arrives, such as a
+// pooled keep-alive socket the server already closed. Retrying once is safe
+// (ported from t3/fix-sol-6-1-availability 1f3a379; vision already sends the
+// session/client headers via buildGoHeaders/buildAnthropicHeaders).
+const RETRYABLE_CONNECTION_CODES = new Set([
+  'UND_ERR_SOCKET',
+  'UND_ERR_CLOSED',
+  'ECONNRESET',
+  'EPIPE',
+]);
+
+function isRetryableConnectionError(error: unknown): boolean {
+  if (!(error instanceof Error) || error.name === 'AbortError') return false;
+  const code = ((error as Error & { cause?: { code?: unknown } }).cause)?.code;
+  return typeof code === 'string' && RETRYABLE_CONNECTION_CODES.has(code);
+}
+
+async function fetchGo(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    if (init.signal?.aborted || !isRetryableConnectionError(error)) throw error;
+    console.warn('[OpenCode Go] Connection closed before a response; retrying once:', error);
+    return fetch(url, init);
+  }
+}
+
 type OpenAIMessageContent = string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
 
 function toImageDataUrl(base64: string, mimeType = 'image/png'): string {
@@ -734,7 +761,7 @@ export class OpenCodeGoProvider implements Provider {
 
     try {
       const [response] = await Promise.all([
-        fetch(`${BASE_URL}/models`, {
+        fetchGo(`${BASE_URL}/models`, {
           signal,
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
@@ -783,7 +810,7 @@ export class OpenCodeGoProvider implements Provider {
   private async sendChatOpenAI(model: string, messages: ChatMessage[], options?: SendChatOptions): Promise<string> {
     const openaiMessages = convertMessagesToOpenAI(messages);
     const sessionId = resolveGoSessionId(options);
-    const response = await fetch(`${BASE_URL}/chat/completions`, {
+    const response = await fetchGo(`${BASE_URL}/chat/completions`, {
       method: 'POST',
       signal: options?.signal,
       headers: buildGoHeaders(this.apiKey, sessionId),
@@ -816,7 +843,7 @@ export class OpenCodeGoProvider implements Provider {
     }
 
     const sessionId = resolveGoSessionId(options);
-    const response = await fetch(`${BASE_URL}/messages`, {
+    const response = await fetchGo(`${BASE_URL}/messages`, {
       method: 'POST',
       signal: options?.signal,
       headers: buildAnthropicHeaders(this.apiKey, sessionId),
@@ -845,7 +872,7 @@ export class OpenCodeGoProvider implements Provider {
     };
     if (instructions) body.instructions = instructions;
 
-    const response = await fetch(`${BASE_URL}/responses`, {
+    const response = await fetchGo(`${BASE_URL}/responses`, {
       method: 'POST',
       signal: options?.signal,
       headers: buildGoHeaders(this.apiKey, sessionId),
@@ -876,7 +903,7 @@ export class OpenCodeGoProvider implements Provider {
       stream: false,
     };
 
-    const response = await fetch(`${BASE_URL}/messages`, {
+    const response = await fetchGo(`${BASE_URL}/messages`, {
       method: 'POST',
       signal,
       headers: buildAnthropicHeaders(this.apiKey, sessionId ?? resolveGoSessionId()),
@@ -978,7 +1005,7 @@ export class OpenCodeGoProvider implements Provider {
     }
 
     const sessionId = resolveGoSessionId(options);
-    const response = await fetch(`${BASE_URL}/chat/completions`, {
+    const response = await fetchGo(`${BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: buildGoHeaders(this.apiKey, sessionId),
       body: JSON.stringify(requestBody),
@@ -1178,7 +1205,7 @@ export class OpenCodeGoProvider implements Provider {
     }
 
     const sessionId = resolveGoSessionId(options);
-    const response = await fetch(`${BASE_URL}/messages`, {
+    const response = await fetchGo(`${BASE_URL}/messages`, {
       method: 'POST',
       headers: buildAnthropicHeaders(this.apiKey, sessionId),
       body: JSON.stringify(requestBody),
@@ -1517,7 +1544,7 @@ export class OpenCodeGoProvider implements Provider {
     }
 
     const sessionId = resolveGoSessionId(options);
-    const response = await fetch(`${BASE_URL}/responses`, {
+    const response = await fetchGo(`${BASE_URL}/responses`, {
       method: 'POST',
       headers: buildGoHeaders(this.apiKey, sessionId),
       body: JSON.stringify(requestBody),
