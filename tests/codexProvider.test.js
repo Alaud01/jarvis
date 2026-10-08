@@ -824,3 +824,61 @@ test('classifies usage limits from the structured Codex error first', () => {
   assert.equal(isCodexUsageLimitError(new Error("You've hit your usage limit.")), true);
   assert.equal(isCodexUsageLimitError(new Error('Rate limit exceeded, retrying.')), false);
 });
+async function roundTripToolCallWithShape(shape) {
+  const previousShape = process.env.FAKE_TOOL_CALL_SHAPE;
+  if (shape === undefined) {
+    delete process.env.FAKE_TOOL_CALL_SHAPE;
+  } else {
+    process.env.FAKE_TOOL_CALL_SHAPE = shape;
+  }
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'jarvis-codex-tools-'));
+  const binaryPath = path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js');
+  const client = new CodexAppServerClient({
+    binaryPath,
+    codexHome: path.join(temporaryRoot, 'codex-home'),
+    workspaceRoot: path.join(temporaryRoot, 'workspace'),
+    openExternal: async () => undefined,
+  });
+
+  try {
+    const threadId = await client.startThread({
+      model: 'gpt-test',
+      developerInstructions: 'test',
+      ephemeral: true,
+      dynamicTools: toCodexDynamicTools(CHAT_TOOLS),
+    });
+    const calls = [];
+    const content = await client.runTurn({
+      threadId,
+      model: 'gpt-test',
+      input: [{ type: 'text', text: 'Open the page.', text_elements: [] }],
+      onDelta: () => undefined,
+      onToolCall: async (tool, argumentsValue) => {
+        calls.push({ tool, argumentsValue });
+        return { success: true, content: 'opened' };
+      },
+    });
+
+    assert.equal(content, 'Tool completed.');
+    assert.deepEqual(calls, [{
+      tool: 'browser_open',
+      argumentsValue: { url: 'https://example.com' },
+    }]);
+  } finally {
+    if (previousShape === undefined) {
+      delete process.env.FAKE_TOOL_CALL_SHAPE;
+    } else {
+      process.env.FAKE_TOOL_CALL_SHAPE = previousShape;
+    }
+    await client.stop();
+    await fs.rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+test('accepts a Codex dynamic tool call with string arguments', async () => {
+  await roundTripToolCallWithShape('string-args');
+});
+
+test('accepts a Codex dynamic tool call with no namespace', async () => {
+  await roundTripToolCallWithShape('no-namespace');
+});
