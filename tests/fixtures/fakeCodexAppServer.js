@@ -194,7 +194,8 @@ lines.on('line', line => {
           return;
         }
         const refreshedAccount = accountFromAccessToken(response.result.accessToken);
-        if (refreshedAccount === 'expiring') {
+        const refreshedClaims = JSON.parse(Buffer.from(response.result.accessToken.split('.')[1], 'base64url').toString('utf8'));
+        if (refreshedAccount === 'expiring' && !refreshedClaims.test_refreshed) {
           failTurn(threadId, turnId, 'Your access token could not be refreshed.', 'unauthorized');
           return;
         }
@@ -238,6 +239,10 @@ lines.on('line', line => {
           },
         },
       });
+      return;
+    }
+    if (process.env.FAKE_CODEX_LIMIT_AFTER_TOOL === '1') {
+      failTurn(activeTurn.threadId, activeTurn.turnId, 'Workspace credits are depleted.', 'usageLimitExceeded');
       return;
     }
     send({

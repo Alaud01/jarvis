@@ -374,12 +374,13 @@ test('round-trips a Codex dynamic tool call through the Jarvis handler', async (
 
 const FAKE_CODEX_SERVER = path.join(__dirname, 'fixtures', 'fakeCodexAppServer.js');
 
-function fakeAccessToken(user, { workspace = 'workspace', expiresInSeconds = 3600 } = {}) {
+function fakeAccessToken(user, { workspace = 'workspace', expiresInSeconds = 3600, refreshed = false } = {}) {
   const encode = value => Buffer.from(JSON.stringify(value)).toString('base64url');
   return [
     encode({ alg: 'none' }),
     encode({
       exp: Math.floor(Date.now() / 1000) + expiresInSeconds,
+      test_refreshed: refreshed,
       'https://api.openai.com/auth': {
         chatgpt_account_id: workspace,
         chatgpt_user_id: user,
@@ -881,4 +882,113 @@ test('accepts a Codex dynamic tool call with string arguments', async () => {
 
 test('accepts a Codex dynamic tool call with no namespace', async () => {
   await roundTripToolCallWithShape('no-namespace');
+});
+
+
+test('does not refresh a reserved turn onto another Switcher account', async () => {
+  await withSharedAuthFixture('jarvis-shared-refresh-switch-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const client = provider.client;
+    const runTurn = client.runTurn.bind(client);
+    const executions = { count: 0 };
+    client.runTurn = async turn => {
+      await writeSharedAuth('bob');
+      return runTurn(turn);
+    };
+    try {
+      await writeSharedAuth('expiring');
+      await assert.rejects(provider.streamChat(
+        'codex:gpt-test',
+        [{ role: 'user', content: 'Question' }],
+        new AbortController(),
+        () => undefined,
+        streamOptions(executions),
+      ), /account changed during this response/);
+      assert.equal(executions.count, 0);
+      assert.equal((await provider.getAccountStatus()).email, 'bob@example.com');
+      const next = await provider.streamChat(
+        'codex:gpt-test',
+        [{ role: 'user', content: 'Question' }],
+        new AbortController(),
+        () => undefined,
+        streamOptions(executions),
+      );
+      assert.equal(next.assistantMessage.content, 'Tool completed by bob.');
+      assert.equal(executions.count, 1);
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('retries a tool-free usage-limited request on the newly selected account', async () => {
+  await withSharedAuthFixture('jarvis-shared-plain-retry-', async ({ options, sharedAuthPath, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    try {
+      await writeSharedAuth('exhausted');
+      const answer = await withEnvironment({
+        FAKE_CODEX_SWITCH_ON_LIMIT: JSON.stringify({ authPath: sharedAuthPath, auth: fakeAuthJson('fresh') }),
+      }, () => provider.sendChat('codex:gpt-test', [{ role: 'user', content: 'Summarize' }]));
+      assert.equal(answer, 'Answer by fresh.');
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+test('does not retry a usage-limited turn after executing a tool', async () => {
+  await withSharedAuthFixture('jarvis-shared-tool-retry-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const executions = { count: 0 };
+    const chunks = [];
+    try {
+      await writeSharedAuth('alice');
+      await withEnvironment({ FAKE_CODEX_LIMIT_AFTER_TOOL: '1' }, () => assert.rejects(provider.streamChat(
+        'codex:gpt-test',
+        [{ role: 'user', content: 'Question' }],
+        new AbortController(),
+        chunk => chunks.push(chunk),
+        {
+          ...streamOptions(executions),
+          executeTool: async () => {
+            executions.count += 1;
+            await writeSharedAuth('bob');
+            return { success: true, content: 'opened' };
+          },
+        },
+      ), /Switch to another account in Codex Switcher/));
+      assert.equal(executions.count, 1);
+      assert.deepEqual(chunks, []);
+      assert.equal((await provider.getAccountStatus()).email, 'bob@example.com');
+    } finally {
+      await provider.shutdown();
+    }
+  });
+});
+
+
+test('refreshes a reserved turn with a new token for the same account', async () => {
+  await withSharedAuthFixture('jarvis-shared-refresh-same-', async ({ options, writeSharedAuth }) => {
+    const provider = new CodexProvider(options);
+    const runTurn = provider.client.runTurn.bind(provider.client);
+    provider.client.runTurn = async turn => {
+      await writeSharedAuth('expiring', { refreshed: true });
+      return runTurn(turn);
+    };
+    const executions = { count: 0 };
+    try {
+      await writeSharedAuth('expiring');
+      const result = await provider.streamChat(
+        'codex:gpt-test',
+        [{ role: 'user', content: 'Question' }],
+        new AbortController(),
+        () => undefined,
+        streamOptions(executions),
+      );
+      assert.equal(result.assistantMessage.content, 'Tool completed by expiring.');
+      assert.equal(executions.count, 1);
+    } finally {
+      await provider.shutdown();
+    }
+  });
 });

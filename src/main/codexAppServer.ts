@@ -1119,6 +1119,13 @@ export class CodexAppServerClient {
   private async answerSharedAuthRefresh(id: unknown): Promise<void> {
     try {
       const credential = await this.readUsableSharedCredential();
+      const supplied = this.suppliedSharedCredential;
+      if (supplied && this.sharedTurnReservations > 0
+        && sharedCredentialIdentity(supplied) !== sharedCredentialIdentity(credential)) {
+        // A refresh must not migrate a running turn (and its tools) to the
+        // newly selected account. Release this turn before following Switcher.
+        throw new SharedCodexAuthError('The Codex Switcher account changed during this response. Resend to use the newly selected account.');
+      }
       this.supplySharedCredential(credential);
       this.send({
         id,

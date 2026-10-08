@@ -602,7 +602,7 @@ export class CodexProvider implements Provider {
     options?: SendChatOptions,
   ): Promise<string> {
     // sendChat streams nothing and runs no tools, so a retry duplicates nothing.
-    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages, options));
+    return this.runOnActiveAccount(attempt => this.sendChatOnActiveAccount(attempt, modelId, messages, options), options?.signal);
   }
 
   private async sendChatOnActiveAccount(
