@@ -162,6 +162,6 @@ contextBridge.exposeInMainWorld('assistant', {
     ipcRenderer.invoke('dictionary:candidate-update', id, input),
   usageDashboard: (query: { range: 'hour' | 'day' | 'week' | 'month'; tokenMode?: 'total' | 'input' | 'output' }) =>
     ipcRenderer.invoke('usage:dashboard', query),
-  generateTitle: (message: string, model: string, provider: string) => ipcRenderer.invoke('generate-title', message, model, provider),
+  generateTitle: (message: string) => ipcRenderer.invoke('generate-title', message),
   setThemeBackground: (isDark: boolean) => ipcRenderer.send('set-theme-background', isDark),
 });

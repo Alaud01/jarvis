@@ -46,7 +46,7 @@ import {
 import { ATTACHMENT_DIALOG_FILTERS, readAttachments } from '../attachmentService';
 import { getLocalVoiceModelStatus, installLocalVoiceModel } from '../localVoiceModelSetup';
 import { stopPythonService, startPythonService } from '../pythonService';
-import { ONE_OFF_MODEL_KEEP_ALIVE } from '../app/lifecycle';
+import { fallbackConversationTitle, requestConversationTitle, TITLE_MODEL, TITLE_PROVIDER } from '../conversationTitle';
 import { estimateTokenCount, getUsageDashboard, recordUsageEvent } from '../usageService';
 import type { UsageDashboardQuery } from '../../shared/usage';
 import type {
@@ -295,22 +295,13 @@ export function registerVoiceModelHandlers(): void {
 }
 
 export function registerGenerateTitleHandler(): void {
-  ipcMain.handle('generate-title', async (_event, message: string, model: string, providerId: string) => {
+  ipcMain.handle('generate-title', async (_event, message: string) => {
     try {
-      const provider = getProvider(providerId);
-      if (!provider) {
-        throw new Error(`Unknown provider: ${providerId}`);
-      }
-      const titleMessages = [
-        { role: 'system' as const, content: 'Generate a very short title (3-6 words) for a conversation that starts with the following message. Return ONLY the title, nothing else. No quotes, no punctuation at the end.' },
-        { role: 'user' as const, content: message },
-      ];
       const startedAtMs = Date.now();
-      const result = await provider.sendChat(model, titleMessages, { keepAlive: ONE_OFF_MODEL_KEEP_ALIVE });
-      const title = result.trim();
+      const { title, messages: titleMessages } = await requestConversationTitle(message, getProvider);
       recordUsageEvent({
-        model,
-        provider: providerId,
+        model: TITLE_MODEL,
+        provider: TITLE_PROVIDER,
         inputTokens: estimateTokenCount(titleMessages.map((m) => m.content).join('\n')),
         outputTokens: estimateTokenCount(title),
         generationMs: Math.max(1, Date.now() - startedAtMs),
@@ -319,8 +310,7 @@ export function registerGenerateTitleHandler(): void {
       return title;
     } catch (error) {
       console.error('Failed to generate title:', error);
-      const words = message.split(' ').slice(0, 5);
-      return words.join(' ') + (words.length < message.split(' ').length ? '...' : '');
+      return fallbackConversationTitle(message);
     }
   });
 }

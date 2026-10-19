@@ -321,7 +321,7 @@ const App: React.FC = () => {
     );
 
     if (messageIndex === 0) {
-      window.assistant.generateTitle(newText, selectedModel, selectedProvider)
+      window.assistant.generateTitle(newText)
         .then((title) => {
           setConversations(prev =>
             prev.map(c =>
@@ -453,7 +453,7 @@ const App: React.FC = () => {
       setConversations(prev => [newConversation, ...prev]);
       setCurrentConversationId(conversationId);
 
-      window.assistant.generateTitle(text, selectedModel, selectedProvider)
+      window.assistant.generateTitle(text)
         .then((title) => {
           setConversations(prev =>
             prev.map(c =>

@@ -213,7 +213,7 @@ declare global {
       dictionaryRuleDelete: (id: string) => Promise<PersonalDictionaryState>;
       dictionaryCandidateUpdate: (id: string, input: UpdateVocabularyCandidateInput) => Promise<PersonalDictionaryState>;
       usageDashboard: (query: UsageDashboardQuery) => Promise<UsageDashboardData>;
-      generateTitle: (message: string, model: string, provider: string) => Promise<string>;
+      generateTitle: (message: string) => Promise<string>;
       setThemeBackground: (isDark: boolean) => void;
     };
   }
